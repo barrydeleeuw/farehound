@@ -168,12 +168,15 @@ class Orchestrator:
 
         # Start community listeners as concurrent tasks
         if self.community_listener is not None:
-            await self.community_listener.start(callback=self.on_community_deal)
-            self._community_task = asyncio.create_task(
-                self.community_listener.run_until_disconnected()
-            )
-            self._community_task.add_done_callback(self._on_community_task_done)
-            logger.info("Telegram community listener started")
+            try:
+                await self.community_listener.start(callback=self.on_community_deal)
+                self._community_task = asyncio.create_task(
+                    self.community_listener.run_until_disconnected()
+                )
+                self._community_task.add_done_callback(self._on_community_task_done)
+                logger.info("Telegram community listener started")
+            except RuntimeError:
+                logger.warning("Telegram channel listener skipped (not authorized). RSS feeds still active.")
 
         if self.rss_listener is not None:
             await self.rss_listener.start(callback=self.on_community_deal)
