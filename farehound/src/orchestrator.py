@@ -243,6 +243,7 @@ class Orchestrator:
 
     async def poll_routes(self) -> None:
         logger.info("Starting poll cycle")
+        self._cycle_best_prices: dict[str, float] = {}  # reset per cycle
         loop = asyncio.get_running_loop()
 
         routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
@@ -715,8 +716,15 @@ class Orchestrator:
                 None, self.db.get_last_alerted_price, route.route_id
             )
 
-            # Rule 1: New low — price is lower than last alerted price
-            is_new_low = last_alerted is None or price < last_alerted
+            # Also check in-cycle tracker (prevents alerting €268 after already alerting €252)
+            cycle_best = self._cycle_best_prices.get(route.route_id)
+            effective_last = last_alerted
+            if cycle_best is not None:
+                if effective_last is None or cycle_best < effective_last:
+                    effective_last = cycle_best
+
+            # Rule 1: New low — price is lower than last alerted price (including this cycle)
+            is_new_low = effective_last is None or price < effective_last
 
             # Rule 2: Book now + low — Claude says book_now AND Google says price_level is low
             is_book_now_and_low = (
@@ -739,6 +747,10 @@ class Orchestrator:
             if should_alert:
                 deal.alert_sent = True
                 deal.alert_sent_at = now
+                # Track best alerted price this cycle
+                prev = self._cycle_best_prices.get(route.route_id)
+                if prev is None or price < prev:
+                    self._cycle_best_prices[route.route_id] = price
                 if inflection_msg and not is_new_low:
                     deal.reasoning = inflection_msg
             else:
@@ -758,11 +770,14 @@ class Orchestrator:
         if deal.alert_sent:
             airline = "Unknown"
             stops = 0
-            if best_flight:
-                flights = best_flight.get("flights", [])
-                if flights:
-                    airline = flights[0].get("airline", "Unknown")
-                stops = max(0, len(flights) - 1) if flights else 0
+            flight_data = best_flight or (snapshot.all_flights[0] if snapshot.all_flights else None)
+            if flight_data:
+                legs = flight_data.get("flights", [])
+                if legs:
+                    airline = legs[0].get("airline", "Unknown")
+                    stops = max(0, len(legs) - 1)
+                elif flight_data.get("airline"):
+                    airline = flight_data["airline"]
 
             deal_info = {
                 "deal_id": deal.deal_id,
