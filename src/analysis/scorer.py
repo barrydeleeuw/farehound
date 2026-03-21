@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import anthropic
 
@@ -33,6 +34,7 @@ the lowest in 90 days of observations IS a good deal even if error fares have \
 historically gone lower — the traveller can't wait forever for a unicorn."""
 
 _SCORE_PROMPT = """\
+TODAY: {today}
 ROUTE: {origin} → {destination}
 TRIP TYPE: {trip_type}
 TRAVEL DATES: {outbound_date} to {return_date} (±{date_flex} days flexible)
@@ -216,6 +218,7 @@ class DealScorer:
         passengers = getattr(route, "passengers", snapshot.passengers)
 
         return _SCORE_PROMPT.format(
+            today=datetime.now(UTC).strftime("%Y-%m-%d"),
             origin=origin,
             destination=destination,
             trip_type=trip_type,

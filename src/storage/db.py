@@ -195,6 +195,29 @@ class Database:
         )
         self._conn.commit()
 
+    def update_route(self, route_id: str, **fields) -> bool:
+        """Update specific fields on a route. Returns True if a row was updated."""
+        allowed = {
+            "origin", "destination", "trip_type", "earliest_departure",
+            "latest_return", "date_flex_days", "max_stops", "passengers",
+            "preferred_airlines", "notes", "active",
+        }
+        to_update = {k: v for k, v in fields.items() if k in allowed}
+        if not to_update:
+            return False
+        sets = ", ".join(f"{k} = ?" for k in to_update)
+        vals = [
+            _to_isoformat(v) if k in ("earliest_departure", "latest_return") else v
+            for k, v in to_update.items()
+        ]
+        vals.append(route_id)
+        cursor = self._conn.execute(
+            f"UPDATE routes SET {sets} WHERE route_id = ?",
+            vals,
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
     # --- Snapshots ---
 
     def insert_snapshot(self, snapshot: PriceSnapshot) -> None:

@@ -36,6 +36,47 @@ Today is {today}.
 
 Text: {user_text}"""
 
+_INTERPRET_SYSTEM = """\
+You are FareHound, a friendly personal flight deal assistant. The user is messaging you via Telegram.
+
+You help users:
+- Add new flight routes to monitor
+- Modify existing trips (change dates, destinations, passengers, stops)
+- Remove routes they no longer need
+- Check current prices on their monitored routes
+- Answer general travel questions
+
+Today is {today}.
+
+The user's home airport is {home_airport}.
+
+ACTIVE ROUTES:
+{routes_summary}
+
+CONVERSATION HISTORY:
+{history}
+
+Interpret the user's message and respond with JSON:
+{{
+  "intent": "add_trip" | "modify_trip" | "remove_trip" | "query_trips" | "query_prices" | "general_chat",
+  "parameters": {{...}},
+  "response_text": "your natural language response to the user"
+}}
+
+Intent-specific parameters:
+- add_trip: {{"destination": "...", "origin": "..." or null, "earliest_departure": "YYYY-MM-DD", "latest_return": "YYYY-MM-DD", "passengers": int, "max_stops": int, "notes": "..."}}
+- modify_trip: {{"route_id": "...", "changes": {{"earliest_departure": "...", "latest_return": "...", "passengers": int, ...}}}}
+- remove_trip: {{"route_id": "...", "confirm": true/false}}
+- query_trips: {{}}
+- query_prices: {{"route_id": "..." or null}}
+- general_chat: {{}}
+
+For general_chat, just set response_text to your helpful answer. No parameters needed.
+
+When the user refers to a destination by name (e.g. "Japan", "Mexico"), match it to the active route if one exists.
+When the user says "all of them" or similar, look at the conversation history to understand what they're referring to.
+If modifying a trip, include all the changed fields in parameters.changes — use YYYY-MM-DD for dates."""
+
 
 class TripBot:
     def __init__(
@@ -57,6 +98,7 @@ class TripBot:
         self._reload_callback = reload_callback
         self._offset: int = 0
         self._pending: dict[str, dict] = {}  # chat_id -> pending confirmation
+        self._conversation_history: dict[str, list[dict]] = {}  # chat_id -> [{role, text}]
         self._running = False
 
     async def run(self) -> None:
@@ -90,6 +132,19 @@ class TripBot:
             self._offset = updates[-1]["update_id"] + 1
         return updates
 
+    def _add_history(self, chat_id: str, role: str, text: str) -> None:
+        history = self._conversation_history.setdefault(chat_id, [])
+        history.append({"role": role, "text": text})
+        # Keep last 5 messages
+        if len(history) > 5:
+            self._conversation_history[chat_id] = history[-5:]
+
+    def _get_history_text(self, chat_id: str) -> str:
+        history = self._conversation_history.get(chat_id, [])
+        if not history:
+            return "(no prior messages)"
+        return "\n".join(f"{m['role']}: {m['text']}" for m in history)
+
     async def _handle_update(self, update: dict, client: httpx.AsyncClient) -> None:
         msg = update.get("message")
         if not msg:
@@ -97,42 +152,248 @@ class TripBot:
         text = (msg.get("text") or "").strip()
         chat_id = str(msg["chat"]["id"])
 
-        # Handle replies to clarification questions (not commands)
-        if not text.startswith("/"):
-            pending = self._pending.get(chat_id)
-            if pending and pending.get("action") == "clarify":
-                await self._handle_clarification_reply(text, chat_id, client)
+        if not text:
             return
 
-        cmd = text.split()[0].lower()
-        if cmd in ("/start", "/help"):
-            await self._handle_help(chat_id, client)
-        elif cmd == "/trips":
+        # Slash commands as shortcuts
+        if text.startswith("/"):
+            cmd = text.split()[0].lower()
+            if cmd in ("/start", "/help"):
+                await self._handle_help(chat_id, client)
+                return
+            elif cmd == "/trips":
+                await self._handle_trips(chat_id, client)
+                return
+            elif cmd == "/trip":
+                user_text = text[5:].strip()
+                if user_text:
+                    await self._handle_trip(user_text, chat_id, client)
+                else:
+                    await self._handle_trip("", chat_id, client)
+                return
+            elif cmd == "/remove":
+                await self._handle_remove(text[7:].strip(), chat_id, client)
+                return
+            elif cmd == "/yes":
+                await self._handle_yes(chat_id, client)
+                return
+            elif cmd == "/no":
+                await self._handle_no(chat_id, client)
+                return
+
+        # Non-command text: route through Claude for interpretation
+        self._add_history(chat_id, "user", text)
+        await self._interpret_message(text, chat_id, client)
+
+    async def _interpret_message(self, text: str, chat_id: str, client: httpx.AsyncClient) -> None:
+        loop = asyncio.get_running_loop()
+        routes = await loop.run_in_executor(None, self._db.get_active_routes)
+
+        from src.utils.airports import route_name
+
+        # Build routes summary
+        if routes:
+            lines = []
+            for r in routes:
+                name = route_name(r.origin, r.destination)
+                dates = ""
+                if r.earliest_departure:
+                    dates = f" ({r.earliest_departure}"
+                    if r.latest_return:
+                        dates += f" to {r.latest_return}"
+                    dates += ")"
+                lines.append(f"- {r.route_id}: {name}{dates}, {r.passengers} pax")
+            routes_summary = "\n".join(lines)
+        else:
+            routes_summary = "(no active routes)"
+
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        system_prompt = _INTERPRET_SYSTEM.format(
+            today=today,
+            home_airport=self._home_airport,
+            routes_summary=routes_summary,
+            history=self._get_history_text(chat_id),
+        )
+
+        try:
+            ai_client = anthropic.AsyncAnthropic(api_key=self._anthropic_key)
+            resp = await ai_client.messages.create(
+                model=self._anthropic_model,
+                max_tokens=512,
+                system=system_prompt,
+                messages=[{"role": "user", "content": text}],
+            )
+            raw = resp.content[0].text.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
+            result = json.loads(raw)
+        except Exception:
+            logger.exception("Failed to interpret message")
+            await self._send(client, chat_id, "Sorry, I didn't understand that. Try /help for commands.")
+            return
+
+        intent = result.get("intent", "general_chat")
+        params = result.get("parameters", {})
+        response_text = result.get("response_text", "")
+
+        if intent == "general_chat":
+            self._add_history(chat_id, "assistant", response_text)
+            await self._send(client, chat_id, response_text)
+
+        elif intent == "add_trip":
+            destination = params.get("destination")
+            if not destination:
+                self._add_history(chat_id, "assistant", response_text)
+                await self._send(client, chat_id, response_text)
+                return
+            origin = params.get("origin") or self._home_airport
+            earliest = params.get("earliest_departure", "")
+            latest = params.get("latest_return", "")
+            passengers = params.get("passengers", 2)
+            max_stops = params.get("max_stops", 1)
+            notes = params.get("notes") or ""
+
+            self._pending[chat_id] = {
+                "action": "add",
+                "origin": origin,
+                "destination": destination,
+                "earliest_departure": earliest,
+                "latest_return": latest,
+                "passengers": passengers,
+                "max_stops": max_stops,
+                "notes": notes,
+            }
+
+            stops_str = "direct only" if max_stops == 0 else f"max {max_stops} stop{'s' if max_stops > 1 else ''}"
+            msg = (
+                f"Add route: *{route_name(origin, destination)}*\n"
+                f"📅 {earliest} → {latest}\n"
+                f"👥 {passengers} pax | {stops_str}"
+            )
+            if notes:
+                msg += f"\n📝 {notes}"
+            msg += "\n\nReply /yes or /no"
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg)
+
+        elif intent == "modify_trip":
+            route_id = params.get("route_id")
+            changes = params.get("changes", {})
+            if not route_id or not changes:
+                self._add_history(chat_id, "assistant", response_text)
+                await self._send(client, chat_id, response_text)
+                return
+            # Verify route exists
+            matching = [r for r in routes if r.route_id == route_id]
+            if not matching:
+                msg = f"I couldn't find route `{route_id}`. Use /trips to see your routes."
+                self._add_history(chat_id, "assistant", msg)
+                await self._send(client, chat_id, msg)
+                return
+            r = matching[0]
+            self._pending[chat_id] = {
+                "action": "modify",
+                "route_id": route_id,
+                "changes": changes,
+            }
+            # Build a human-readable summary of changes
+            change_lines = []
+            for k, v in changes.items():
+                label = k.replace("_", " ").title()
+                change_lines.append(f"  {label}: {v}")
+            msg = (
+                f"Modify *{route_name(r.origin, r.destination)}*:\n"
+                + "\n".join(change_lines)
+                + "\n\nReply /yes or /no"
+            )
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg)
+
+        elif intent == "remove_trip":
+            route_id = params.get("route_id")
+            if not route_id:
+                self._add_history(chat_id, "assistant", response_text)
+                await self._send(client, chat_id, response_text)
+                return
+            matching = [r for r in routes if r.route_id == route_id]
+            if not matching:
+                msg = f"I couldn't find route `{route_id}`."
+                self._add_history(chat_id, "assistant", msg)
+                await self._send(client, chat_id, msg)
+                return
+            r = matching[0]
+            self._pending[chat_id] = {"action": "remove", "route_id": r.route_id}
+            msg = f"Remove *{route_name(r.origin, r.destination)}*? Reply /yes or /no"
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg)
+
+        elif intent == "query_trips":
             await self._handle_trips(chat_id, client)
-        elif cmd == "/trip":
-            await self._handle_trip(text[5:].strip(), chat_id, client)
-        elif cmd == "/remove":
-            await self._handle_remove(text[7:].strip(), chat_id, client)
-        elif cmd == "/yes":
-            await self._handle_yes(chat_id, client)
-        elif cmd == "/no":
-            await self._handle_no(chat_id, client)
+
+        elif intent == "query_prices":
+            route_id = params.get("route_id")
+            await self._handle_price_query(route_id, routes, chat_id, client)
+
+    async def _handle_price_query(
+        self, route_id: str | None, routes: list[Route], chat_id: str, client: httpx.AsyncClient
+    ) -> None:
+        from src.utils.airports import route_name
+
+        loop = asyncio.get_running_loop()
+
+        if route_id:
+            target_routes = [r for r in routes if r.route_id == route_id]
+        else:
+            target_routes = routes
+
+        if not target_routes:
+            msg = "No matching routes found. Use /trips to see your routes."
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg)
+            return
+
+        lines = []
+        for r in target_routes:
+            name = route_name(r.origin, r.destination)
+            cheapest = await loop.run_in_executor(None, self._db.get_cheapest_recent_snapshot, r.route_id)
+            history = await loop.run_in_executor(None, self._db.get_price_history, r.route_id)
+
+            if cheapest and cheapest.lowest_price:
+                price = f"€{float(cheapest.lowest_price):,.0f}"
+                line = f"*{name}*: {price}/pp"
+                if history and history.get("avg_price"):
+                    avg = history["avg_price"]
+                    diff = float(cheapest.lowest_price) - avg
+                    if diff < 0:
+                        line += f" (€{abs(diff):,.0f} below avg)"
+                    else:
+                        line += f" (€{diff:,.0f} above avg)"
+            else:
+                line = f"*{name}*: no prices yet"
+            lines.append(line)
+
+        msg = "\n".join(lines)
+        self._add_history(chat_id, "assistant", msg)
+        await self._send(client, chat_id, msg)
 
     async def _handle_help(self, chat_id: str, client: httpx.AsyncClient) -> None:
         await self._send(client, chat_id, (
             "🐕 *FareHound Bot*\n\n"
             "I monitor flight prices and alert you when deals are good.\n\n"
-            "*Commands:*\n"
-            "`/trip Tokyo, Oct 18 - Nov 8, 2 people`\n"
-            "  Add a route to monitor. I'll figure out the airports and dates.\n\n"
-            "`/trip Alicante, end of June, 2 weeks, direct only`\n"
-            "  You can say 'direct only' or 'max 2 stops'.\n\n"
-            "`/trips`\n"
-            "  List your active routes with latest prices.\n\n"
-            "`/remove Tokyo` or `/remove ams-nrt`\n"
-            "  Stop monitoring a route. Just `/remove` to see options.\n\n"
-            "I'll send you alerts when I find genuinely good deals — "
-            "not every price check, only new lows or confirmed bargains."
+            "Just talk to me naturally! For example:\n"
+            "  \"Track flights to Tokyo in October\"\n"
+            "  \"Push Mexico to February\"\n"
+            "  \"How's Japan looking?\"\n"
+            "  \"When's the best time to fly to Bali?\"\n\n"
+            "*Shortcuts:*\n"
+            "`/trip Tokyo, Oct 18 - Nov 8, 2 people` — add a route\n"
+            "`/trips` — list your routes with prices\n"
+            "`/remove Tokyo` — stop monitoring a route\n"
+            "`/yes` `/no` — confirm or cancel pending actions"
         ), parse_mode="Markdown")
 
     async def _handle_trip(self, user_text: str, chat_id: str, client: httpx.AsyncClient) -> None:
@@ -357,6 +618,28 @@ class TripBot:
                 await self._reload_callback()
 
             await self._send(client, chat_id, f"Route `{pending['route_id']}` removed.")
+
+        elif pending["action"] == "modify":
+            from src.utils.airports import route_name
+
+            route_id = pending["route_id"]
+            changes = pending["changes"]
+            updated = await loop.run_in_executor(
+                None, lambda: self._db.update_route(route_id, **changes)
+            )
+
+            if self._reload_callback:
+                await self._reload_callback()
+
+            if updated:
+                routes = await loop.run_in_executor(None, self._db.get_active_routes)
+                r = next((r for r in routes if r.route_id == route_id), None)
+                if r:
+                    await self._send(client, chat_id, f"Updated *{route_name(r.origin, r.destination)}*.")
+                else:
+                    await self._send(client, chat_id, f"Route `{route_id}` updated.")
+            else:
+                await self._send(client, chat_id, f"Could not update route `{route_id}`.")
 
     async def _handle_no(self, chat_id: str, client: httpx.AsyncClient) -> None:
         self._pending.pop(chat_id, None)

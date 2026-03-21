@@ -250,3 +250,244 @@ def test_deactivate_route(db):
 
     db.deactivate_route("ams_nrt")
     assert len(db.get_active_routes()) == 0
+
+
+# --- Conversational message interpretation ---
+
+@pytest.mark.asyncio
+async def test_natural_language_routed_to_interpret(bot):
+    """Non-command messages go through _interpret_message."""
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    interpret_result = json.dumps({
+        "intent": "general_chat",
+        "parameters": {},
+        "response_text": "The best time to fly to Japan is usually January or February.",
+    })
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text=interpret_result)]
+
+    with patch("src.bot.commands.anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_resp)
+        mock_cls.return_value = mock_client
+        await bot._handle_update(_make_update("when's the best time to fly to Japan?"), client)
+
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "Japan" in payload["text"]
+    assert "January" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_natural_language_add_trip(bot):
+    """Natural language 'track flights to Tokyo' triggers add_trip intent."""
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    interpret_result = json.dumps({
+        "intent": "add_trip",
+        "parameters": {
+            "destination": "NRT",
+            "earliest_departure": "2026-10-01",
+            "latest_return": "2026-10-15",
+            "passengers": 2,
+            "max_stops": 1,
+        },
+        "response_text": "I'll set up monitoring for Tokyo!",
+    })
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text=interpret_result)]
+
+    with patch("src.bot.commands.anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_resp)
+        mock_cls.return_value = mock_client
+        await bot._handle_update(_make_update("track flights to Tokyo in October"), client)
+
+    # Should have a pending add action
+    assert "42" in bot._pending
+    assert bot._pending["42"]["action"] == "add"
+    assert bot._pending["42"]["destination"] == "NRT"
+
+
+@pytest.mark.asyncio
+async def test_natural_language_modify_trip(bot, db):
+    """'Push Mexico to February' triggers modify_trip intent."""
+    route = Route(route_id="ams_mex", origin="AMS", destination="MEX", active=True,
+                  earliest_departure=date(2026, 1, 15), latest_return=date(2026, 1, 30))
+    db.upsert_route(route)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    interpret_result = json.dumps({
+        "intent": "modify_trip",
+        "parameters": {
+            "route_id": "ams_mex",
+            "changes": {
+                "earliest_departure": "2026-02-15",
+                "latest_return": "2026-02-28",
+            },
+        },
+        "response_text": "I'll push Mexico City to February.",
+    })
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text=interpret_result)]
+
+    with patch("src.bot.commands.anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_resp)
+        mock_cls.return_value = mock_client
+        await bot._handle_update(_make_update("push Mexico to February"), client)
+
+    # Should have a pending modify action
+    assert "42" in bot._pending
+    assert bot._pending["42"]["action"] == "modify"
+    assert bot._pending["42"]["route_id"] == "ams_mex"
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "/yes" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_yes_modifies_route(bot, db):
+    """Confirming a modify_trip pending action updates the route in DB."""
+    route = Route(route_id="ams_mex", origin="AMS", destination="MEX", active=True,
+                  earliest_departure=date(2026, 1, 15), latest_return=date(2026, 1, 30))
+    db.upsert_route(route)
+
+    bot._pending["42"] = {
+        "action": "modify",
+        "route_id": "ams_mex",
+        "changes": {
+            "earliest_departure": "2026-02-15",
+            "latest_return": "2026-02-28",
+        },
+    }
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_update("/yes"), client)
+
+    routes = db.get_active_routes()
+    assert len(routes) == 1
+    r = routes[0]
+    assert str(r.earliest_departure) == "2026-02-15"
+    assert str(r.latest_return) == "2026-02-28"
+
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "Updated" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_natural_language_query_prices(bot, db):
+    """'How's Japan looking?' triggers query_prices intent."""
+    route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
+    db.upsert_route(route)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    interpret_result = json.dumps({
+        "intent": "query_prices",
+        "parameters": {"route_id": "ams_nrt"},
+        "response_text": "",
+    })
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text=interpret_result)]
+
+    with patch("src.bot.commands.anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_resp)
+        mock_cls.return_value = mock_client
+        await bot._handle_update(_make_update("how's Japan looking?"), client)
+
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    # Should mention the route (no prices yet)
+    assert "Tokyo Narita" in payload["text"]
+
+
+# --- Conversation history ---
+
+def test_conversation_history_limit(bot):
+    """History is capped at 5 messages per chat."""
+    for i in range(8):
+        bot._add_history("42", "user", f"msg {i}")
+    history = bot._conversation_history["42"]
+    assert len(history) == 5
+    assert history[0]["text"] == "msg 3"  # oldest kept
+    assert history[-1]["text"] == "msg 7"  # newest
+
+
+def test_conversation_history_text_format(bot):
+    bot._add_history("42", "user", "hello")
+    bot._add_history("42", "assistant", "hi there")
+    text = bot._get_history_text("42")
+    assert "user: hello" in text
+    assert "assistant: hi there" in text
+
+
+def test_empty_history(bot):
+    text = bot._get_history_text("99")
+    assert "no prior messages" in text
+
+
+# --- update_route DB method ---
+
+def test_update_route(db):
+    route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True,
+                  earliest_departure=date(2026, 10, 1), latest_return=date(2026, 10, 15))
+    db.upsert_route(route)
+
+    updated = db.update_route("ams_nrt", earliest_departure="2026-11-01", latest_return="2026-11-15")
+    assert updated is True
+
+    routes = db.get_active_routes()
+    assert str(routes[0].earliest_departure) == "2026-11-01"
+    assert str(routes[0].latest_return) == "2026-11-15"
+
+
+def test_update_route_no_fields(db):
+    route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
+    db.upsert_route(route)
+
+    updated = db.update_route("ams_nrt", bogus_field="nope")
+    assert updated is False
+
+
+def test_update_route_nonexistent(db):
+    updated = db.update_route("nonexistent", passengers=3)
+    assert updated is False
+
+
+# --- Modify callback ---
+
+@pytest.mark.asyncio
+async def test_yes_modify_calls_reload_callback(db):
+    callback = AsyncMock()
+    bot = TripBot(
+        bot_token="123:ABC",
+        chat_id="-100999",
+        db=db,
+        anthropic_api_key="sk-test",
+        anthropic_model="claude-sonnet-4-20250514",
+        home_airport="AMS",
+        reload_callback=callback,
+    )
+    route = Route(route_id="ams_mex", origin="AMS", destination="MEX", active=True)
+    db.upsert_route(route)
+
+    bot._pending["42"] = {
+        "action": "modify",
+        "route_id": "ams_mex",
+        "changes": {"passengers": 3},
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_update("/yes"), client)
+    callback.assert_awaited_once()
+
+    routes = db.get_active_routes()
+    assert routes[0].passengers == 3
