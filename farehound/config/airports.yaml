@@ -1,9 +1,9 @@
 airports:
   - code: AMS
     name: Amsterdam Schiphol
-    transport_mode: train
-    transport_cost_eur: 12
-    transport_time_min: 45
+    transport_mode: Uber
+    transport_cost_eur: 45
+    transport_time_min: 30
     parking_cost_eur: null
     is_primary: true
   - code: BRU

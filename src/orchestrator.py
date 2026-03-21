@@ -293,13 +293,12 @@ class Orchestrator:
 
         logger.info("Polling %d active routes", len(routes))
 
-        # Process routes in parallel, but searches within a route are sequential
-        tasks = [self._poll_single_route(route) for route in routes]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for route, result in zip(routes, results):
-            if isinstance(result, Exception):
-                logger.error("Route %s failed: %s", route.route_id, result, exc_info=result)
+        # Process routes sequentially — SQLite can't handle concurrent access
+        for route in routes:
+            try:
+                await self._poll_single_route(route)
+            except Exception as exc:
+                logger.error("Route %s failed: %s", route.route_id, exc, exc_info=exc)
 
         self._first_run = False
         self._secondary_poll_counter += 1
