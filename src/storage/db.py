@@ -310,6 +310,34 @@ class Database:
                 [window_id, route_id, window_start, window_end, now, latest_price],
             )
 
+    def get_deals_since(self, route_id: str, since: datetime) -> list[Deal]:
+        result = self._conn.execute(
+            """
+            SELECT * FROM deals
+            WHERE route_id = ? AND created_at >= ?
+            ORDER BY created_at DESC
+            """,
+            [route_id, since],
+        )
+        columns = [desc[0] for desc in result.description]
+        return [Deal.from_row(row, columns) for row in result.fetchall()]
+
+    def get_latest_snapshot(self, route_id: str) -> PriceSnapshot | None:
+        result = self._conn.execute(
+            """
+            SELECT * FROM price_snapshots
+            WHERE route_id = ? AND lowest_price IS NOT NULL
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            [route_id],
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in result.description]
+        return PriceSnapshot.from_row(row, columns)
+
     # --- Alert Rules ---
 
     def get_alert_rules(self, route_id: str) -> list[AlertRule]:

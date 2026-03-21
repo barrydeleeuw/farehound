@@ -81,19 +81,19 @@ class HomeAssistantNotifier:
         origin = deal_info.get("origin", "???")
         dest = deal_info.get("destination", "???")
         price = deal_info.get("price", "?")
-        avg_price = deal_info.get("avg_price", "?")
+        score = deal_info.get("score")
+        reasoning = deal_info.get("reasoning", "")
         airline = deal_info.get("airline", "Unknown")
-        stops = deal_info.get("stops", 0)
         dates = deal_info.get("dates", "")
         search_url = deal_info.get("google_flights_url") or self._google_flights_url(
             deal_info
         )
 
-        title = f"✈️ Deal — {origin} → {dest} | €{price}"
-        message = (
-            f"{origin} → {dest} | {dates} | "
-            f"€{price} (avg: €{avg_price}) | {airline} | {stops} stop(s)"
-        )
+        score_str = f" ({score:.2f})" if score is not None else ""
+        title = f"✈️ Deal{score_str} — {origin} → {dest} | €{price}"
+        message = f"{airline} | {dates} | €{price}"
+        if reasoning:
+            message += f"\n{reasoning}"
 
         payload = {
             "title": title,
@@ -117,19 +117,19 @@ class HomeAssistantNotifier:
         origin = deal_info.get("origin", "???")
         dest = deal_info.get("destination", "???")
         price = deal_info.get("price", "?")
-        avg_price = deal_info.get("avg_price", "?")
+        score = deal_info.get("score")
+        reasoning = deal_info.get("reasoning", "")
         airline = deal_info.get("airline", "Unknown")
-        stops = deal_info.get("stops", 0)
         dates = deal_info.get("dates", "")
         booking_url = deal_info.get("booking_url") or deal_info.get(
             "google_flights_url"
         ) or self._google_flights_url(deal_info)
 
-        title = f"🔥 Error Fare — {origin} → {dest} | €{price}"
-        message = (
-            f"BOOK NOW — {origin} → {dest} | {dates} | "
-            f"€{price} (avg: €{avg_price}) | {airline} | {stops} stop(s)"
-        )
+        score_str = f" ({score:.2f})" if score is not None else ""
+        title = f"🔥 Error Fare{score_str} — {origin} → {dest} | €{price}"
+        message = f"BOOK NOW — {airline} | {dates} | €{price}"
+        if reasoning:
+            message += f"\n{reasoning}"
 
         payload = {
             "title": title,

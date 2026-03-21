@@ -55,10 +55,15 @@ class AnthropicConfig:
 class TravellerConfig:
     name: str
     home_airport: str = "AMS"
+    preferences: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> TravellerConfig:
-        return cls(name=d["name"], home_airport=d.get("home_airport", "AMS"))
+        return cls(
+            name=d["name"],
+            home_airport=d.get("home_airport", "AMS"),
+            preferences=d.get("preferences", []),
+        )
 
 
 @dataclass
@@ -121,13 +126,21 @@ class ScoringConfig:
     alert_threshold: float = 0.75
     watch_threshold: float = 0.50
     poll_interval_hours: int = 4
+    digest_time: tuple[int, int] = (8, 0)
 
     @classmethod
     def from_dict(cls, d: dict) -> ScoringConfig:
+        raw_time = d.get("digest_time", "08:00")
+        if isinstance(raw_time, str) and ":" in raw_time:
+            h, m = raw_time.split(":")
+            digest_time = (int(h), int(m))
+        else:
+            digest_time = (8, 0)
         return cls(
             alert_threshold=d.get("alert_threshold", 0.75),
             watch_threshold=d.get("watch_threshold", 0.50),
             poll_interval_hours=d.get("poll_interval_hours", 4),
+            digest_time=digest_time,
         )
 
 

@@ -10,6 +10,12 @@ anthropic:
 traveller:
   name: Barry
   home_airport: AMS
+  preferences:
+    - "Prefers connections through quality hubs (DOH, IST, SIN) over regional airports"
+    - "Values reasonable layover times (1.5-4 hours)"
+    - "Weekday evening or weekend departures preferred"
+    - "Values included checked baggage and decent legroom"
+    - "Avoid red-eye flights when possible"
 
 routes:
   - id: ams-nrt-oct

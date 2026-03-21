@@ -10,10 +10,11 @@ from uuid import uuid4
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts.homeassistant import HomeAssistantNotifier
+from src.analysis.scorer import DealScorer
 from src.apis.serpapi import SerpAPIClient, SerpAPIError, generate_date_windows
 from src.config import AppConfig, Route as ConfigRoute, load_config
 from src.storage.db import Database
-from src.storage.models import PollWindow, PriceSnapshot, Route as DBRoute
+from src.storage.models import Deal, PollWindow, PriceSnapshot, Route as DBRoute
 
 logger = logging.getLogger("farehound.orchestrator")
 
@@ -23,8 +24,10 @@ DEFAULT_TRIP_DURATION_DAYS = 14
 FULL_RESCAN_INTERVAL_DAYS = 7
 # Max windows per route for initial scan
 DEFAULT_MAX_WINDOWS = 4
-# Percentage drop below average that triggers an alert
+# Percentage drop below average that triggers an alert (used as pre-filter and static fallback)
 DROP_PERCENT_THRESHOLD = 0.15
+# Minimum snapshots before we have enough history to skip Claude scoring
+COLD_START_THRESHOLD = 5
 
 
 def _config_route_to_db(r: ConfigRoute) -> DBRoute:
@@ -57,6 +60,10 @@ class Orchestrator:
             base_url=config.alerts.base_url,
             token=config.alerts.token,
         )
+        self.scorer = DealScorer(
+            api_key=config.anthropic.api_key,
+            model=config.anthropic.model,
+        )
         self.scheduler = AsyncIOScheduler()
         self._first_run = True
         self._last_full_rescan: datetime | None = None
@@ -84,6 +91,17 @@ class Orchestrator:
             next_run_time=datetime.now(UTC),  # run immediately on start
         )
         logger.info("Scheduled polling every %d hours", interval_hours)
+
+        # Schedule daily digest
+        digest_hour, digest_minute = self.config.scoring.digest_time
+        self.scheduler.add_job(
+            self.send_daily_digest,
+            "cron",
+            hour=digest_hour,
+            minute=digest_minute,
+            id="daily_digest",
+        )
+        logger.info("Scheduled daily digest at %02d:%02d", digest_hour, digest_minute)
 
         # Register signal handlers
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -135,6 +153,64 @@ class Orchestrator:
 
         self._first_run = False
         logger.info("Poll cycle complete")
+
+    async def send_daily_digest(self) -> None:
+        logger.info("Preparing daily digest")
+        loop = asyncio.get_event_loop()
+
+        routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
+        if not routes:
+            logger.info("No active routes, skipping digest")
+            return
+
+        since = datetime.now(UTC) - timedelta(days=1)
+        summaries: list[dict] = []
+
+        for route in routes:
+            latest = await loop.run_in_executor(None, self.db.get_latest_snapshot, route.route_id)
+            if latest is None:
+                continue
+
+            # 7-day trend
+            history_7d = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 7)
+            history_now = float(latest.lowest_price) if latest.lowest_price else None
+            avg_7d = float(history_7d["avg_price"]) if history_7d.get("avg_price") else None
+
+            if history_now is not None and avg_7d is not None and avg_7d > 0:
+                diff = (history_now - avg_7d) / avg_7d
+                if diff < -0.03:
+                    trend = "down"
+                elif diff > 0.03:
+                    trend = "up"
+                else:
+                    trend = "stable"
+            else:
+                trend = ""
+
+            # Recent watch-level deals
+            recent_deals = await loop.run_in_executor(None, self.db.get_deals_since, route.route_id, since)
+            watch_deals = [d for d in recent_deals if d.urgency == "watch"]
+
+            summary: dict = {
+                "origin": route.origin,
+                "destination": route.destination,
+                "lowest_price": float(latest.lowest_price) if latest.lowest_price else None,
+                "trend": trend,
+            }
+
+            if watch_deals:
+                summary["watch_deals"] = len(watch_deals)
+
+            summaries.append(summary)
+
+        if not summaries:
+            logger.info("No route data for digest, skipping")
+            return
+
+        try:
+            await self.notifier.send_daily_digest(summaries)
+        except Exception:
+            logger.exception("Failed to send daily digest")
 
     async def _poll_single_route(self, route: DBRoute) -> None:
         loop = asyncio.get_event_loop()
@@ -286,63 +362,122 @@ class Orchestrator:
     ) -> None:
         loop = asyncio.get_event_loop()
 
-        # Get alert rules for this route
-        rules = await loop.run_in_executor(None, self.db.get_alert_rules, route.route_id)
-
-        # Get price history for percentage drop check
+        # Get price history for pre-filter and scoring context
         history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
         avg_price = history.get("avg_price")
+        sample_count = history.get("count", 0)
 
-        should_alert = False
-        reasons: list[str] = []
+        # Pre-filter: only score with Claude if price looks interesting
+        # (below 90-day avg, or cold start with < 5 snapshots)
+        is_cold_start = sample_count < COLD_START_THRESHOLD
+        is_below_avg = (
+            avg_price is not None
+            and float(avg_price) > 0
+            and price < float(avg_price)
+        )
 
-        # Check static threshold rules
-        for rule in rules:
-            if rule.rule_type == "price_below" and rule.threshold is not None:
-                if price < float(rule.threshold):
-                    should_alert = True
-                    reasons.append(f"Price {price} below threshold {rule.threshold}")
+        if not is_cold_start and not is_below_avg:
+            logger.debug(
+                "Route %s price %s not below avg %s, skipping scoring",
+                route.route_id, price, avg_price,
+            )
+            return
 
-        # Check percentage drop below 90-day average
+        # Score with Claude, fall back to static threshold on error
+        score_result = None
+        try:
+            score_result = await self.scorer.score_deal(
+                snapshot=snapshot,
+                route=route,
+                price_history=history,
+                traveller_name=self.config.traveller.name,
+                home_airport=self.config.traveller.home_airport,
+                traveller_preferences=self.config.traveller.preferences or None,
+            )
+            logger.info(
+                "Route %s scored: %.2f (%s) — %s",
+                route.route_id, score_result.score, score_result.urgency, score_result.reasoning,
+            )
+        except Exception:
+            logger.exception("Claude scoring failed for route %s, falling back to static threshold", route.route_id)
+            score_result = self._static_fallback(price, avg_price)
+
+        # Store deal record
+        now = datetime.now(UTC)
+        deal = Deal(
+            deal_id=uuid4().hex,
+            snapshot_id=snapshot.snapshot_id,
+            route_id=route.route_id,
+            score=Decimal(str(round(score_result.score, 2))),
+            urgency=score_result.urgency,
+            reasoning=score_result.reasoning,
+        )
+
+        # Determine action based on thresholds
+        alert_threshold = self.config.scoring.alert_threshold
+        watch_threshold = self.config.scoring.watch_threshold
+
+        if score_result.score >= alert_threshold:
+            deal.alert_sent = True
+            deal.alert_sent_at = now
+        elif score_result.score >= watch_threshold:
+            logger.info("Route %s is watch-level (%.2f), will include in digest", route.route_id, score_result.score)
+        else:
+            logger.info("Route %s scored below watch threshold (%.2f), skipping", route.route_id, score_result.score)
+
+        await loop.run_in_executor(None, self.db.insert_deal, deal)
+
+        # Send alert for book_now deals
+        if deal.alert_sent:
+            airline = "Unknown"
+            stops = 0
+            if best_flight:
+                flights = best_flight.get("flights", [])
+                if flights:
+                    airline = flights[0].get("airline", "Unknown")
+                stops = max(0, len(flights) - 1) if flights else 0
+
+            deal_info = {
+                "origin": route.origin,
+                "destination": route.destination,
+                "price": price,
+                "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
+                "airline": airline,
+                "stops": stops,
+                "dates": f"{snapshot.outbound_date} to {snapshot.return_date}",
+                "outbound_date": str(snapshot.outbound_date),
+                "return_date": str(snapshot.return_date),
+                "passengers": route.passengers,
+                "score": score_result.score,
+                "urgency": score_result.urgency,
+                "reasoning": score_result.reasoning,
+            }
+
+            try:
+                await self.notifier.send_deal_alert(deal_info)
+            except Exception:
+                logger.exception("Failed to send alert for route %s", route.route_id)
+
+    @staticmethod
+    def _static_fallback(price: float, avg_price: Decimal | None):
+        """Fallback scoring when Claude API is unavailable."""
+        from src.analysis.scorer import DealScore
+
         if avg_price is not None and float(avg_price) > 0:
             drop_pct = (float(avg_price) - price) / float(avg_price)
             if drop_pct > DROP_PERCENT_THRESHOLD:
-                should_alert = True
-                reasons.append(
-                    f"Price {price} is {drop_pct:.0%} below 90-day avg {float(avg_price):.0f}"
+                return DealScore(
+                    score=0.80,
+                    urgency="book_now",
+                    reasoning=f"Static fallback: price is {drop_pct:.0%} below 90-day average (Claude unavailable)",
+                    booking_window_hours=48,
                 )
-
-        if not should_alert:
-            return
-
-        logger.info("Alert triggered for %s: %s", route.route_id, "; ".join(reasons))
-
-        # Build alert info
-        airline = "Unknown"
-        stops = 0
-        if best_flight:
-            flights = best_flight.get("flights", [])
-            if flights:
-                airline = flights[0].get("airline", "Unknown")
-            stops = max(0, len(flights) - 1) if flights else 0
-
-        deal_info = {
-            "origin": route.origin,
-            "destination": route.destination,
-            "price": price,
-            "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
-            "airline": airline,
-            "stops": stops,
-            "dates": f"{snapshot.outbound_date} to {snapshot.return_date}",
-            "outbound_date": str(snapshot.outbound_date),
-            "return_date": str(snapshot.return_date),
-            "passengers": route.passengers,
-        }
-
-        try:
-            await self.notifier.send_deal_alert(deal_info)
-        except Exception:
-            logger.exception("Failed to send alert for route %s", route.route_id)
+        return DealScore(
+            score=0.40,
+            urgency="watch",
+            reasoning="Static fallback: price below average but not exceptional (Claude unavailable)",
+            booking_window_hours=72,
+        )
 
 
 async def main() -> None:
