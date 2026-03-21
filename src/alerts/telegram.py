@@ -4,6 +4,8 @@ import logging
 
 import httpx
 
+from src.utils.airports import route_name
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org"
@@ -63,8 +65,9 @@ class TelegramNotifier:
         search_url = deal_info.get("google_flights_url") or self._google_flights_url(deal_info)
 
         score_str = f" ({score:.2f})" if score is not None else ""
+        route = route_name(origin, dest)
         lines = [
-            f"✈️ *Deal{score_str}* — {origin} → {dest}",
+            f"✈️ *Deal{score_str}* — {route}",
             f"*€{price}* | {airline} | {dates}",
         ]
         if reasoning:
@@ -88,8 +91,9 @@ class TelegramNotifier:
         )
 
         score_str = f" ({score:.2f})" if score is not None else ""
+        route = route_name(origin, dest)
         lines = [
-            f"🔥 *Error Fare{score_str}* — {origin} → {dest}",
+            f"🔥 *Error Fare{score_str}* — {route}",
             f"*€{price}* | {airline} | {dates}",
             "BOOK NOW — these usually disappear fast!",
         ]
@@ -110,6 +114,6 @@ class TelegramNotifier:
             lowest = route.get("lowest_price", "—")
             trend = route.get("trend", "")
             trend_icon = {"down": "↓", "up": "↑", "stable": "→"}.get(trend, "")
-            lines.append(f"{origin}→{dest}: *€{lowest}* {trend_icon}")
+            lines.append(f"{route_name(origin, dest)}: *€{lowest}* {trend_icon}")
 
         await self._send_message("\n".join(lines))

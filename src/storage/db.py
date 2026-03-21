@@ -178,6 +178,13 @@ class Database:
         )
         self._conn.commit()
 
+    def deactivate_route(self, route_id: str) -> None:
+        self._conn.execute(
+            "UPDATE routes SET active = 0 WHERE route_id = ?",
+            [route_id],
+        )
+        self._conn.commit()
+
     # --- Snapshots ---
 
     def insert_snapshot(self, snapshot: PriceSnapshot) -> None:
@@ -391,6 +398,59 @@ class Database:
             return None
         columns = [desc[0] for desc in cursor.description]
         return PriceSnapshot.from_row(row, columns)
+
+    # --- Alert Dedup Helpers ---
+
+    def get_last_alerted_price(self, route_id: str) -> float | None:
+        """Return the lowest_price from the most recent deal where an alert was sent."""
+        row = self._conn.execute(
+            """
+            SELECT ps.lowest_price
+            FROM deals d
+            JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
+            WHERE d.route_id = ?
+              AND d.alert_sent = 1
+              AND ps.lowest_price IS NOT NULL
+            ORDER BY d.alert_sent_at DESC
+            LIMIT 1
+            """,
+            [route_id],
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def detect_price_inflection(self, route_id: str) -> tuple[bool, float | None]:
+        """Check if price was dropping for 3+ snapshots then ticked up.
+
+        Returns (inflection_detected, bottom_price).
+        """
+        cursor = self._conn.execute(
+            """
+            SELECT lowest_price
+            FROM price_snapshots
+            WHERE route_id = ?
+              AND lowest_price IS NOT NULL
+            ORDER BY observed_at DESC
+            LIMIT 5
+            """,
+            [route_id],
+        )
+        prices = [float(row[0]) for row in cursor.fetchall()]
+
+        # Need at least 4 snapshots: current (up-tick) + 3 consecutive drops before it
+        if len(prices) < 4:
+            return False, None
+
+        # prices[0] is most recent, prices[1] is previous, etc.
+        # Check: prices[0] > prices[1] (just ticked up)
+        if prices[0] <= prices[1]:
+            return False, None
+
+        # Check: prices[1] < prices[2] < prices[3] (was dropping for 3+ consecutive)
+        for i in range(1, len(prices) - 1):
+            if prices[i] >= prices[i + 1]:
+                return False, None
+
+        return True, prices[1]  # bottom is the previous snapshot
 
     # --- Alert Rules ---
 

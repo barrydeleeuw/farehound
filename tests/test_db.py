@@ -363,3 +363,141 @@ def test_get_recent_feedback_respects_limit(db, sample_route):
 
     feedback = db.get_recent_feedback(limit=3)
     assert len(feedback) == 3
+
+
+# --- get_last_alerted_price ---
+
+def test_get_last_alerted_price_none(db, sample_route):
+    db.upsert_route(sample_route)
+    assert db.get_last_alerted_price("ams-nrt") is None
+
+
+def test_get_last_alerted_price_returns_latest(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+
+    # First alerted deal at €500
+    snap1 = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now - timedelta(hours=2),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("500"),
+    )
+    db.insert_snapshot(snap1)
+    deal1 = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.85"), urgency="book_now",
+        alert_sent=True, alert_sent_at=now - timedelta(hours=2),
+    )
+    db.insert_deal(deal1)
+
+    # Second alerted deal at €450
+    snap2 = PriceSnapshot(
+        snapshot_id="s2", route_id="ams-nrt", observed_at=now - timedelta(hours=1),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("450"),
+    )
+    db.insert_snapshot(snap2)
+    deal2 = Deal(
+        deal_id="d2", snapshot_id="s2", route_id="ams-nrt",
+        score=Decimal("0.90"), urgency="book_now",
+        alert_sent=True, alert_sent_at=now - timedelta(hours=1),
+    )
+    db.insert_deal(deal2)
+
+    assert db.get_last_alerted_price("ams-nrt") == 450.0
+
+
+def test_get_last_alerted_price_ignores_non_alerted(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+
+    snap = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now,
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+    )
+    db.insert_snapshot(snap)
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.60"), urgency="watch",
+        alert_sent=False,
+    )
+    db.insert_deal(deal)
+
+    assert db.get_last_alerted_price("ams-nrt") is None
+
+
+# --- detect_price_inflection ---
+
+def test_detect_inflection_not_enough_data(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+
+    # Only 3 snapshots — need at least 4
+    for i, price in enumerate([420, 410, 400]):
+        snap = PriceSnapshot(
+            snapshot_id=f"s{i}", route_id="ams-nrt",
+            observed_at=now - timedelta(hours=3 - i),
+            source="serpapi_poll", passengers=2,
+            lowest_price=Decimal(str(price)),
+        )
+        db.insert_snapshot(snap)
+
+    detected, bottom = db.detect_price_inflection("ams-nrt")
+    assert detected is False
+    assert bottom is None
+
+
+def test_detect_inflection_price_still_dropping(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+
+    # Still dropping: 500, 480, 460, 440
+    for i, price in enumerate([500, 480, 460, 440]):
+        snap = PriceSnapshot(
+            snapshot_id=f"s{i}", route_id="ams-nrt",
+            observed_at=now - timedelta(hours=4 - i),
+            source="serpapi_poll", passengers=2,
+            lowest_price=Decimal(str(price)),
+        )
+        db.insert_snapshot(snap)
+
+    detected, bottom = db.detect_price_inflection("ams-nrt")
+    assert detected is False
+
+
+def test_detect_inflection_true(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+
+    # Dropping then uptick: 500, 480, 460, 470 (most recent)
+    prices = [500, 480, 460, 470]
+    for i, price in enumerate(prices):
+        snap = PriceSnapshot(
+            snapshot_id=f"s{i}", route_id="ams-nrt",
+            observed_at=now - timedelta(hours=len(prices) - i),
+            source="serpapi_poll", passengers=2,
+            lowest_price=Decimal(str(price)),
+        )
+        db.insert_snapshot(snap)
+
+    detected, bottom = db.detect_price_inflection("ams-nrt")
+    assert detected is True
+    assert bottom == 460.0
+
+
+def test_detect_inflection_no_uptick(db, sample_route):
+    """Flat at the bottom is not an inflection."""
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+
+    # 500, 480, 460, 460 — no uptick
+    prices = [500, 480, 460, 460]
+    for i, price in enumerate(prices):
+        snap = PriceSnapshot(
+            snapshot_id=f"s{i}", route_id="ams-nrt",
+            observed_at=now - timedelta(hours=len(prices) - i),
+            source="serpapi_poll", passengers=2,
+            lowest_price=Decimal(str(price)),
+        )
+        db.insert_snapshot(snap)
+
+    detected, bottom = db.detect_price_inflection("ams-nrt")
+    assert detected is False

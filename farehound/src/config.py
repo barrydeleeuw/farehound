@@ -296,8 +296,10 @@ def _translate_ha_options(opts: dict) -> dict:
             "enabled": True,
         }
 
-    # Merge config.yaml if it exists alongside HA options (routes, feeds, etc.)
+    # Merge config.yaml if it exists (check /data first, then /app for baked-in config)
     config_yaml = Path("/data/config.yaml")
+    if not config_yaml.exists():
+        config_yaml = Path("/app/config.yaml")
     if config_yaml.exists():
         yaml_data = yaml.safe_load(config_yaml.read_text()) or {}
         # config.yaml routes take precedence if HA options has none

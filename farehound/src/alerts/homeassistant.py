@@ -6,6 +6,8 @@ from urllib.parse import quote
 
 import httpx
 
+from src.utils.airports import route_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,7 +93,7 @@ class HomeAssistantNotifier:
         )
 
         score_str = f" ({score:.2f})" if score is not None else ""
-        title = f"✈️ Deal{score_str} — {origin} → {dest} | €{price}"
+        title = f"✈️ Deal{score_str} — {route_name(origin, dest)} | €{price}"
         message = f"{airline} | {dates} | €{price}"
         if reasoning:
             message += f"\n{reasoning}"
@@ -133,7 +135,7 @@ class HomeAssistantNotifier:
         ) or self._google_flights_url(deal_info)
 
         score_str = f" ({score:.2f})" if score is not None else ""
-        title = f"🔥 Error Fare{score_str} — {origin} → {dest} | €{price}"
+        title = f"🔥 Error Fare{score_str} — {route_name(origin, dest)} | €{price}"
         message = f"BOOK NOW — {airline} | {dates} | €{price}"
         if reasoning:
             message += f"\n{reasoning}"
@@ -190,14 +192,14 @@ class HomeAssistantNotifier:
             trend_icon = {"down": "↓ dropping", "up": "↑ rising", "stable": "→ stable"}.get(trend_raw, "")
 
             attributes = {
-                "route_name": f"{route.get('origin', '?')} → {route.get('destination', '?')}",
+                "route_name": route_name(route.get("origin", "?"), route.get("destination", "?")),
                 "price": price,
                 "trend": trend_icon,
                 "last_checked": route.get("last_checked", ""),
                 "currency": route.get("currency", "EUR"),
                 "deal_score": route.get("deal_score"),
                 "unit_of_measurement": route.get("currency", "EUR"),
-                "friendly_name": f"FareHound {route.get('origin', '?')}→{route.get('destination', '?')}",
+                "friendly_name": f"FareHound {route_name(route.get('origin', '?'), route.get('destination', '?'))}",
                 "icon": "mdi:airplane",
             }
 
@@ -232,7 +234,7 @@ class HomeAssistantNotifier:
             lowest = route.get("lowest_price", "—")
             trend = route.get("trend", "")
             trend_icon = {"down": "↓", "up": "↑", "stable": "→"}.get(trend, "")
-            lines.append(f"{origin}→{dest}: €{lowest} {trend_icon}")
+            lines.append(f"{route_name(origin, dest)}: €{lowest} {trend_icon}")
 
         title = f"✈️ FareHound Daily — {len(routes_summary)} route(s)"
         message = "\n".join(lines)

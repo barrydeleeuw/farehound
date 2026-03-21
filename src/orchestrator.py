@@ -15,6 +15,7 @@ from src.analysis.scorer import DealScorer
 from src.apis.community import CommunityListener, RSSListener
 from src.apis.community import CommunityFeedConfig as CommunityFeed
 from src.apis.serpapi import SerpAPIClient, SerpAPIError, VerificationResult, generate_date_windows
+from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
 from src.storage.db import Database
 from src.storage.models import Deal, PollWindow, PriceSnapshot, Route as DBRoute
@@ -107,6 +108,25 @@ class Orchestrator:
             ]
             self.rss_listener = RSSListener(feeds=feeds)
 
+        # Telegram bot for /trip commands (reuses alert bot token)
+        self.trip_bot: TripBot | None = None
+        self._trip_bot_task: asyncio.Task | None = None
+        if config.telegram_alerts is not None and config.telegram_alerts.enabled:
+            self.trip_bot = TripBot(
+                bot_token=config.telegram_alerts.bot_token,
+                chat_id=config.telegram_alerts.chat_id,
+                db=self.db,
+                anthropic_api_key=config.anthropic.api_key,
+                anthropic_model=config.anthropic.model,
+                home_airport=config.traveller.home_airport,
+                reload_callback=self.reload_routes,
+            )
+
+    async def reload_routes(self) -> None:
+        """Re-sync routes from DB so polling picks up bot-added/removed routes."""
+        logger.info("Reloading routes from database")
+        self._first_run = True
+
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
 
@@ -161,6 +181,12 @@ class Orchestrator:
             self._rss_task.add_done_callback(self._on_community_task_done)
             logger.info("RSS community listener started")
 
+        # Start TripBot for /trip commands
+        if self.trip_bot is not None:
+            self._trip_bot_task = asyncio.create_task(self.trip_bot.run())
+            self._trip_bot_task.add_done_callback(self._on_community_task_done)
+            logger.info("TripBot command handler started")
+
         self.scheduler.start()
         logger.info("Orchestrator started")
 
@@ -188,6 +214,8 @@ class Orchestrator:
             await self.community_listener.disconnect()
         if self.rss_listener is not None:
             self.rss_listener.stop()
+        if self.trip_bot is not None:
+            self.trip_bot.stop()
 
         self.scheduler.shutdown(wait=False)
         await self.serpapi.close()
@@ -537,9 +565,47 @@ class Orchestrator:
         alert_threshold = self.config.scoring.alert_threshold
         watch_threshold = self.config.scoring.watch_threshold
 
+        should_alert = False
+        inflection_msg: str | None = None
+
         if score_result.score >= alert_threshold:
-            deal.alert_sent = True
-            deal.alert_sent_at = now
+            # Smart dedup: decide whether this alert is meaningful
+            last_alerted = await loop.run_in_executor(
+                None, self.db.get_last_alerted_price, route.route_id
+            )
+
+            # Rule 1: New low — price is lower than last alerted price
+            is_new_low = last_alerted is None or price < last_alerted
+
+            # Rule 2: Book now + low — Claude says book_now AND Google says price_level is low
+            is_book_now_and_low = (
+                score_result.urgency == "book_now"
+                and snapshot.price_level == "low"
+            )
+
+            # Rule 3: Inflection detection — price was dropping then ticked up
+            inflection, bottom_price = await loop.run_in_executor(
+                None, self.db.detect_price_inflection, route.route_id
+            )
+            if inflection and bottom_price is not None:
+                inflection_msg = (
+                    f"Price bottomed out at €{bottom_price:.0f}"
+                    " — book now before it rises further."
+                )
+
+            should_alert = is_new_low or is_book_now_and_low or inflection
+
+            if should_alert:
+                deal.alert_sent = True
+                deal.alert_sent_at = now
+                if inflection_msg and not is_new_low:
+                    deal.reasoning = inflection_msg
+            else:
+                logger.info(
+                    "Route %s scored %.2f but deduped (last alerted at €%.0f, current €%.0f)",
+                    route.route_id, score_result.score,
+                    last_alerted or 0, price,
+                )
         elif score_result.score >= watch_threshold:
             logger.info("Route %s is watch-level (%.2f), will include in digest", route.route_id, score_result.score)
         else:
@@ -547,7 +613,7 @@ class Orchestrator:
 
         await loop.run_in_executor(None, self.db.insert_deal, deal)
 
-        # Send alert for book_now deals
+        # Send alert for deals that passed dedup
         if deal.alert_sent:
             airline = "Unknown"
             stops = 0
@@ -571,7 +637,7 @@ class Orchestrator:
                 "passengers": route.passengers,
                 "score": score_result.score,
                 "urgency": score_result.urgency,
-                "reasoning": score_result.reasoning,
+                "reasoning": inflection_msg or score_result.reasoning,
             }
 
             try:

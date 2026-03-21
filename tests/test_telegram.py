@@ -118,10 +118,10 @@ async def test_send_daily_digest_format(notifier):
         text = payload["text"]
         assert "FareHound Daily" in text
         assert "2 route(s)" in text
-        assert "AMS→NRT" in text
+        assert "Amsterdam → Tokyo Narita" in text
         assert "€485" in text
         assert "↓" in text
-        assert "AMS→IST" in text
+        assert "Amsterdam → Istanbul" in text
         assert "→" in text  # stable trend
 
 

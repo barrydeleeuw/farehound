@@ -46,7 +46,7 @@ async def test_send_deal_alert_includes_deal_id(notifier):
         call_args = mock_client.post.call_args
         payload = call_args.kwargs.get("json") or call_args[1].get("json")
         assert payload["data"]["tag"] == "farehound-deal-abc123"
-        assert "abc123" in payload["title"] or "AMS" in payload["title"]
+        assert "Amsterdam" in payload["title"] and "Tokyo Narita" in payload["title"]
 
 
 @pytest.mark.asyncio
@@ -153,7 +153,7 @@ async def test_update_sensors_payload(notifier):
         assert "sensor.farehound_ams_nrt_price" in url
         assert payload["state"] == "485.0"
         attrs = payload["attributes"]
-        assert attrs["route_name"] == "AMS → NRT"
+        assert attrs["route_name"] == "Amsterdam → Tokyo Narita"
         assert attrs["trend"] == "↓ dropping"
         assert attrs["icon"] == "mdi:airplane"
         assert attrs["unit_of_measurement"] == "EUR"
