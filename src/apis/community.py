@@ -4,7 +4,8 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from time import monotonic
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -246,7 +247,7 @@ class RSSListener:
         self._filter_origins: set[str] = set()
         for feed in feeds:
             self._filter_origins.update(o.upper() for o in feed.filter_origins)
-        self._seen_ids: set[str] = set()
+        self._seen_ids: dict[str, float] = {}  # entry_id -> timestamp (monotonic)
         self._callback: Callable[[dict], Awaitable[None]] | None = None
         self._running = False
 
@@ -275,6 +276,11 @@ class RSSListener:
                 logger.exception("RSS poll cycle failed")
 
     async def _poll(self, seed: bool = False) -> None:
+        # Prune seen IDs older than 7 days to prevent unbounded growth
+        _MAX_AGE = 7 * 24 * 3600  # 7 days in seconds
+        now = monotonic()
+        self._seen_ids = {k: v for k, v in self._seen_ids.items() if now - v < _MAX_AGE}
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             for feed_config in self.feeds:
                 if not feed_config.url:
@@ -288,7 +294,7 @@ class RSSListener:
                         entry_id = entry.get("id") or entry.get("link") or entry.get("title", "")
                         if entry_id in self._seen_ids:
                             continue
-                        self._seen_ids.add(entry_id)
+                        self._seen_ids[entry_id] = monotonic()
 
                         if seed:
                             continue

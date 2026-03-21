@@ -23,6 +23,8 @@ options:
   alert_threshold: 0.75
   traveller_name: ""
   home_airport: "AMS"
+  telegram_bot_token: ""
+  telegram_chat_id: ""
   routes: "[]"
 schema:
   serpapi_api_key: str
@@ -34,4 +36,6 @@ schema:
   alert_threshold: "float(0.0,1.0)"
   traveller_name: str?
   home_airport: str?
+  telegram_bot_token: str?
+  telegram_chat_id: str?
   routes: str?

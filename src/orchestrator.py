@@ -190,6 +190,7 @@ class Orchestrator:
             self.rss_listener.stop()
 
         self.scheduler.shutdown(wait=False)
+        await self.serpapi.close()
         self.db.close()
         logger.info("Shutdown complete")
 

@@ -94,6 +94,8 @@ class DealScorer:
             usage.input_tokens, usage.output_tokens,
         )
 
+        if not response.content:
+            raise ValueError("Empty response from Claude API")
         raw = response.content[0].text
         return self._parse_response(raw)
 

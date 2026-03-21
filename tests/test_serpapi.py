@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -127,16 +127,12 @@ async def test_search_flights_success():
         "booking_options": [],
     }
 
-    with patch("src.apis.serpapi.httpx.AsyncClient") as mock_client_cls:
-        mock_async_client = AsyncMock()
-        mock_async_client.get.return_value = mock_response
-        mock_async_client.__aenter__ = AsyncMock(return_value=mock_async_client)
-        mock_async_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_async_client
+    client._client = AsyncMock()
+    client._client.get.return_value = mock_response
 
-        result = await client.search_flights("AMS", "NRT", "2026-10-01", "2026-10-15")
-        assert len(result.best_flights) == 1
-        assert result.price_insights["lowest_price"] == 485
+    result = await client.search_flights("AMS", "NRT", "2026-10-01", "2026-10-15")
+    assert len(result.best_flights) == 1
+    assert result.price_insights["lowest_price"] == 485
 
 
 @pytest.mark.asyncio
@@ -146,15 +142,11 @@ async def test_search_flights_http_error():
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
 
-    with patch("src.apis.serpapi.httpx.AsyncClient") as mock_client_cls:
-        mock_async_client = AsyncMock()
-        mock_async_client.get.return_value = mock_response
-        mock_async_client.__aenter__ = AsyncMock(return_value=mock_async_client)
-        mock_async_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_async_client
+    client._client = AsyncMock()
+    client._client.get.return_value = mock_response
 
-        with pytest.raises(SerpAPIError, match="HTTP 500"):
-            await client.search_flights("AMS", "NRT", "2026-10-01")
+    with pytest.raises(SerpAPIError, match="HTTP 500"):
+        await client.search_flights("AMS", "NRT", "2026-10-01")
 
 
 @pytest.mark.asyncio
@@ -164,15 +156,11 @@ async def test_search_flights_api_error():
     mock_response.status_code = 200
     mock_response.json.return_value = {"error": "Invalid API key"}
 
-    with patch("src.apis.serpapi.httpx.AsyncClient") as mock_client_cls:
-        mock_async_client = AsyncMock()
-        mock_async_client.get.return_value = mock_response
-        mock_async_client.__aenter__ = AsyncMock(return_value=mock_async_client)
-        mock_async_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_async_client
+    client._client = AsyncMock()
+    client._client.get.return_value = mock_response
 
-        with pytest.raises(SerpAPIError, match="Invalid API key"):
-            await client.search_flights("AMS", "NRT", "2026-10-01")
+    with pytest.raises(SerpAPIError, match="Invalid API key"):
+        await client.search_flights("AMS", "NRT", "2026-10-01")
 
 
 # --- Rate limit warning ---

@@ -312,21 +312,24 @@ def _translate_ha_options(opts: dict) -> dict:
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
-    if path is None:
-        # HA add-on mode: /data/options.json
-        ha_options = Path("/data/options.json")
-        if ha_options.exists():
-            raw = _translate_ha_options(json.loads(ha_options.read_text()))
+    try:
+        if path is None:
+            # HA add-on mode: /data/options.json
+            ha_options = Path("/data/options.json")
+            if ha_options.exists():
+                raw = _translate_ha_options(json.loads(ha_options.read_text()))
+            else:
+                # Default: config.yaml in project root
+                default_path = Path(__file__).parent.parent / "config.yaml"
+                raw = yaml.safe_load(default_path.read_text())
         else:
-            # Default: config.yaml in project root
-            default_path = Path(__file__).parent.parent / "config.yaml"
-            raw = yaml.safe_load(default_path.read_text())
-    else:
-        p = Path(path)
-        if p.suffix == ".json":
-            raw = json.loads(p.read_text())
-        else:
-            raw = yaml.safe_load(p.read_text())
+            p = Path(path)
+            if p.suffix == ".json":
+                raw = json.loads(p.read_text())
+            else:
+                raw = yaml.safe_load(p.read_text())
+    except (json.JSONDecodeError, yaml.YAMLError) as e:
+        raise ValueError(f"Failed to parse config file: {e}") from e
 
     config = AppConfig.from_dict(raw)
     _validate(config)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -196,8 +196,9 @@ class Database:
         )
 
     def get_price_history(self, route_id: str, days: int = 90) -> dict:
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         row = self._conn.execute(
-            f"""
+            """
             SELECT
                 AVG(lowest_price) AS avg_price,
                 MIN(lowest_price) AS min_price,
@@ -205,10 +206,10 @@ class Database:
                 COUNT(*) AS sample_count
             FROM price_snapshots
             WHERE route_id = ?
-              AND observed_at >= now() - INTERVAL '{days} days'
+              AND observed_at >= ?
               AND lowest_price IS NOT NULL
             """,
-            [route_id],
+            [route_id, cutoff],
         ).fetchone()
         return {
             "avg_price": row[0],

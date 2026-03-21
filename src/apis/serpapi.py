@@ -40,6 +40,10 @@ class SerpAPIClient:
         self.api_key = api_key
         self.currency = currency
         self._calls_this_month: int = 0
+        self._client = httpx.AsyncClient(timeout=60.0)
+
+    async def close(self) -> None:
+        await self._client.aclose()
 
     async def search_flights(
         self,
@@ -86,8 +90,7 @@ class SerpAPIClient:
             origin, destination, outbound_date, return_date, passengers,
         )
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(SERPAPI_BASE_URL, params=params)
+        response = await self._client.get(SERPAPI_BASE_URL, params=params)
 
         self._calls_this_month += 1
 
