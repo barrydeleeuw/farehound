@@ -15,4 +15,6 @@ COPY app-config.yaml ./config.yaml
 COPY run.sh /run.sh
 RUN chmod +x /run.sh
 
-CMD ["/run.sh"]
+# Override s6-overlay entrypoint from HA base image
+ENTRYPOINT []
+CMD ["/bin/bash", "/run.sh"]
