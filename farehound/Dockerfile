@@ -1,9 +1,9 @@
-ARG BUILD_FROM
+ARG BUILD_FROM=debian:bookworm-slim
 FROM ${BUILD_FROM}
 
 WORKDIR /app
 
-# Install Python and jq on Debian base
+# Install Python and jq
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-venv jq && \
     rm -rf /var/lib/apt/lists/*
@@ -18,5 +18,4 @@ COPY app-config.yaml ./config.yaml
 COPY run.sh /run.sh
 RUN chmod +x /run.sh
 
-ENTRYPOINT []
 CMD ["/run.sh"]
