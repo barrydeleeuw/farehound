@@ -204,12 +204,67 @@ def _validate(config: AppConfig) -> None:
             raise ValueError(f"Route '{route.id}' must have at least 1 passenger")
 
 
+def _translate_ha_options(opts: dict) -> dict:
+    """Translate flat HA add-on options into the nested structure AppConfig expects."""
+    translated: dict = {
+        "serpapi": {
+            "api_key_env": "SERPAPI_API_KEY",
+            "currency": "EUR",
+        },
+        "anthropic": {
+            "api_key_env": "ANTHROPIC_API_KEY",
+        },
+        "traveller": {
+            "name": opts.get("traveller_name", "Traveller"),
+            "home_airport": opts.get("home_airport", "AMS"),
+        },
+        "alerts": {
+            "homeassistant": {
+                "notify_service": opts.get("ha_notify_service", "notify.mobile_app_phone"),
+            },
+        },
+        "scoring": {
+            "alert_threshold": opts.get("alert_threshold", 0.75),
+            "poll_interval_hours": opts.get("poll_interval_hours", 4),
+        },
+        "community_feeds": [],
+    }
+
+    # Routes: HA options stores as JSON list
+    if "routes" in opts:
+        routes = opts["routes"]
+        if isinstance(routes, str):
+            routes = json.loads(routes)
+        translated["routes"] = routes
+    else:
+        translated["routes"] = []
+
+    # Telegram config (optional)
+    if opts.get("telegram_api_id"):
+        translated["telegram"] = {
+            "api_id_env": "TELEGRAM_API_ID",
+            "api_hash_env": "TELEGRAM_API_HASH",
+        }
+
+    # Merge config.yaml if it exists alongside HA options (routes, feeds, etc.)
+    config_yaml = Path("/data/config.yaml")
+    if config_yaml.exists():
+        yaml_data = yaml.safe_load(config_yaml.read_text()) or {}
+        # config.yaml routes take precedence if HA options has none
+        if not translated["routes"] and "routes" in yaml_data:
+            translated["routes"] = yaml_data["routes"]
+        if not translated["community_feeds"] and "community_feeds" in yaml_data:
+            translated["community_feeds"] = yaml_data["community_feeds"]
+
+    return translated
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     if path is None:
         # HA add-on mode: /data/options.json
         ha_options = Path("/data/options.json")
         if ha_options.exists():
-            raw = json.loads(ha_options.read_text())
+            raw = _translate_ha_options(json.loads(ha_options.read_text()))
         else:
             # Default: config.yaml in project root
             default_path = Path(__file__).parent.parent / "config.yaml"

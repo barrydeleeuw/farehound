@@ -54,6 +54,8 @@ class Orchestrator:
         )
         self.notifier = HomeAssistantNotifier(
             notify_service=config.alerts.notify_service,
+            base_url=config.alerts.base_url,
+            token=config.alerts.token,
         )
         self.scheduler = AsyncIOScheduler()
         self._first_run = True

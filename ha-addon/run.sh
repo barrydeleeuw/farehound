@@ -1,11 +1,8 @@
 #!/usr/bin/with-contenv bashio
 
-# Read add-on options
+# API keys (read from HA add-on options, exported for config.py env resolution)
 export SERPAPI_API_KEY=$(bashio::config 'serpapi_api_key')
 export ANTHROPIC_API_KEY=$(bashio::config 'anthropic_api_key')
-export HA_NOTIFY_SERVICE=$(bashio::config 'ha_notify_service')
-export POLL_INTERVAL_HOURS=$(bashio::config 'poll_interval_hours')
-export ALERT_THRESHOLD=$(bashio::config 'alert_threshold')
 
 # Optional Telegram credentials
 TELEGRAM_API_ID=$(bashio::config 'telegram_api_id')
@@ -22,7 +19,6 @@ export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
 export FAREHOUND_DATA_DIR="/data"
 
 bashio::log.info "Starting FareHound..."
-bashio::log.info "Poll interval: ${POLL_INTERVAL_HOURS}h | Alert threshold: ${ALERT_THRESHOLD}"
 
 # Graceful shutdown
 cleanup() {

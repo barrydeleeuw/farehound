@@ -21,6 +21,9 @@ options:
   ha_notify_service: "notify.mobile_app_phone"
   poll_interval_hours: 4
   alert_threshold: 0.75
+  traveller_name: ""
+  home_airport: "AMS"
+  routes: "[]"
 schema:
   serpapi_api_key: str
   anthropic_api_key: str
@@ -29,3 +32,6 @@ schema:
   ha_notify_service: str
   poll_interval_hours: "int(1,24)"
   alert_threshold: "float(0.0,1.0)"
+  traveller_name: str?
+  home_airport: str?
+  routes: str?

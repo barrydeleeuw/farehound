@@ -12,13 +12,24 @@ logger = logging.getLogger(__name__)
 class HomeAssistantNotifier:
     """Send notifications via the Home Assistant Supervisor REST API."""
 
-    def __init__(self, notify_service: str) -> None:
+    def __init__(
+        self,
+        notify_service: str,
+        base_url: str | None = None,
+        token: str | None = None,
+    ) -> None:
         # notify_service e.g. "notify.mobile_app_barry_phone"
         # We need just the part after "notify." for the API path
         self._full_service = notify_service
         self._service_name = notify_service.removeprefix("notify.")
-        self._base_url = os.environ.get("SUPERVISOR_URL", "http://supervisor/core")
-        self._token = os.environ.get("SUPERVISOR_TOKEN", "")
+        self._base_url = (
+            base_url
+            or os.environ.get("SUPERVISOR_URL", "http://supervisor/core")
+        )
+        self._token = (
+            token
+            or os.environ.get("SUPERVISOR_TOKEN", "")
+        )
 
     def _headers(self) -> dict[str, str]:
         return {
