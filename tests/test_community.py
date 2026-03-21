@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from src.apis.community import parse_deal_message
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.apis.community import CommunityFeedConfig, RSSListener, parse_deal_message
 
 
 # --- Route patterns ---
@@ -142,3 +146,154 @@ def test_parse_deal_preserves_case():
     assert result is not None
     assert result["origin"] == "AMS"
     assert result["destination"] == "NRT"
+
+
+# --- RSSListener ---
+
+def test_rss_listener_init():
+    feeds = [
+        CommunityFeedConfig(channel="reddit", filter_origins=["AMS", "LHR"], url="https://example.com/rss"),
+        CommunityFeedConfig(channel="secret", filter_origins=[], url="https://example.com/rss2"),
+    ]
+    listener = RSSListener(feeds=feeds, poll_interval_seconds=600)
+    assert listener.poll_interval == 600
+    assert len(listener.feeds) == 2
+    assert "AMS" in listener._filter_origins
+    assert "LHR" in listener._filter_origins
+    assert listener._running is False
+
+
+def test_rss_listener_init_default_interval():
+    listener = RSSListener(feeds=[])
+    assert listener.poll_interval == 300
+
+
+@pytest.mark.asyncio
+async def test_rss_listener_start():
+    listener = RSSListener(feeds=[])
+    callback = AsyncMock()
+    await listener.start(callback)
+    assert listener._running is True
+    assert listener._callback is callback
+
+
+def test_rss_listener_stop():
+    listener = RSSListener(feeds=[])
+    listener._running = True
+    listener.stop()
+    assert listener._running is False
+
+
+def _make_mock_response(text):
+    resp = MagicMock()
+    resp.text = text
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _patch_httpx(mock_response):
+    """Context manager that patches httpx.AsyncClient for RSS polling."""
+    mock_async_client = AsyncMock()
+    mock_async_client.get = AsyncMock(return_value=mock_response)
+    mock_async_client.__aenter__ = AsyncMock(return_value=mock_async_client)
+    mock_async_client.__aexit__ = AsyncMock(return_value=False)
+    return patch("src.apis.community.httpx.AsyncClient", return_value=mock_async_client), mock_async_client
+
+
+@pytest.mark.asyncio
+async def test_rss_poll_seeds_seen_ids():
+    feed_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>Test</title>
+      <item><title>AMS to NRT €450</title><guid>deal1</guid></item>
+      <item><title>LHR to JFK $299</title><guid>deal2</guid></item>
+    </channel></rss>"""
+
+    feeds = [CommunityFeedConfig(channel="test", filter_origins=[], url="https://example.com/rss")]
+    listener = RSSListener(feeds=feeds)
+    callback = AsyncMock()
+    await listener.start(callback)
+
+    patcher, _ = _patch_httpx(_make_mock_response(feed_xml))
+    with patcher:
+        await listener._poll(seed=True)
+        callback.assert_not_called()
+        assert "deal1" in listener._seen_ids
+        assert "deal2" in listener._seen_ids
+
+
+@pytest.mark.asyncio
+async def test_rss_poll_new_entries_trigger_callback():
+    feed_seed = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>T</title>
+      <item><title>Old</title><guid>old1</guid></item>
+    </channel></rss>"""
+
+    feed_new = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>T</title>
+      <item><title>Old</title><guid>old1</guid></item>
+      <item><title>AMS → NRT €399 error fare</title><guid>new1</guid><summary>Great deal</summary></item>
+    </channel></rss>"""
+
+    feeds = [CommunityFeedConfig(channel="test", filter_origins=[], url="https://example.com/rss")]
+    listener = RSSListener(feeds=feeds)
+    callback = AsyncMock()
+    await listener.start(callback)
+
+    with patch("src.apis.community.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
+        mock_client.get = AsyncMock(return_value=_make_mock_response(feed_seed))
+        await listener._poll(seed=True)
+        callback.assert_not_called()
+
+        mock_client.get = AsyncMock(return_value=_make_mock_response(feed_new))
+        await listener._poll(seed=False)
+        assert callback.call_count == 1
+        deal_info = callback.call_args[0][0]
+        assert deal_info["origin"] == "AMS"
+        assert deal_info["destination"] == "NRT"
+        assert deal_info["community_flagged"] is True
+
+
+@pytest.mark.asyncio
+async def test_rss_seen_ids_dedup():
+    feed_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>T</title>
+      <item><title>AMS to NRT €450</title><guid>deal1</guid><summary>Deal</summary></item>
+    </channel></rss>"""
+
+    feeds = [CommunityFeedConfig(channel="test", filter_origins=[], url="https://example.com/rss")]
+    listener = RSSListener(feeds=feeds)
+    callback = AsyncMock()
+    await listener.start(callback)
+
+    patcher, _ = _patch_httpx(_make_mock_response(feed_xml))
+    with patcher:
+        await listener._poll(seed=False)
+        assert callback.call_count == 1
+        await listener._poll(seed=False)
+        assert callback.call_count == 1  # deduped
+
+
+@pytest.mark.asyncio
+async def test_rss_origin_filtering():
+    feed_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>T</title>
+      <item><title>LHR to JFK $299</title><guid>d1</guid><summary>London deal</summary></item>
+      <item><title>AMS to NRT €450</title><guid>d2</guid><summary>Amsterdam deal</summary></item>
+    </channel></rss>"""
+
+    feeds = [CommunityFeedConfig(channel="test", filter_origins=["AMS"], url="https://example.com/rss")]
+    listener = RSSListener(feeds=feeds)
+    callback = AsyncMock()
+    await listener.start(callback)
+
+    patcher, _ = _patch_httpx(_make_mock_response(feed_xml))
+    with patcher:
+        await listener._poll(seed=False)
+        assert callback.call_count == 1
+        deal_info = callback.call_args[0][0]
+        assert deal_info["origin"] == "AMS"

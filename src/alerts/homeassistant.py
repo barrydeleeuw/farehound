@@ -85,6 +85,7 @@ class HomeAssistantNotifier:
         reasoning = deal_info.get("reasoning", "")
         airline = deal_info.get("airline", "Unknown")
         dates = deal_info.get("dates", "")
+        deal_id = deal_info.get("deal_id", "")
         search_url = deal_info.get("google_flights_url") or self._google_flights_url(
             deal_info
         )
@@ -99,12 +100,17 @@ class HomeAssistantNotifier:
             "title": title,
             "message": message,
             "data": {
+                "tag": f"farehound-deal-{deal_id}" if deal_id else None,
                 "actions": [
                     {
                         "action": "URI",
                         "title": "Search Flights",
                         "uri": search_url,
-                    }
+                    },
+                    {
+                        "action": f"DISMISS_DEAL_{deal_id}",
+                        "title": "Not Interested",
+                    },
                 ],
             },
         }
@@ -121,6 +127,7 @@ class HomeAssistantNotifier:
         reasoning = deal_info.get("reasoning", "")
         airline = deal_info.get("airline", "Unknown")
         dates = deal_info.get("dates", "")
+        deal_id = deal_info.get("deal_id", "")
         booking_url = deal_info.get("booking_url") or deal_info.get(
             "google_flights_url"
         ) or self._google_flights_url(deal_info)
@@ -135,6 +142,7 @@ class HomeAssistantNotifier:
             "title": title,
             "message": message,
             "data": {
+                "tag": f"farehound-error-{deal_id}" if deal_id else None,
                 "ttl": 0,
                 "priority": "high",
                 "actions": [
@@ -142,13 +150,74 @@ class HomeAssistantNotifier:
                         "action": "URI",
                         "title": "Book Now",
                         "uri": booking_url,
-                    }
+                    },
+                    {
+                        "action": f"DISMISS_DEAL_{deal_id}",
+                        "title": "Not Interested",
+                    },
                 ],
             },
         }
 
         logger.info("Sending error fare alert: %s → %s @ €%s", origin, dest, price)
         await self._call_service(payload)
+
+    async def handle_notification_action(self, action: str, deal_id: str) -> None:
+        """Handle HA event callbacks for notification actions."""
+        if action.startswith("DISMISS_DEAL_"):
+            logger.info("Deal %s dismissed by user", deal_id)
+            return "dismissed"
+        elif action == "BOOK_NOW":
+            logger.info("Deal %s marked as booked by user", deal_id)
+            return "booked"
+        else:
+            logger.warning("Unknown notification action: %s", action)
+            return None
+
+    async def update_sensors(self, routes_summary: list[dict]) -> None:
+        """Create/update HA sensors for each route via POST /api/states/.
+
+        Each route gets a sensor: sensor.farehound_{route_id}_price
+        State = current lowest price. Attributes include trend, timestamps, etc.
+        """
+        for route in routes_summary:
+            route_id = route.get("route_id", "unknown")
+            entity_id = f"sensor.farehound_{route_id}_price"
+            price = route.get("lowest_price")
+            state = str(price) if price is not None else "unknown"
+
+            trend_raw = route.get("trend", "")
+            trend_icon = {"down": "↓ dropping", "up": "↑ rising", "stable": "→ stable"}.get(trend_raw, "")
+
+            attributes = {
+                "route_name": f"{route.get('origin', '?')} → {route.get('destination', '?')}",
+                "price": price,
+                "trend": trend_icon,
+                "last_checked": route.get("last_checked", ""),
+                "currency": route.get("currency", "EUR"),
+                "deal_score": route.get("deal_score"),
+                "unit_of_measurement": route.get("currency", "EUR"),
+                "friendly_name": f"FareHound {route.get('origin', '?')}→{route.get('destination', '?')}",
+                "icon": "mdi:airplane",
+            }
+
+            url = f"{self._base_url}/api/states/{entity_id}"
+            payload = {"state": state, "attributes": attributes}
+
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(url, json=payload, headers=self._headers())
+                    resp.raise_for_status()
+                    logger.debug("Updated sensor %s = %s", entity_id, state)
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "HA sensor update error %s for %s: %s",
+                    exc.response.status_code, entity_id, exc.response.text,
+                )
+            except (httpx.ConnectError, httpx.TimeoutException):
+                logger.error("Cannot reach HA to update sensor %s", entity_id)
+            except Exception:
+                logger.exception("Unexpected error updating sensor %s", entity_id)
 
     async def send_daily_digest(self, routes_summary: list[dict]) -> None:
         """Daily summary of all monitored routes."""

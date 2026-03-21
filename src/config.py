@@ -162,6 +162,29 @@ class CommunityFeedConfig:
 
 
 @dataclass
+class TelegramAlertConfig:
+    bot_token_env: str
+    chat_id_env: str
+    enabled: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> TelegramAlertConfig:
+        return cls(
+            bot_token_env=d["bot_token_env"],
+            chat_id_env=d["chat_id_env"],
+            enabled=d.get("enabled", False),
+        )
+
+    @property
+    def bot_token(self) -> str:
+        return _resolve_env(self.bot_token_env)
+
+    @property
+    def chat_id(self) -> str:
+        return _resolve_env(self.chat_id_env)
+
+
+@dataclass
 class TelegramConfig:
     api_id_env: str
     api_hash_env: str
@@ -189,6 +212,7 @@ class AppConfig:
     scoring: ScoringConfig
     community_feeds: list[CommunityFeedConfig]
     telegram: TelegramConfig | None = None
+    telegram_alerts: TelegramAlertConfig | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> AppConfig:
@@ -205,6 +229,9 @@ class AppConfig:
             ],
             telegram=TelegramConfig.from_dict(d["telegram"])
             if "telegram" in d
+            else None,
+            telegram_alerts=TelegramAlertConfig.from_dict(d["telegram_alerts"])
+            if "telegram_alerts" in d
             else None,
         )
 
@@ -254,11 +281,19 @@ def _translate_ha_options(opts: dict) -> dict:
     else:
         translated["routes"] = []
 
-    # Telegram config (optional)
+    # Telegram config (optional — community listener)
     if opts.get("telegram_api_id"):
         translated["telegram"] = {
             "api_id_env": "TELEGRAM_API_ID",
             "api_hash_env": "TELEGRAM_API_HASH",
+        }
+
+    # Telegram alerts (optional — bot notifications)
+    if opts.get("telegram_bot_token"):
+        translated["telegram_alerts"] = {
+            "bot_token_env": "TELEGRAM_BOT_TOKEN",
+            "chat_id_env": "TELEGRAM_CHAT_ID",
+            "enabled": True,
         }
 
     # Merge config.yaml if it exists alongside HA options (routes, feeds, etc.)
@@ -270,6 +305,8 @@ def _translate_ha_options(opts: dict) -> dict:
             translated["routes"] = yaml_data["routes"]
         if not translated["community_feeds"] and "community_feeds" in yaml_data:
             translated["community_feeds"] = yaml_data["community_feeds"]
+        if "telegram_alerts" not in translated and "telegram_alerts" in yaml_data:
+            translated["telegram_alerts"] = yaml_data["telegram_alerts"]
 
     return translated
 

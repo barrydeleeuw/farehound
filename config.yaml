@@ -90,6 +90,16 @@ community_feeds:
     channel: "@holidaypirates"
     filter_origins: [AMS, BRU, DUS, RTM]
 
+# Telegram Bot alerts (optional secondary alert channel)
+# To set up: message @BotFather on Telegram, create a bot, copy the token.
+# Then create a group/channel, add the bot, and get the chat_id
+# (send a message, then check https://api.telegram.org/bot<TOKEN>/getUpdates).
+# Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars to enable.
+telegram_alerts:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID
+  enabled: false
+
 telegram:
   api_id_env: TELEGRAM_API_ID
   api_hash_env: TELEGRAM_API_HASH

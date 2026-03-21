@@ -10,6 +10,7 @@ from uuid import uuid4
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts.homeassistant import HomeAssistantNotifier
+from src.alerts.telegram import TelegramNotifier
 from src.analysis.scorer import DealScorer
 from src.apis.community import CommunityListener, RSSListener
 from src.apis.community import CommunityFeedConfig as CommunityFeed
@@ -66,6 +67,14 @@ class Orchestrator:
             api_key=config.anthropic.api_key,
             model=config.anthropic.model,
         )
+        # Telegram alert channel (optional)
+        self.telegram_notifier: TelegramNotifier | None = None
+        if config.telegram_alerts is not None and config.telegram_alerts.enabled:
+            self.telegram_notifier = TelegramNotifier(
+                bot_token=config.telegram_alerts.bot_token,
+                chat_id=config.telegram_alerts.chat_id,
+            )
+
         self.scheduler = AsyncIOScheduler()
         self._first_run = True
         self._last_full_rescan: datetime | None = None
@@ -211,6 +220,53 @@ class Orchestrator:
         self._first_run = False
         logger.info("Poll cycle complete")
 
+        # Update HA sensors with latest route data
+        await self._update_ha_sensors(routes)
+
+    async def _update_ha_sensors(self, routes: list[DBRoute]) -> None:
+        """Build routes_summary from latest snapshots and push to HA sensors."""
+        loop = asyncio.get_running_loop()
+        summaries: list[dict] = []
+
+        for route in routes:
+            latest = await loop.run_in_executor(None, self.db.get_latest_snapshot, route.route_id)
+            if latest is None:
+                continue
+
+            # 7-day trend
+            history_7d = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 7)
+            price_now = float(latest.lowest_price) if latest.lowest_price else None
+            avg_7d = float(history_7d["avg_price"]) if history_7d.get("avg_price") else None
+
+            if price_now is not None and avg_7d is not None and avg_7d > 0:
+                diff = (price_now - avg_7d) / avg_7d
+                trend = "down" if diff < -0.03 else ("up" if diff > 0.03 else "stable")
+            else:
+                trend = ""
+
+            # Latest deal score
+            since = datetime.now(UTC) - timedelta(days=1)
+            recent_deals = await loop.run_in_executor(None, self.db.get_deals_since, route.route_id, since)
+            deal_score = float(recent_deals[0].score) if recent_deals else None
+
+            summaries.append({
+                "route_id": route.route_id,
+                "origin": route.origin,
+                "destination": route.destination,
+                "lowest_price": price_now,
+                "currency": latest.currency or "EUR",
+                "trend": trend,
+                "last_checked": latest.observed_at.isoformat() if latest.observed_at else "",
+                "deal_score": deal_score,
+            })
+
+        if summaries:
+            try:
+                await self.notifier.update_sensors(summaries)
+                logger.info("Updated %d HA sensors", len(summaries))
+            except Exception:
+                logger.exception("Failed to update HA sensors")
+
     async def send_daily_digest(self) -> None:
         logger.info("Preparing daily digest")
         loop = asyncio.get_running_loop()
@@ -266,6 +322,8 @@ class Orchestrator:
 
         try:
             await self.notifier.send_daily_digest(summaries)
+            if self.telegram_notifier:
+                await self.telegram_notifier.send_daily_digest(summaries)
         except Exception:
             logger.exception("Failed to send daily digest")
 
@@ -440,6 +498,9 @@ class Orchestrator:
             )
             return
 
+        # Fetch past feedback for scoring calibration
+        feedback = await loop.run_in_executor(None, self.db.get_recent_feedback)
+
         # Score with Claude, fall back to static threshold on error
         score_result = None
         try:
@@ -450,6 +511,7 @@ class Orchestrator:
                 traveller_name=self.config.traveller.name,
                 home_airport=self.config.traveller.home_airport,
                 traveller_preferences=self.config.traveller.preferences or None,
+                past_feedback=feedback or None,
             )
             logger.info(
                 "Route %s scored: %.2f (%s) — %s",
@@ -495,6 +557,7 @@ class Orchestrator:
                 stops = max(0, len(flights) - 1) if flights else 0
 
             deal_info = {
+                "deal_id": deal.deal_id,
                 "origin": route.origin,
                 "destination": route.destination,
                 "price": price,
@@ -512,6 +575,8 @@ class Orchestrator:
 
             try:
                 await self.notifier.send_deal_alert(deal_info)
+                if self.telegram_notifier:
+                    await self.telegram_notifier.send_deal_alert(deal_info)
             except Exception:
                 logger.exception("Failed to send alert for route %s", route.route_id)
 
@@ -663,6 +728,9 @@ class Orchestrator:
                 )
                 return
 
+        # Fetch past feedback for scoring calibration
+        community_feedback = await loop.run_in_executor(None, self.db.get_recent_feedback)
+
         score_result = None
         try:
             score_result = await self.scorer.score_deal(
@@ -673,6 +741,7 @@ class Orchestrator:
                 traveller_name=self.config.traveller.name,
                 home_airport=self.config.traveller.home_airport,
                 traveller_preferences=self.config.traveller.preferences or None,
+                past_feedback=community_feedback or None,
             )
             logger.info(
                 "Community deal scored: %.2f (%s) — %s",
@@ -681,7 +750,9 @@ class Orchestrator:
         except Exception:
             logger.exception("Claude scoring failed for community deal, sending price-only alert")
             # Fallback: send price-only alert without scoring
+            fallback_deal_id = uuid4().hex
             fallback_info = {
+                "deal_id": fallback_deal_id,
                 "origin": origin,
                 "destination": destination,
                 "price": actual_price,
@@ -695,11 +766,13 @@ class Orchestrator:
             }
             try:
                 await self.notifier.send_error_fare_alert(fallback_info)
+                if self.telegram_notifier:
+                    await self.telegram_notifier.send_error_fare_alert(fallback_info)
             except Exception:
                 logger.exception("Failed to send fallback error fare alert")
             # Still store the deal
             deal = Deal(
-                deal_id=uuid4().hex,
+                deal_id=fallback_deal_id,
                 snapshot_id=snapshot.snapshot_id,
                 route_id=route.route_id,
                 score=Decimal("0.70"),
@@ -739,6 +812,7 @@ class Orchestrator:
                 stops = max(0, len(flights_list) - 1) if flights_list else 0
 
             alert_info = {
+                "deal_id": deal.deal_id,
                 "origin": origin,
                 "destination": destination,
                 "price": actual_price,
@@ -757,6 +831,8 @@ class Orchestrator:
 
             try:
                 await self.notifier.send_error_fare_alert(alert_info)
+                if self.telegram_notifier:
+                    await self.telegram_notifier.send_error_fare_alert(alert_info)
             except Exception:
                 logger.exception("Failed to send error fare alert for %s", route.route_id)
         else:

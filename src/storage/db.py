@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS deals (
     alert_sent        BOOLEAN DEFAULT false,
     alert_sent_at     TIMESTAMP,
     booked            BOOLEAN DEFAULT false,
+    feedback          VARCHAR,
     created_at        TIMESTAMP DEFAULT now()
 );
 
@@ -238,8 +239,8 @@ class Database:
             """
             INSERT INTO deals (
                 deal_id, snapshot_id, route_id, score, urgency,
-                reasoning, booking_url, alert_sent, alert_sent_at, booked
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reasoning, booking_url, alert_sent, alert_sent_at, booked, feedback
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 deal.deal_id,
@@ -252,8 +253,34 @@ class Database:
                 deal.alert_sent,
                 deal.alert_sent_at,
                 deal.booked,
+                deal.feedback,
             ],
         )
+
+    def update_deal_feedback(self, deal_id: str, feedback: str) -> None:
+        self._conn.execute(
+            "UPDATE deals SET feedback = ? WHERE deal_id = ?",
+            [feedback, deal_id],
+        )
+
+    def get_recent_feedback(self, limit: int = 20) -> list[dict]:
+        result = self._conn.execute(
+            """
+            SELECT
+                d.deal_id, d.route_id, r.origin, r.destination,
+                ps.lowest_price AS price, d.score, d.urgency,
+                d.feedback, d.reasoning
+            FROM deals d
+            JOIN routes r ON d.route_id = r.route_id
+            LEFT JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
+            WHERE d.feedback IS NOT NULL
+            ORDER BY d.created_at DESC
+            LIMIT ?
+            """,
+            [limit],
+        )
+        columns = [desc[0] for desc in result.description]
+        return [dict(zip(columns, row)) for row in result.fetchall()]
 
     # --- Poll Windows ---
 

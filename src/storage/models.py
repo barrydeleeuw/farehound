@@ -181,6 +181,7 @@ class Deal:
     alert_sent: bool = False
     alert_sent_at: datetime | None = None
     booked: bool = False
+    feedback: str | None = None
     created_at: datetime | None = None
 
     def to_dict(self) -> dict:
@@ -195,6 +196,7 @@ class Deal:
             "alert_sent": self.alert_sent,
             "alert_sent_at": self.alert_sent_at,
             "booked": self.booked,
+            "feedback": self.feedback,
             "created_at": self.created_at,
         }
 
@@ -212,6 +214,7 @@ class Deal:
             alert_sent=d.get("alert_sent", False),
             alert_sent_at=d.get("alert_sent_at"),
             booked=d.get("booked", False),
+            feedback=d.get("feedback"),
             created_at=d.get("created_at"),
         )
 

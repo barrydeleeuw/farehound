@@ -1,0 +1,67 @@
+# FareHound Lovelace Dashboard Card
+#
+# How to add:
+# 1. Go to your HA dashboard → Edit → Add Card → Manual
+# 2. Paste the YAML below (starting from "type:")
+# 3. Sensors are auto-created by FareHound after the first poll cycle
+# 4. Replace sensor entity IDs if you customised route IDs in config.yaml
+#
+# Each route creates a sensor: sensor.farehound_{route_id}_price
+# The sensor state is the current lowest price.
+# Attributes: route_name, trend, last_checked, currency, deal_score
+
+# --- Option 1: Entities card (compact overview) ---
+type: entities
+title: "✈️ FareHound — Flight Prices"
+show_header_toggle: false
+entities:
+  # Add one entry per route. Replace route IDs with yours.
+  # Example for route "ams_nrt":
+  - entity: sensor.farehound_ams_nrt_price
+    name: AMS → NRT
+    icon: mdi:airplane
+    secondary_info: attribute
+    # Shows trend arrow in secondary info
+    attribute: trend
+
+  # Example for a second route "ams_hnd":
+  # - entity: sensor.farehound_ams_hnd_price
+  #   name: AMS → HND
+  #   icon: mdi:airplane
+  #   secondary_info: attribute
+  #   attribute: trend
+
+---
+# --- Option 2: Markdown card (richer detail) ---
+# Use this if you want more info per route in a single card.
+# Paste this as a separate card.
+
+type: markdown
+title: "✈️ FareHound — Price Trends"
+content: >
+  {% set routes = states.sensor | selectattr('entity_id', 'match', 'sensor.farehound_.*_price') | list %}
+  {% for s in routes %}
+  **{{ s.attributes.route_name | default(s.name) }}**
+  💰 {{ s.state }} {{ s.attributes.currency | default('EUR') }}
+  {{ s.attributes.trend | default('') }}
+  🕐 {{ s.attributes.last_checked | default('—') }}
+  {% if s.attributes.deal_score is defined and s.attributes.deal_score %}Score: {{ s.attributes.deal_score }}{% endif %}
+
+  {% endfor %}
+  {% if routes | length == 0 %}
+  _Waiting for first poll cycle…_
+  {% endif %}
+
+---
+# --- Option 3: History graph (price over time) ---
+# Shows price history from HA's recorder.
+# Requires the sensor to have been running for a few hours/days.
+
+type: history-graph
+title: "✈️ FareHound — 7-Day Price History"
+hours_to_show: 168
+entities:
+  - entity: sensor.farehound_ams_nrt_price
+    name: AMS → NRT
+  # - entity: sensor.farehound_ams_hnd_price
+  #   name: AMS → HND

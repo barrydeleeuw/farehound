@@ -32,8 +32,8 @@ TRAVELLER PREFERENCES:
 - Travelling with {passengers} passenger(s)
 {traveller_preferences_section}
 {preferred_airlines_section}
-
-Score this deal. The "reasoning" field will be shown as a phone notification, so keep it to 2-3 short sentences that help the traveller decide: mention the price vs. history, any connection/timing concerns, and whether to act now or wait. Be specific (cite numbers), not generic.
+{past_decisions_section}
+Score this deal. Use these past decisions to calibrate your scoring. The traveller's revealed preferences from actual booking behavior matter more than stated preferences when they conflict. The "reasoning" field will be shown as a phone notification, so keep it to 2-3 short sentences that help the traveller decide: mention the price vs. history, any connection/timing concerns, and whether to act now or wait. Be specific (cite numbers), not generic.
 
 Respond with JSON only:
 {{
@@ -73,10 +73,12 @@ class DealScorer:
         traveller_name: str = "Traveller",
         home_airport: str = "AMS",
         traveller_preferences: list[str] | None = None,
+        past_feedback: list[dict] | None = None,
     ) -> DealScore:
         prompt = self._build_prompt(
             snapshot, route, price_history, community_flagged,
             traveller_name, home_airport, traveller_preferences,
+            past_feedback,
         )
 
         response = await self._client.messages.create(
@@ -104,6 +106,7 @@ class DealScorer:
         traveller_name: str,
         home_airport: str,
         traveller_preferences: list[str] | None = None,
+        past_feedback: list[dict] | None = None,
     ) -> str:
         # Price history section
         if price_history.get("count", 0) > 0:
@@ -143,6 +146,21 @@ class DealScorer:
             f"- Preferred airlines: {', '.join(preferred)}" if preferred else ""
         )
 
+        # Past decisions section
+        past_decisions_section = ""
+        if past_feedback:
+            lines = ["", "PAST DECISIONS (recent scored deals):"]
+            for fb in past_feedback:
+                label = (fb.get("feedback") or "Ignored").capitalize()
+                route_str = f"{fb.get('origin', '?')}→{fb.get('destination', '?')}"
+                price = fb.get("price")
+                price_str = f" €{float(price):.0f}" if price is not None else ""
+                score = fb.get("score")
+                score_str = f" — score {float(score):.2f}" if score is not None else ""
+                lines.append(f"- {label}: {route_str}{price_str}{score_str}")
+            lines.append("")
+            past_decisions_section = "\n".join(lines)
+
         # Route fields — support both config Route and db Route
         origin = getattr(route, "origin", "")
         destination = getattr(route, "destination", "")
@@ -167,6 +185,7 @@ class DealScorer:
             home_airport=home_airport,
             traveller_preferences_section=traveller_preferences_section,
             preferred_airlines_section=preferred_airlines_section,
+            past_decisions_section=past_decisions_section,
         )
 
     def _parse_response(self, raw: str) -> DealScore:
