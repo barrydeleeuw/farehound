@@ -20,6 +20,7 @@ from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
 from src.storage.db import Database
 from src.storage.models import Deal, PollWindow, PriceSnapshot, Route as DBRoute
+from src.utils.airlines import airline_name
 
 logger = logging.getLogger("farehound.orchestrator")
 
@@ -396,6 +397,13 @@ class Orchestrator:
         # Decide which windows to poll
         windows_to_poll = await self._select_windows(route, windows)
 
+        # Poll secondary airports BEFORE main search so nearby comparison
+        # data is available when alerts fire (every other cycle to save API calls)
+        if self._secondary_poll_counter % 2 == 0:
+            await self._poll_secondary_airports(route, windows_to_poll)
+        else:
+            logger.info("Skipping secondary airport poll this cycle (counter=%d)", self._secondary_poll_counter)
+
         for outbound, return_dt in windows_to_poll:
             try:
                 await self._search_and_store(route, outbound, return_dt)
@@ -410,13 +418,6 @@ class Orchestrator:
                     route.route_id, outbound, return_dt, e,
                     exc_info=True,
                 )
-
-        # Poll secondary airports every other cycle to save API calls
-        if self._secondary_poll_counter % 2 != 0:
-            logger.info("Skipping secondary airport poll this cycle (counter=%d)", self._secondary_poll_counter)
-            return
-
-        await self._poll_secondary_airports(route, windows_to_poll)
 
     async def _select_windows(
         self, route: DBRoute, all_windows: list[tuple[date, date]]
@@ -738,7 +739,7 @@ class Orchestrator:
             )
             if inflection and bottom_price is not None:
                 inflection_msg = (
-                    f"Price bottomed out at €{bottom_price:.0f}"
+                    f"Price bottomed out at €{bottom_price:,.0f}"
                     " — book now before it rises further."
                 )
 
@@ -768,16 +769,17 @@ class Orchestrator:
 
         # Send alert for deals that passed dedup
         if deal.alert_sent:
-            airline = "Unknown"
+            airline_code = ""
             stops = 0
             flight_data = best_flight or (snapshot.all_flights[0] if snapshot.all_flights else None)
             if flight_data:
                 legs = flight_data.get("flights", [])
                 if legs:
-                    airline = legs[0].get("airline", "Unknown")
+                    airline_code = legs[0].get("airline", "")
                     stops = max(0, len(legs) - 1)
                 elif flight_data.get("airline"):
-                    airline = flight_data["airline"]
+                    airline_code = flight_data["airline"]
+            airline = airline_name(airline_code) if airline_code else "Unknown"
 
             deal_info = {
                 "deal_id": deal.deal_id,
@@ -975,18 +977,23 @@ class Orchestrator:
             logger.exception("Claude scoring failed for community deal, sending price-only alert")
             # Fallback: send price-only alert without scoring
             fallback_deal_id = uuid4().hex
+            fallback_airline_code = ""
+            if verification.flights:
+                fb_legs = verification.flights[0].get("flights", [])
+                if fb_legs:
+                    fallback_airline_code = fb_legs[0].get("airline", "")
             fallback_info = {
                 "deal_id": fallback_deal_id,
                 "origin": origin,
                 "destination": destination,
                 "price": actual_price,
-                "airline": "Unknown",
+                "airline": airline_name(fallback_airline_code) if fallback_airline_code else "Unknown",
                 "dates": f"{outbound_date} to {return_date}" if return_date else str(outbound_date),
                 "outbound_date": str(outbound_date),
                 "return_date": str(return_date) if return_date else "",
                 "passengers": route.passengers,
                 "booking_url": verification.booking_url,
-                "reasoning": f"Community error fare (scoring unavailable). Verified at €{actual_price}.",
+                "reasoning": f"Community error fare (scoring unavailable). Verified at €{float(actual_price):,.0f}.",
             }
             try:
                 await self.notifier.send_error_fare_alert(fallback_info)
@@ -1027,13 +1034,15 @@ class Orchestrator:
             deal.alert_sent_at = now
 
             # Extract airline info from best flight
-            airline = "Unknown"
+            airline_code = ""
             stops = 0
+            best_flight = verification.flights[0] if verification.flights else None
             if best_flight:
                 flights_list = best_flight.get("flights", [])
                 if flights_list:
-                    airline = flights_list[0].get("airline", "Unknown")
+                    airline_code = flights_list[0].get("airline", "")
                 stops = max(0, len(flights_list) - 1) if flights_list else 0
+            airline = airline_name(airline_code) if airline_code else "Unknown"
 
             alert_info = {
                 "deal_id": deal.deal_id,

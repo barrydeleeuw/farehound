@@ -393,6 +393,24 @@ class Database:
         columns = [desc[0] for desc in cursor.description]
         return [Deal.from_row(row, columns) for row in cursor.fetchall()]
 
+    def get_cheapest_recent_snapshot(self, route_id: str, days: int = 7) -> PriceSnapshot | None:
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        cursor = self._conn.execute(
+            """
+            SELECT * FROM price_snapshots
+            WHERE route_id = ? AND lowest_price IS NOT NULL
+              AND observed_at >= ?
+            ORDER BY lowest_price ASC
+            LIMIT 1
+            """,
+            [route_id, _to_isoformat(cutoff)],
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in cursor.description]
+        return PriceSnapshot.from_row(row, columns)
+
     def get_latest_snapshot(self, route_id: str) -> PriceSnapshot | None:
         cursor = self._conn.execute(
             """
@@ -534,6 +552,33 @@ class Database:
         result = dict(zip(columns, row))
         result["is_primary"] = True
         return result
+
+    def get_nearby_snapshots(self, route_id: str, primary_origin: str) -> list[dict]:
+        """Return latest snapshot per secondary airport for this route (last 7 days)."""
+        cutoff = _to_isoformat(datetime.now(UTC) - timedelta(days=7))
+        cursor = self._conn.execute(
+            """
+            SELECT
+                json_extract(search_params, '$.origin') AS origin,
+                lowest_price,
+                observed_at
+            FROM price_snapshots
+            WHERE route_id = ?
+              AND search_params IS NOT NULL
+              AND json_extract(search_params, '$.origin') IS NOT NULL
+              AND json_extract(search_params, '$.origin') != ?
+              AND lowest_price IS NOT NULL
+              AND observed_at >= ?
+            ORDER BY observed_at DESC
+            """,
+            [route_id, primary_origin, cutoff],
+        )
+        seen: dict[str, dict] = {}
+        for row in cursor.fetchall():
+            origin = row[0]
+            if origin not in seen:
+                seen[origin] = {"airport_code": origin, "lowest_price": row[1]}
+        return list(seen.values())
 
     def get_secondary_airports(self) -> list[dict]:
         cursor = self._conn.execute(

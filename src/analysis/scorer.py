@@ -136,9 +136,9 @@ class DealScorer:
         # Price history section
         if price_history.get("count", 0) > 0:
             price_history_section = (
-                f"- My observed average (last 90 days): €{price_history['avg_price']:.0f}\n"
-                f"- My observed minimum (last 90 days): €{price_history['min_price']:.0f}\n"
-                f"- My observed maximum (last 90 days): €{price_history['max_price']:.0f}\n"
+                f"- My observed average (last 90 days): €{price_history['avg_price']:,.0f}\n"
+                f"- My observed minimum (last 90 days): €{price_history['min_price']:,.0f}\n"
+                f"- My observed maximum (last 90 days): €{price_history['max_price']:,.0f}\n"
                 f"- Sample count: {price_history['count']}"
             )
         else:
@@ -152,7 +152,7 @@ class DealScorer:
                 parts.append(f"- Google Flights price level: {snapshot.price_level}")
             if snapshot.typical_low and snapshot.typical_high:
                 parts.append(
-                    f"- Google Flights typical range: €{snapshot.typical_low} - €{snapshot.typical_high}"
+                    f"- Google Flights typical range: €{float(snapshot.typical_low):,.0f} - €{float(snapshot.typical_high):,.0f}"
                 )
             if community_flagged:
                 parts.append("- Possible error fare: YES (community flagged)")
@@ -179,7 +179,7 @@ class DealScorer:
                 label = (fb.get("feedback") or "Ignored").capitalize()
                 route_str = f"{fb.get('origin', '?')}→{fb.get('destination', '?')}"
                 price = fb.get("price")
-                price_str = f" €{float(price):.0f}" if price is not None else ""
+                price_str = f" €{float(price):,.0f}" if price is not None else ""
                 score = fb.get("score")
                 score_str = f" — score {float(score):.2f}" if score is not None else ""
                 lines.append(f"- {label}: {route_str}{price_str}{score_str}")
@@ -202,7 +202,7 @@ class DealScorer:
                 net = alt.get("net_cost", 0)
                 savings = alt.get("savings", 0)
                 lines.append(
-                    f"- {name} ({mode}, €{t_cost:.0f} return, {hours:.1f}h): "
+                    f"- {name} ({mode}, €{t_cost:,.0f} return, {hours:.1f}h): "
                     f"€{fare:,.0f}/pp, €{net:,.0f} net → save €{savings:,.0f} vs {origin_name}"
                 )
             lines.append("")

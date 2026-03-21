@@ -223,7 +223,7 @@ class TripBot:
 
         lines = ["✈️ *Your Routes*\n"]
         for r in routes:
-            latest = await loop.run_in_executor(None, self._db.get_latest_snapshot, r.route_id)
+            cheapest = await loop.run_in_executor(None, self._db.get_cheapest_recent_snapshot, r.route_id)
 
             name = route_name(r.origin, r.destination)
             dates = ""
@@ -233,8 +233,16 @@ class TripBot:
                     dates += f" → {r.latest_return}"
 
             price_line = ""
-            if latest and latest.lowest_price:
-                price_line = f"💰 €{latest.lowest_price:.0f}"
+            if cheapest and cheapest.lowest_price:
+                price_line = f"💰 €{float(cheapest.lowest_price):,.0f}"
+                if cheapest.outbound_date and cheapest.return_date:
+                    out = cheapest.outbound_date
+                    ret = cheapest.return_date
+                    if hasattr(out, 'strftime'):
+                        out = out.strftime("%b %d")
+                    if hasattr(ret, 'strftime'):
+                        ret = ret.strftime("%b %d")
+                    price_line += f" ({out} → {ret})"
                 since = datetime.now(UTC) - timedelta(days=1)
                 deals = await loop.run_in_executor(None, self._db.get_deals_since, r.route_id, since)
                 if deals and deals[0].score:
@@ -251,22 +259,18 @@ class TripBot:
             )
 
             # Show cheapest nearby airport if available
-            nearby_routes = await loop.run_in_executor(
-                None, self._db.get_nearby_route_ids, r.route_id
-            ) if hasattr(self._db, "get_nearby_route_ids") else []
             best_alt = None
-            if nearby_routes and latest and latest.lowest_price:
-                primary_price = float(latest.lowest_price)
-                for nr_id in nearby_routes:
-                    nr_snap = await loop.run_in_executor(
-                        None, self._db.get_latest_snapshot, nr_id
-                    )
-                    if nr_snap and nr_snap.lowest_price:
-                        alt_price = float(nr_snap.lowest_price)
-                        if alt_price < primary_price:
-                            origin_code = nr_id.split("_")[0].upper()
-                            if best_alt is None or alt_price < best_alt[1]:
-                                best_alt = (airport_name(origin_code), alt_price)
+            if cheapest and cheapest.lowest_price and hasattr(self._db, "get_nearby_snapshots"):
+                nearby_snaps = await loop.run_in_executor(
+                    None, self._db.get_nearby_snapshots, r.route_id, r.origin
+                )
+                primary_price = float(cheapest.lowest_price)
+                for alt in nearby_snaps:
+                    alt_price = float(alt["lowest_price"])
+                    if alt_price < primary_price:
+                        origin_code = alt["airport_code"].upper()
+                        if best_alt is None or alt_price < best_alt[1]:
+                            best_alt = (airport_name(origin_code), alt_price)
             if best_alt:
                 route_block += f"\n  🟢 Cheaper from {best_alt[0]}: €{best_alt[1]:,.0f}/pp"
 

@@ -155,6 +155,62 @@ def test_get_latest_snapshot(db, sample_route):
     assert latest.snapshot_id == "s0"
 
 
+# --- get_cheapest_recent_snapshot ---
+
+def test_get_cheapest_recent_snapshot(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    # Insert 3 snapshots: most recent is NOT cheapest
+    for i, (price, hours_ago) in enumerate([(500, 1), (400, 24), (600, 48)]):
+        snap = PriceSnapshot(
+            snapshot_id=f"s{i}",
+            route_id="ams-nrt",
+            observed_at=now - timedelta(hours=hours_ago),
+            source="serpapi_poll",
+            passengers=2,
+            outbound_date=date(2026, 10, 1),
+            return_date=date(2026, 10, 15),
+            lowest_price=Decimal(str(price)),
+        )
+        db.insert_snapshot(snap)
+    cheapest = db.get_cheapest_recent_snapshot("ams-nrt", days=7)
+    assert cheapest is not None
+    assert cheapest.snapshot_id == "s1"  # €400, the cheapest
+    assert float(cheapest.lowest_price) == 400.0
+
+
+def test_get_cheapest_recent_snapshot_excludes_old(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    # Old cheap snapshot (10 days ago) should be excluded
+    old_snap = PriceSnapshot(
+        snapshot_id="s_old",
+        route_id="ams-nrt",
+        observed_at=now - timedelta(days=10),
+        source="serpapi_poll",
+        passengers=2,
+        lowest_price=Decimal("100"),
+    )
+    recent_snap = PriceSnapshot(
+        snapshot_id="s_recent",
+        route_id="ams-nrt",
+        observed_at=now - timedelta(hours=1),
+        source="serpapi_poll",
+        passengers=2,
+        lowest_price=Decimal("500"),
+    )
+    db.insert_snapshot(old_snap)
+    db.insert_snapshot(recent_snap)
+    cheapest = db.get_cheapest_recent_snapshot("ams-nrt", days=7)
+    assert cheapest is not None
+    assert cheapest.snapshot_id == "s_recent"
+
+
+def test_get_cheapest_recent_snapshot_none(db, sample_route):
+    db.upsert_route(sample_route)
+    assert db.get_cheapest_recent_snapshot("ams-nrt") is None
+
+
 def test_get_latest_snapshot_none(db, sample_route):
     db.upsert_route(sample_route)
     assert db.get_latest_snapshot("ams-nrt") is None

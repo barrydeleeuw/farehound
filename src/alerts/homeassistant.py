@@ -93,8 +93,8 @@ class HomeAssistantNotifier:
         )
 
         score_str = f" ({score:.2f})" if score is not None else ""
-        title = f"✈️ Deal{score_str} — {route_name(origin, dest)} | €{price}"
-        message = f"{airline} | {dates} | €{price}"
+        title = f"✈️ Deal{score_str} — {route_name(origin, dest)} | €{float(price):,.0f}"
+        message = f"{airline} | {dates} | €{float(price):,.0f}"
         if reasoning:
             message += f"\n{reasoning}"
 
@@ -135,8 +135,8 @@ class HomeAssistantNotifier:
         ) or self._google_flights_url(deal_info)
 
         score_str = f" ({score:.2f})" if score is not None else ""
-        title = f"🔥 Error Fare{score_str} — {route_name(origin, dest)} | €{price}"
-        message = f"BOOK NOW — {airline} | {dates} | €{price}"
+        title = f"🔥 Error Fare{score_str} — {route_name(origin, dest)} | €{float(price):,.0f}"
+        message = f"BOOK NOW — {airline} | {dates} | €{float(price):,.0f}"
         if reasoning:
             message += f"\n{reasoning}"
 
@@ -234,7 +234,7 @@ class HomeAssistantNotifier:
             lowest = route.get("lowest_price", "—")
             trend = route.get("trend", "")
             trend_icon = {"down": "↓", "up": "↑", "stable": "→"}.get(trend, "")
-            lines.append(f"{route_name(origin, dest)}: €{lowest} {trend_icon}")
+            lines.append(f"{route_name(origin, dest)}: €{float(lowest):,.0f} {trend_icon}" if lowest != "—" else f"{route_name(origin, dest)}: €— {trend_icon}")
 
         title = f"✈️ FareHound Daily — {len(routes_summary)} route(s)"
         message = "\n".join(lines)
