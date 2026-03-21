@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -40,6 +41,29 @@ class CommunityFeedConfig:
     filter_origins: list[str] = field(default_factory=list)
 
 
+def _normalize_date(date_str: str) -> str:
+    """Try to convert a date string to ISO format (YYYY-MM-DD). Returns original if unparseable."""
+    # Already ISO
+    if re.match(r"\d{4}-\d{2}-\d{2}$", date_str):
+        return date_str
+
+    # Try common formats: "Oct 8", "8 Oct", "October 8", "8 October"
+    now = date.today()
+    for fmt in ("%b %d", "%d %b", "%B %d", "%d %B", "%d/%m", "%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            # Inject current year for formats without year to avoid deprecation warning
+            if "%Y" not in fmt:
+                parsed = datetime.strptime(f"{date_str.strip()} {now.year}", f"{fmt} %Y")
+            else:
+                parsed = datetime.strptime(date_str.strip(), fmt)
+            if parsed.date() < now:
+                parsed = parsed.replace(year=now.year + 1)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return date_str
+
+
 def parse_deal_message(text: str) -> dict | None:
     """Extract deal info from a community message.
 
@@ -75,13 +99,14 @@ def parse_deal_message(text: str) -> dict | None:
         except ValueError:
             pass
 
-    # Extract dates
+    # Extract dates and normalize to ISO format
     date_matches = DATE_RE.findall(text)
     dates = []
     for match_groups in date_matches:
         date_str = next((g for g in match_groups if g), None)
         if date_str:
-            dates.append(date_str)
+            normalized = _normalize_date(date_str)
+            dates.append(normalized)
     if dates:
         result["dates"] = dates
 

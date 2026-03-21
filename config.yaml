@@ -50,6 +50,7 @@ scoring:
   alert_threshold: 0.75
   watch_threshold: 0.50
   poll_interval_hours: 4
+  digest_time: "08:00"
 
 community_feeds:
   - type: telegram_channel

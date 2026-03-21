@@ -6,6 +6,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import os
+
 import duckdb
 
 from src.storage.models import (
@@ -99,7 +101,10 @@ def _to_json(val) -> str | None:
 
 
 class Database:
-    def __init__(self, db_path: str | Path = "data/flights.duckdb"):
+    def __init__(self, db_path: str | Path | None = None):
+        if db_path is None:
+            data_dir = os.environ.get("FAREHOUND_DATA_DIR", "data")
+            db_path = Path(data_dir) / "flights.duckdb"
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = duckdb.connect(str(self._db_path))

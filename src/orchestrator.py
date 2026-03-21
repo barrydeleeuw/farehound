@@ -72,6 +72,7 @@ class Orchestrator:
 
         # Community listener (Layer 2) — only if Telegram is configured
         self.community_listener: CommunityListener | None = None
+        self._community_task: asyncio.Task | None = None
         if config.telegram is not None and config.community_feeds:
             feeds = [
                 CommunityFeed(channel=f.channel, filter_origins=f.filter_origins)
@@ -84,7 +85,7 @@ class Orchestrator:
             )
 
     async def start(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Init DB schema (sync)
         await loop.run_in_executor(None, self.db.init_schema)
@@ -125,7 +126,10 @@ class Orchestrator:
         # Start community listener as concurrent task
         if self.community_listener is not None:
             await self.community_listener.start(callback=self.on_community_deal)
-            asyncio.create_task(self.community_listener.run_until_disconnected())
+            self._community_task = asyncio.create_task(
+                self.community_listener.run_until_disconnected()
+            )
+            self._community_task.add_done_callback(self._on_community_task_done)
             logger.info("Community listener started")
 
         self.scheduler.start()
@@ -137,6 +141,13 @@ class Orchestrator:
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
             pass
+
+    def _on_community_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error("Community listener crashed: %s", exc, exc_info=exc)
 
     async def shutdown(self, sig: signal.Signals | None = None) -> None:
         if sig:
@@ -158,7 +169,7 @@ class Orchestrator:
 
     async def poll_routes(self) -> None:
         logger.info("Starting poll cycle")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
         if not routes:
@@ -180,7 +191,7 @@ class Orchestrator:
 
     async def send_daily_digest(self) -> None:
         logger.info("Preparing daily digest")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
         if not routes:
@@ -237,7 +248,7 @@ class Orchestrator:
             logger.exception("Failed to send daily digest")
 
     async def _poll_single_route(self, route: DBRoute) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         logger.info("Polling route %s: %s -> %s", route.route_id, route.origin, route.destination)
 
         if not route.earliest_departure or not route.latest_return:
@@ -278,7 +289,7 @@ class Orchestrator:
     async def _select_windows(
         self, route: DBRoute, all_windows: list[tuple[date, date]]
     ) -> list[tuple[date, date]]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # First run or weekly rescan: poll all windows
         needs_full_rescan = (
@@ -322,7 +333,7 @@ class Orchestrator:
         return selected or [all_windows[0]]
 
     async def _search_and_store(self, route: DBRoute, outbound: date, return_dt: date) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         result = await self.serpapi.search_flights(
             origin=route.origin,
@@ -384,7 +395,7 @@ class Orchestrator:
         price: float,
         best_flight: dict | None,
     ) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Get price history for pre-filter and scoring context
         history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
@@ -490,7 +501,7 @@ class Orchestrator:
         3. Score with Claude (community_flagged=True)
         4. Send error fare alert if score meets threshold
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         origin = (deal_info.get("origin") or "").upper()
         destination = (deal_info.get("destination") or "").upper()
         community_price = deal_info.get("price")
