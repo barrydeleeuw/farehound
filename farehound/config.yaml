@@ -1,0 +1,41 @@
+name: FareHound
+description: Personal flight fare monitor with AI-powered deal scoring
+version: 0.1.0
+slug: farehound
+url: https://github.com/your-repo/farehound
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: application
+boot: auto
+homeassistant_api: true
+ingress: false
+map:
+  - data:rw
+options:
+  serpapi_api_key: ""
+  anthropic_api_key: ""
+  telegram_api_id: ""
+  telegram_api_hash: ""
+  ha_notify_service: "notify.mobile_app_phone"
+  poll_interval_hours: 4
+  alert_threshold: 0.75
+  traveller_name: ""
+  home_airport: "AMS"
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  routes: "[]"
+schema:
+  serpapi_api_key: str
+  anthropic_api_key: str
+  telegram_api_id: str?
+  telegram_api_hash: str?
+  ha_notify_service: str
+  poll_interval_hours: "int(1,24)"
+  alert_threshold: "float(0.0,1.0)"
+  traveller_name: str?
+  home_airport: str?
+  telegram_bot_token: str?
+  telegram_chat_id: str?
+  routes: str?

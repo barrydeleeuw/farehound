@@ -1,0 +1,105 @@
+serpapi:
+  api_key_env: SERPAPI_API_KEY
+  currency: EUR
+  deep_search: true
+
+anthropic:
+  api_key_env: ANTHROPIC_API_KEY
+  model: claude-sonnet-4-20250514
+
+traveller:
+  name: Barry
+  home_airport: AMS
+  preferences:
+    - "Prefers connections through quality hubs (DOH, IST, SIN) over regional airports"
+    - "Values reasonable layover times (1.5-4 hours)"
+    - "Weekday evening or weekend departures preferred"
+    - "Values included checked baggage and decent legroom"
+    - "Avoid red-eye flights when possible"
+
+routes:
+  - id: ams-nrt-oct
+    origin: AMS
+    destination: NRT
+    trip_type: round_trip
+    earliest_departure: "2026-10-01"
+    latest_return: "2026-10-31"
+    date_flexibility_days: 3
+    max_stops: 1
+    passengers: 2
+    notes: "Japan trip — autumn colours"
+
+  - id: ams-ist-flex
+    origin: AMS
+    destination: IST
+    trip_type: round_trip
+    earliest_departure: "2026-06-01"
+    latest_return: "2026-09-30"
+    date_flexibility_days: 7
+    max_stops: 0
+    passengers: 2
+    notes: "Istanbul — flexible timing"
+
+alerts:
+  homeassistant:
+    notify_service: notify.mobile_app_barry_phone
+    base_url_env: HA_BASE_URL
+    token_env: HA_LONG_LIVED_TOKEN
+
+scoring:
+  alert_threshold: 0.75
+  watch_threshold: 0.50
+  poll_interval_hours: 4
+  digest_time: "08:00"
+
+community_feeds:
+  # RSS feeds — polled every 5 minutes, no auth needed
+  - type: rss
+    channel: "SecretFlying"
+    url: "https://www.secretflying.com/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "SecretFlying-ErrorFares"
+    url: "https://www.secretflying.com/posts/category/error-fare/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "TheFlightDeal"
+    url: "https://www.theflightdeal.com/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "r/cheapflights"
+    url: "https://www.reddit.com/r/cheapflights/new/.rss"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "r/flights"
+    url: "https://www.reddit.com/r/flights/new/.rss"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "r/TravelHacking"
+    url: "https://www.reddit.com/r/TravelHacking/new/.rss"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "r/Shoestring"
+    url: "https://www.reddit.com/r/Shoestring/new/.rss"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  # Telegram channels — real-time via Telethon
+  - type: telegram_channel
+    channel: "@trip4world"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: telegram_channel
+    channel: "@holidaypirates"
+    filter_origins: [AMS, BRU, DUS, RTM]
+
+# Telegram Bot alerts (optional secondary alert channel)
+# To set up: message @BotFather on Telegram, create a bot, copy the token.
+# Then create a group/channel, add the bot, and get the chat_id
+# (send a message, then check https://api.telegram.org/bot<TOKEN>/getUpdates).
+# Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars to enable.
+telegram_alerts:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID
+  enabled: false
+
+telegram:
+  api_id_env: TELEGRAM_API_ID
+  api_hash_env: TELEGRAM_API_HASH
