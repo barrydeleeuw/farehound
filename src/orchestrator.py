@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts.homeassistant import HomeAssistantNotifier
 from src.analysis.scorer import DealScorer
-from src.apis.community import CommunityListener
+from src.apis.community import CommunityListener, RSSListener
 from src.apis.community import CommunityFeedConfig as CommunityFeed
 from src.apis.serpapi import SerpAPIClient, SerpAPIError, VerificationResult, generate_date_windows
 from src.config import AppConfig, Route as ConfigRoute, load_config
@@ -70,19 +70,33 @@ class Orchestrator:
         self._first_run = True
         self._last_full_rescan: datetime | None = None
 
-        # Community listener (Layer 2) — only if Telegram is configured
+        # Community listeners (Layer 2)
         self.community_listener: CommunityListener | None = None
         self._community_task: asyncio.Task | None = None
-        if config.telegram is not None and config.community_feeds:
+        self.rss_listener: RSSListener | None = None
+        self._rss_task: asyncio.Task | None = None
+
+        # Split feeds by type
+        telegram_feeds = [f for f in config.community_feeds if f.type == "telegram_channel"]
+        rss_feeds = [f for f in config.community_feeds if f.type == "rss"]
+
+        if config.telegram is not None and telegram_feeds:
             feeds = [
                 CommunityFeed(channel=f.channel, filter_origins=f.filter_origins)
-                for f in config.community_feeds
+                for f in telegram_feeds
             ]
             self.community_listener = CommunityListener(
                 api_id=config.telegram.api_id,
                 api_hash=config.telegram.api_hash,
                 feeds=feeds,
             )
+
+        if rss_feeds:
+            feeds = [
+                CommunityFeed(channel=f.channel, filter_origins=f.filter_origins, url=f.url)
+                for f in rss_feeds
+            ]
+            self.rss_listener = RSSListener(feeds=feeds)
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -123,14 +137,20 @@ class Orchestrator:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.shutdown(s)))
 
-        # Start community listener as concurrent task
+        # Start community listeners as concurrent tasks
         if self.community_listener is not None:
             await self.community_listener.start(callback=self.on_community_deal)
             self._community_task = asyncio.create_task(
                 self.community_listener.run_until_disconnected()
             )
             self._community_task.add_done_callback(self._on_community_task_done)
-            logger.info("Community listener started")
+            logger.info("Telegram community listener started")
+
+        if self.rss_listener is not None:
+            await self.rss_listener.start(callback=self.on_community_deal)
+            self._rss_task = asyncio.create_task(self.rss_listener.run_forever())
+            self._rss_task.add_done_callback(self._on_community_task_done)
+            logger.info("RSS community listener started")
 
         self.scheduler.start()
         logger.info("Orchestrator started")
@@ -157,6 +177,8 @@ class Orchestrator:
 
         if self.community_listener is not None:
             await self.community_listener.disconnect()
+        if self.rss_listener is not None:
+            self.rss_listener.stop()
 
         self.scheduler.shutdown(wait=False)
         self.db.close()

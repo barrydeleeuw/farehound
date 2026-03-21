@@ -149,6 +149,7 @@ class CommunityFeedConfig:
     type: str
     channel: str
     filter_origins: list[str] = field(default_factory=list)
+    url: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> CommunityFeedConfig:
@@ -156,6 +157,7 @@ class CommunityFeedConfig:
             type=d["type"],
             channel=d["channel"],
             filter_origins=d.get("filter_origins", []),
+            url=d.get("url"),
         )
 
 

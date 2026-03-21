@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -7,6 +8,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Awaitable
 
+import feedparser
+import httpx
 from telethon import TelegramClient, events
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,7 @@ ROUTE_RE = re.compile(
 class CommunityFeedConfig:
     channel: str
     filter_origins: list[str] = field(default_factory=list)
+    url: str | None = None
 
 
 def _normalize_date(date_str: str) -> str:
@@ -227,3 +231,107 @@ class CommunityListener:
     async def run_until_disconnected(self) -> None:
         """Block until the client disconnects. Use this in the main loop."""
         await self._client.run_until_disconnected()
+
+
+class RSSListener:
+    """Polls RSS feeds for flight deals at a configurable interval."""
+
+    def __init__(
+        self,
+        feeds: list[CommunityFeedConfig],
+        poll_interval_seconds: int = 300,
+    ) -> None:
+        self.feeds = feeds
+        self.poll_interval = poll_interval_seconds
+        self._filter_origins: set[str] = set()
+        for feed in feeds:
+            self._filter_origins.update(o.upper() for o in feed.filter_origins)
+        self._seen_ids: set[str] = set()
+        self._callback: Callable[[dict], Awaitable[None]] | None = None
+        self._running = False
+
+    async def start(self, callback: Callable[[dict], Awaitable[None]]) -> None:
+        self._callback = callback
+        self._running = True
+        logger.info(
+            "RSS listener started, polling %d feeds every %ds: %s",
+            len(self.feeds),
+            self.poll_interval,
+            [f.url for f in self.feeds],
+        )
+
+    async def run_forever(self) -> None:
+        """Poll RSS feeds in a loop. Run as an asyncio task."""
+        # Seed seen IDs on first poll to avoid alerting on old posts
+        await self._poll(seed=True)
+
+        while self._running:
+            await asyncio.sleep(self.poll_interval)
+            if not self._running:
+                break
+            try:
+                await self._poll(seed=False)
+            except Exception:
+                logger.exception("RSS poll cycle failed")
+
+    async def _poll(self, seed: bool = False) -> None:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for feed_config in self.feeds:
+                if not feed_config.url:
+                    continue
+                try:
+                    resp = await client.get(feed_config.url)
+                    resp.raise_for_status()
+                    parsed = feedparser.parse(resp.text)
+
+                    for entry in parsed.entries:
+                        entry_id = entry.get("id") or entry.get("link") or entry.get("title", "")
+                        if entry_id in self._seen_ids:
+                            continue
+                        self._seen_ids.add(entry_id)
+
+                        if seed:
+                            continue
+
+                        # Combine title and summary for parsing
+                        text = f"{entry.get('title', '')} {entry.get('summary', '')}"
+                        deal = parse_deal_message(text)
+                        if deal is None:
+                            continue
+
+                        origin = deal.get("origin", "").upper()
+                        if self._filter_origins and origin and origin not in self._filter_origins:
+                            logger.debug("RSS: skipping deal from %s (not in origins)", origin)
+                            continue
+
+                        deal_info = {
+                            "origin": deal.get("origin"),
+                            "destination": deal.get("destination"),
+                            "price": deal.get("price"),
+                            "dates": deal.get("dates", []),
+                            "source_channel": feed_config.channel,
+                            "raw_message": text.strip(),
+                            "community_flagged": True,
+                            "link": entry.get("link"),
+                        }
+
+                        logger.info(
+                            "RSS deal detected: %s → %s at %s from %s",
+                            deal_info.get("origin"),
+                            deal_info.get("destination"),
+                            deal_info.get("price"),
+                            feed_config.channel,
+                        )
+
+                        if self._callback:
+                            try:
+                                await self._callback(deal_info)
+                            except Exception:
+                                logger.exception("Error in RSS deal callback")
+
+                except httpx.HTTPError as e:
+                    logger.warning("Failed to fetch RSS feed %s: %s", feed_config.url, e)
+
+    def stop(self) -> None:
+        self._running = False
+        logger.info("RSS listener stopped")

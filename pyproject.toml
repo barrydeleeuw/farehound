@@ -10,6 +10,7 @@ dependencies = [
     "httpx>=0.27",
     "telethon>=1.36",
     "apscheduler>=3.10,<4",
+    "feedparser>=6.0",
 ]
 
 [project.optional-dependencies]

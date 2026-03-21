@@ -53,14 +53,29 @@ scoring:
   digest_time: "08:00"
 
 community_feeds:
-  - type: telegram_channel
-    channel: "@fly4free_com"
+  # RSS feeds — polled every 5 minutes, no auth needed
+  - type: rss
+    channel: "r/flights"
+    url: "https://www.reddit.com/r/flights/new/.rss"
     filter_origins: [AMS, BRU, DUS, RTM]
-  - type: telegram_channel
-    channel: "@holidaypiratesUK"
+  - type: rss
+    channel: "r/TravelHacking"
+    url: "https://www.reddit.com/r/TravelHacking/new/.rss"
     filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "SecretFlying"
+    url: "https://www.secretflying.com/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "TheFlightDeal"
+    url: "https://www.theflightdeal.com/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  # Telegram channels — real-time via Telethon
   - type: telegram_channel
     channel: "@trip4world"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: telegram_channel
+    channel: "@holidaypirates"
     filter_origins: [AMS, BRU, DUS, RTM]
 
 telegram:
