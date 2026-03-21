@@ -15,7 +15,7 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir --break-system-packages .
 
 COPY app-config.yaml ./config.yaml
-COPY run.sh /run.sh
-RUN chmod +x /run.sh
 
-CMD ["/run.sh"]
+# s6-overlay service directory — this is how HA add-ons run long-lived services
+COPY run.sh /etc/services.d/farehound/run
+RUN chmod +x /etc/services.d/farehound/run

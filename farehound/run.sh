@@ -12,6 +12,14 @@ if [[ -n "$TELEGRAM_API_ID" ]]; then
     export TELEGRAM_API_HASH
 fi
 
+# Optional Telegram bot alerts
+TELEGRAM_BOT_TOKEN=$(bashio::config 'telegram_bot_token')
+TELEGRAM_CHAT_ID=$(bashio::config 'telegram_chat_id')
+if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
+    export TELEGRAM_BOT_TOKEN
+    export TELEGRAM_CHAT_ID
+fi
+
 # HA Supervisor token for API access (injected by Supervisor)
 export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
 
@@ -20,15 +28,5 @@ export FAREHOUND_DATA_DIR="/data"
 
 bashio::log.info "Starting FareHound..."
 
-# Graceful shutdown
-cleanup() {
-    bashio::log.info "Shutting down FareHound..."
-    kill -TERM "$PID" 2>/dev/null
-    wait "$PID"
-}
-trap cleanup SIGTERM SIGINT
-
-# Start orchestrator
-python -m src.orchestrator &
-PID=$!
-wait "$PID"
+cd /app
+exec python3 -m src.orchestrator
