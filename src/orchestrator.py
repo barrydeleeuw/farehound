@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts.homeassistant import HomeAssistantNotifier
 from src.alerts.telegram import TelegramNotifier
+from src.analysis.nearby_airports import compare_airports
 from src.analysis.scorer import DealScorer
 from src.apis.community import CommunityListener, RSSListener
 from src.apis.community import CommunityFeedConfig as CommunityFeed
@@ -79,6 +80,8 @@ class Orchestrator:
         self.scheduler = AsyncIOScheduler()
         self._first_run = True
         self._last_full_rescan: datetime | None = None
+        self._secondary_poll_counter: int = 0
+        self._latest_nearby_comparison: dict[str, list[dict]] = {}
 
         # Community listeners (Layer 2)
         self.community_listener: CommunityListener | None = None
@@ -133,6 +136,11 @@ class Orchestrator:
         # Init DB schema (sync)
         await loop.run_in_executor(None, self.db.init_schema)
         logger.info("Database schema initialized")
+
+        # Seed airport transport data
+        if self.config.airports:
+            await loop.run_in_executor(None, self.db.seed_airport_transport, self.config.airports)
+            logger.info("Seeded %d airports", len(self.config.airports))
 
         # Sync routes from config into DB
         for route_cfg in self.config.routes:
@@ -253,7 +261,8 @@ class Orchestrator:
                 logger.error("Route %s failed: %s", route.route_id, result, exc_info=result)
 
         self._first_run = False
-        logger.info("Poll cycle complete")
+        self._secondary_poll_counter += 1
+        logger.info("Poll cycle complete (secondary counter: %d)", self._secondary_poll_counter)
 
         # Update HA sensors with latest route data
         await self._update_ha_sensors(routes)
@@ -401,6 +410,13 @@ class Orchestrator:
                     exc_info=True,
                 )
 
+        # Poll secondary airports every other cycle to save API calls
+        if self._secondary_poll_counter % 2 != 0:
+            logger.info("Skipping secondary airport poll this cycle (counter=%d)", self._secondary_poll_counter)
+            return
+
+        await self._poll_secondary_airports(route, windows_to_poll)
+
     async def _select_windows(
         self, route: DBRoute, all_windows: list[tuple[date, date]]
     ) -> list[tuple[date, date]]:
@@ -446,6 +462,125 @@ class Orchestrator:
         best = sorted_windows[0]
         selected = [(o, r) for o, r in all_windows if o == best.outbound_date]
         return selected or [all_windows[0]]
+
+    async def _poll_secondary_airports(
+        self, route: DBRoute, windows: list[tuple[date, date]]
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        secondary_airports = await loop.run_in_executor(None, self.db.get_secondary_airports)
+        if not secondary_airports:
+            return
+
+        primary_transport = await loop.run_in_executor(
+            None, self.db.get_airport_transport, route.origin
+        )
+        if not primary_transport:
+            logger.warning("No transport data for primary airport %s", route.origin)
+            return
+
+        logger.info(
+            "Polling %d secondary airports for route %s",
+            len(secondary_airports), route.route_id,
+        )
+
+        for outbound, return_dt in windows:
+            # Get primary snapshot for this window (just stored above)
+            primary_snapshot = await loop.run_in_executor(
+                None, self.db.get_latest_snapshot, route.route_id
+            )
+            if not primary_snapshot or primary_snapshot.lowest_price is None:
+                continue
+
+            primary_result = {
+                "airport_code": route.origin,
+                "fare_pp": float(primary_snapshot.lowest_price) / route.passengers,
+                "transport_cost": primary_transport["transport_cost_eur"] or 0,
+                "parking_cost": primary_transport.get("parking_cost_eur"),
+                "transport_mode": primary_transport.get("transport_mode", ""),
+                "transport_time_min": primary_transport.get("transport_time_min", 0),
+            }
+
+            secondary_results = []
+            for airport in secondary_airports:
+                try:
+                    result = await self.serpapi.search_flights(
+                        origin=airport["airport_code"],
+                        destination=route.destination,
+                        outbound_date=outbound,
+                        return_date=return_dt,
+                        passengers=route.passengers,
+                        trip_type=route.trip_type,
+                    )
+
+                    insights = result.price_insights
+                    lowest = insights.get("lowest_price")
+                    if lowest is None:
+                        continue
+
+                    # Store snapshot with different origin marker in search_params
+                    now = datetime.now(UTC)
+                    best_flight = result.best_flights[0] if result.best_flights else None
+                    typical_range = insights.get("typical_price_range", [])
+
+                    snapshot = PriceSnapshot(
+                        snapshot_id=uuid4().hex,
+                        route_id=route.route_id,
+                        observed_at=now,
+                        source="serpapi_poll",
+                        passengers=route.passengers,
+                        outbound_date=outbound,
+                        return_date=return_dt,
+                        lowest_price=Decimal(str(lowest)),
+                        currency=self.config.serpapi.currency,
+                        best_flight=best_flight,
+                        all_flights=result.best_flights + result.other_flights,
+                        price_level=insights.get("price_level"),
+                        typical_low=Decimal(str(typical_range[0])) if len(typical_range) > 0 else None,
+                        typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
+                        price_history=insights.get("price_history"),
+                        search_params={
+                            **(result.search_params or {}),
+                            "origin": airport["airport_code"],
+                        },
+                    )
+                    await loop.run_in_executor(None, self.db.insert_snapshot, snapshot)
+                    logger.info(
+                        "Stored secondary snapshot %s→%s: €%s",
+                        airport["airport_code"], route.destination, lowest,
+                    )
+
+                    secondary_results.append({
+                        "airport_code": airport["airport_code"],
+                        "fare_pp": float(lowest) / route.passengers,
+                        "transport_cost": airport.get("transport_cost_eur") or 0,
+                        "parking_cost": airport.get("parking_cost_eur"),
+                        "transport_mode": airport.get("transport_mode", ""),
+                        "transport_time_min": airport.get("transport_time_min", 0),
+                    })
+
+                except SerpAPIError as e:
+                    logger.error(
+                        "SerpAPI error for secondary %s→%s: %s",
+                        airport["airport_code"], route.destination, e,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Error polling secondary %s→%s: %s",
+                        airport["airport_code"], route.destination, e,
+                        exc_info=True,
+                    )
+
+            # Store comparison for use in alerts (attached to route context)
+            if secondary_results:
+                comparison = compare_airports(primary_result, secondary_results, route.passengers)
+                if comparison:
+                    self._latest_nearby_comparison[route.route_id] = comparison
+                    logger.info(
+                        "Route %s: best nearby saving €%.0f via %s",
+                        route.route_id,
+                        comparison[0]["savings"],
+                        comparison[0]["airport_name"],
+                    )
 
     async def _search_and_store(self, route: DBRoute, outbound: date, return_dt: date) -> None:
         loop = asyncio.get_running_loop()
@@ -644,6 +779,7 @@ class Orchestrator:
                 "score": score_result.score,
                 "urgency": score_result.urgency,
                 "reasoning": inflection_msg or score_result.reasoning,
+                "nearby_comparison": self._latest_nearby_comparison.get(route.route_id, []),
             }
 
             try:

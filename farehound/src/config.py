@@ -213,6 +213,7 @@ class AppConfig:
     community_feeds: list[CommunityFeedConfig]
     telegram: TelegramConfig | None = None
     telegram_alerts: TelegramAlertConfig | None = None
+    airports: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> AppConfig:
@@ -233,7 +234,18 @@ class AppConfig:
             telegram_alerts=TelegramAlertConfig.from_dict(d["telegram_alerts"])
             if "telegram_alerts" in d
             else None,
+            airports=d.get("airports", []),
         )
+
+
+def _load_airports_yaml() -> list[dict]:
+    """Load airports from config/airports.yaml. Checks HA path first, then project root."""
+    for base in [Path("/app/config"), Path(__file__).parent.parent / "config"]:
+        airports_file = base / "airports.yaml"
+        if airports_file.exists():
+            data = yaml.safe_load(airports_file.read_text()) or {}
+            return data.get("airports", [])
+    return []
 
 
 def _validate(config: AppConfig) -> None:
@@ -334,5 +346,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         raise ValueError(f"Failed to parse config file: {e}") from e
 
     config = AppConfig.from_dict(raw)
+    if not config.airports:
+        config.airports = _load_airports_yaml()
     _validate(config)
     return config

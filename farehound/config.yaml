@@ -1,6 +1,6 @@
 name: FareHound
 description: Personal flight fare monitor with AI-powered deal scoring
-version: 0.3.6
+version: 1.0.0
 slug: farehound
 init: false
 url: https://github.com/barrydeleeuw/farehound

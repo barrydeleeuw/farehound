@@ -91,6 +91,16 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     channel           TEXT NOT NULL,
     active            INTEGER DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS airport_transport (
+    airport_code      TEXT PRIMARY KEY,
+    airport_name      TEXT,
+    transport_mode    TEXT,
+    transport_cost_eur REAL,
+    transport_time_min INTEGER,
+    parking_cost_eur  REAL,
+    is_primary        INTEGER DEFAULT 0
+);
 """
 
 
@@ -461,3 +471,80 @@ class Database:
         )
         columns = [desc[0] for desc in cursor.description]
         return [AlertRule.from_row(row, columns) for row in cursor.fetchall()]
+
+    # --- Airport Transport ---
+
+    def seed_airport_transport(self, airports: list[dict]) -> None:
+        for ap in airports:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO airport_transport (
+                    airport_code, airport_name, transport_mode,
+                    transport_cost_eur, transport_time_min,
+                    parking_cost_eur, is_primary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ap["code"],
+                    ap.get("name"),
+                    ap.get("transport_mode"),
+                    ap.get("transport_cost_eur"),
+                    ap.get("transport_time_min"),
+                    ap.get("parking_cost_eur"),
+                    1 if ap.get("is_primary") else 0,
+                ],
+            )
+        self._conn.commit()
+
+    def get_airport_transport(self, code: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM airport_transport WHERE airport_code = ?",
+            [code],
+        ).fetchone()
+        if row is None:
+            return None
+        columns = ["airport_code", "airport_name", "transport_mode",
+                    "transport_cost_eur", "transport_time_min",
+                    "parking_cost_eur", "is_primary"]
+        result = dict(zip(columns, row))
+        result["is_primary"] = bool(result["is_primary"])
+        return result
+
+    def get_all_airport_transports(self) -> list[dict]:
+        cursor = self._conn.execute("SELECT * FROM airport_transport")
+        columns = ["airport_code", "airport_name", "transport_mode",
+                    "transport_cost_eur", "transport_time_min",
+                    "parking_cost_eur", "is_primary"]
+        results = []
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            d["is_primary"] = bool(d["is_primary"])
+            results.append(d)
+        return results
+
+    def get_primary_airport(self) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM airport_transport WHERE is_primary = 1 LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        columns = ["airport_code", "airport_name", "transport_mode",
+                    "transport_cost_eur", "transport_time_min",
+                    "parking_cost_eur", "is_primary"]
+        result = dict(zip(columns, row))
+        result["is_primary"] = True
+        return result
+
+    def get_secondary_airports(self) -> list[dict]:
+        cursor = self._conn.execute(
+            "SELECT * FROM airport_transport WHERE is_primary = 0"
+        )
+        columns = ["airport_code", "airport_name", "transport_mode",
+                    "transport_cost_eur", "transport_time_min",
+                    "parking_cost_eur", "is_primary"]
+        results = []
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            d["is_primary"] = False
+            results.append(d)
+        return results

@@ -285,6 +285,91 @@ def test_build_prompt_past_feedback_null_fields():
     assert "Ignored" in prompt  # None feedback becomes "Ignored"
 
 
+def test_build_prompt_with_nearby_comparison():
+    scorer = DealScorer.__new__(DealScorer)
+    snapshot = PriceSnapshot(
+        snapshot_id="s1", route_id="r1",
+        observed_at=datetime(2026, 1, 1),
+        source="serpapi_poll", passengers=2,
+        lowest_price=Decimal("1940"),
+    )
+    route = MagicMock()
+    route.origin = "AMS"
+    route.destination = "NRT"
+    route.trip_type = "round_trip"
+    route.date_flex_days = 3
+    route.passengers = 2
+    route.preferred_airlines = []
+
+    nearby = [
+        {
+            "airport_code": "BRU",
+            "airport_name": "Brussels",
+            "fare_pp": 1600.0,
+            "net_cost": 3270.0,
+            "savings": 610.0,
+            "transport_mode": "Thalys",
+            "transport_cost": 70.0,
+            "transport_time_min": 150,
+        },
+        {
+            "airport_code": "DUS",
+            "airport_name": "Dusseldorf",
+            "fare_pp": 1750.0,
+            "net_cost": 3560.0,
+            "savings": 320.0,
+            "transport_mode": "train",
+            "transport_cost": 60.0,
+            "transport_time_min": 168,
+        },
+    ]
+
+    prompt = scorer._build_prompt(
+        snapshot=snapshot,
+        route=route,
+        price_history={"count": 0},
+        community_flagged=False,
+        traveller_name="Barry",
+        home_airport="AMS",
+        nearby_comparison=nearby,
+    )
+    assert "NEARBY AIRPORTS" in prompt
+    assert "Brussels" in prompt
+    assert "Thalys" in prompt
+    assert "save €610" in prompt
+    assert "Dusseldorf" in prompt
+    assert "save €320" in prompt
+    assert "vs Amsterdam" in prompt
+
+
+def test_build_prompt_without_nearby_comparison():
+    scorer = DealScorer.__new__(DealScorer)
+    snapshot = PriceSnapshot(
+        snapshot_id="s1", route_id="r1",
+        observed_at=datetime(2026, 1, 1),
+        source="serpapi_poll", passengers=2,
+        lowest_price=Decimal("485"),
+    )
+    route = MagicMock()
+    route.origin = "AMS"
+    route.destination = "NRT"
+    route.trip_type = "round_trip"
+    route.date_flex_days = 3
+    route.passengers = 2
+    route.preferred_airlines = []
+
+    prompt = scorer._build_prompt(
+        snapshot=snapshot,
+        route=route,
+        price_history={"count": 0},
+        community_flagged=False,
+        traveller_name="Barry",
+        home_airport="AMS",
+        nearby_comparison=None,
+    )
+    assert "NEARBY AIRPORTS" not in prompt
+
+
 @pytest.mark.asyncio
 async def test_score_deal_with_past_feedback():
     scorer = DealScorer.__new__(DealScorer)

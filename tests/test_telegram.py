@@ -61,6 +61,62 @@ async def test_send_deal_alert_format(notifier):
         assert payload["disable_web_page_preview"] is True
 
 
+# --- send_deal_alert with nearby ---
+
+@pytest.mark.asyncio
+async def test_send_deal_alert_with_nearby(notifier):
+    deal_info = {
+        "origin": "AMS",
+        "destination": "NRT",
+        "price": 1940,
+        "score": 0.85,
+        "reasoning": "Good deal",
+        "airline": "KLM",
+        "dates": "2026-10-01 to 2026-10-15",
+        "nearby_comparison": [
+            {
+                "airport_code": "BRU",
+                "airport_name": "Brussels",
+                "fare_pp": 1600.0,
+                "net_cost": 3270.0,
+                "savings": 610.0,
+                "transport_mode": "Thalys",
+                "transport_cost": 70.0,
+                "transport_time_min": 150,
+            },
+            {
+                "airport_code": "DUS",
+                "airport_name": "Dusseldorf",
+                "fare_pp": 1750.0,
+                "net_cost": 3560.0,
+                "savings": 320.0,
+                "transport_mode": "train",
+                "transport_cost": 60.0,
+                "transport_time_min": 168,
+            },
+        ],
+    }
+
+    with patch("src.alerts.telegram.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
+        await notifier.send_deal_alert(deal_info)
+
+        payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
+        text = payload["text"]
+        assert "🟢 Brussels" in text
+        assert "save €610" in text
+        assert "Thalys" in text
+        assert "🟡 Dusseldorf" in text
+        assert "save €320" in text
+
+
 # --- send_error_fare_alert ---
 
 @pytest.mark.asyncio
@@ -123,6 +179,46 @@ async def test_send_daily_digest_format(notifier):
         assert "📉" in text
         assert "Amsterdam → Istanbul" in text
         assert "➡️" in text  # stable trend
+
+
+@pytest.mark.asyncio
+async def test_send_daily_digest_with_nearby(notifier):
+    routes = [
+        {
+            "origin": "AMS",
+            "destination": "NRT",
+            "lowest_price": 1940,
+            "trend": "down",
+            "passengers": 2,
+            "nearby_prices": [
+                {
+                    "airport_code": "BRU",
+                    "airport_name": "Brussels",
+                    "fare_pp": 1600.0,
+                    "net_cost": 3270.0,
+                    "savings": 610.0,
+                },
+            ],
+        },
+    ]
+
+    with patch("src.alerts.telegram.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
+        await notifier.send_daily_digest(routes)
+
+        payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
+        text = payload["text"]
+        assert "Amsterdam" in text
+        assert "Brussels" in text
+        assert "€1,600/pp" in text
+        assert "save €610" in text
 
 
 @pytest.mark.asyncio

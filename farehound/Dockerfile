@@ -6,13 +6,14 @@ WORKDIR /app
 # Install Python and jq
 RUN apk add --no-cache python3 py3-pip jq
 
-# Cache-bust: v0.3.6
+# Cache-bust: v1.0.0
 COPY pyproject.toml .
 COPY src/ ./src/
 
 RUN pip install --no-cache-dir --break-system-packages .
 
 COPY app-config.yaml ./config.yaml
+COPY config/ ./config/
 
 # s6-overlay: copy rootfs overlay (services.d structure)
 COPY rootfs /

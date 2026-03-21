@@ -1,0 +1,36 @@
+airports:
+  - code: AMS
+    name: Amsterdam Schiphol
+    transport_mode: train
+    transport_cost_eur: 12
+    transport_time_min: 45
+    parking_cost_eur: null
+    is_primary: true
+  - code: BRU
+    name: Brussels
+    transport_mode: Thalys
+    transport_cost_eur: 70
+    transport_time_min: 150
+    parking_cost_eur: null
+    is_primary: false
+  - code: DUS
+    name: Dusseldorf
+    transport_mode: train
+    transport_cost_eur: 60
+    transport_time_min: 170
+    parking_cost_eur: null
+    is_primary: false
+  - code: EIN
+    name: Eindhoven
+    transport_mode: car
+    transport_cost_eur: 30
+    transport_time_min: 50
+    parking_cost_eur: 50
+    is_primary: false
+  - code: CGN
+    name: Cologne/Bonn
+    transport_mode: train
+    transport_cost_eur: 70
+    transport_time_min: 180
+    parking_cost_eur: null
+    is_primary: false

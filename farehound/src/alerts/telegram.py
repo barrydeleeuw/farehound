@@ -100,6 +100,27 @@ class TelegramNotifier:
         ]
         if reasoning:
             lines.append(f"_{reasoning}_")
+
+        nearby = deal_info.get("nearby_comparison") or []
+        if nearby:
+            lines.append("")
+            for i, alt in enumerate(nearby):
+                icon = "🟢" if i == 0 else "🟡"
+                name = alt.get("airport_name") or alt.get("airport_code", "?")
+                fare = alt.get("fare_pp", 0)
+                net = alt.get("net_cost", 0)
+                savings = alt.get("savings", 0)
+                mode = alt.get("transport_mode", "transport")
+                t_cost = alt.get("transport_cost", 0)
+                t_min = alt.get("transport_time_min", 0)
+                hours = t_min / 60
+                lines.append(
+                    f"{icon} {name}: €{fare:,.0f}/pp → €{net:,.0f} net (save €{savings:,.0f})"
+                )
+                lines.append(
+                    f"    {mode} €{t_cost:.0f} return | {hours:.1f}h to airport"
+                )
+
         lines.append(f"[Search Flights]({search_url})")
 
         await self._send_message("\n".join(lines))
@@ -144,5 +165,22 @@ class TelegramNotifier:
             score = route.get("deal_score")
             emoji = _deal_emoji(score)
             lines.append(f"{emoji} {route_name(origin, dest)}: *€{lowest}* {trend_icon}")
+
+            nearby_prices = route.get("nearby_prices") or []
+            if nearby_prices:
+                from src.utils.airports import airport_name
+                origin_name = airport_name(origin)
+                passengers = route.get("passengers", 2)
+                lines.append(f"  {origin_name}: €{lowest}/pp")
+                for i, alt in enumerate(nearby_prices):
+                    icon = "🟢" if i == 0 else ""
+                    name = alt.get("airport_name") or alt.get("airport_code", "?")
+                    fare = alt.get("fare_pp", 0)
+                    net = alt.get("net_cost", 0)
+                    savings = alt.get("savings", 0)
+                    savings_str = f", save €{savings:,.0f}" if savings else ""
+                    lines.append(
+                        f"  {icon} {name}: €{fare:,.0f}/pp (€{net:,.0f} net{savings_str})".rstrip()
+                    )
 
         await self._send_message("\n".join(lines))

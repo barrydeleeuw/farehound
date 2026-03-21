@@ -212,7 +212,7 @@ class TripBot:
         await self._handle_trip(new_text, chat_id, client)
 
     async def _handle_trips(self, chat_id: str, client: httpx.AsyncClient) -> None:
-        from src.utils.airports import route_name
+        from src.utils.airports import airport_name, route_name
 
         loop = asyncio.get_running_loop()
         routes = await loop.run_in_executor(None, self._db.get_active_routes)
@@ -243,13 +243,35 @@ class TripBot:
                 price_line = "⏳ Waiting for first price check"
 
             stops = "direct" if r.max_stops == 0 else f"max {r.max_stops} stop{'s' if r.max_stops > 1 else ''}"
-            lines.append(
+            route_block = (
                 f"*{name}*\n"
                 f"  📅 {dates}\n"
                 f"  👥 {r.passengers} pax | {stops}\n"
-                f"  {price_line}\n"
-                f"  ID: `{r.route_id}`"
+                f"  {price_line}"
             )
+
+            # Show cheapest nearby airport if available
+            nearby_routes = await loop.run_in_executor(
+                None, self._db.get_nearby_route_ids, r.route_id
+            ) if hasattr(self._db, "get_nearby_route_ids") else []
+            best_alt = None
+            if nearby_routes and latest and latest.lowest_price:
+                primary_price = float(latest.lowest_price)
+                for nr_id in nearby_routes:
+                    nr_snap = await loop.run_in_executor(
+                        None, self._db.get_latest_snapshot, nr_id
+                    )
+                    if nr_snap and nr_snap.lowest_price:
+                        alt_price = float(nr_snap.lowest_price)
+                        if alt_price < primary_price:
+                            origin_code = nr_id.split("_")[0].upper()
+                            if best_alt is None or alt_price < best_alt[1]:
+                                best_alt = (airport_name(origin_code), alt_price)
+            if best_alt:
+                route_block += f"\n  🟢 Cheaper from {best_alt[0]}: €{best_alt[1]:,.0f}/pp"
+
+            route_block += f"\n  ID: `{r.route_id}`"
+            lines.append(route_block)
 
         await self._send(client, chat_id, "\n\n".join(lines))
 

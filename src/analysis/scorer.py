@@ -53,7 +53,8 @@ TRAVELLER PREFERENCES:
 {traveller_preferences_section}
 {preferred_airlines_section}
 {past_decisions_section}
-Score this deal. Use these past decisions to calibrate your scoring. The traveller's revealed preferences from actual booking behavior matter more than stated preferences when they conflict. The "reasoning" field will be shown as a phone notification, so keep it to 2-3 short sentences that help the traveller decide: mention the price vs. history, any connection/timing concerns, and whether to act now or wait. Be specific (cite numbers), not generic.
+{nearby_section}
+Score this deal. Use these past decisions to calibrate your scoring. The traveller's revealed preferences from actual booking behavior matter more than stated preferences when they conflict. The "reasoning" field will be shown as a phone notification, so keep it to 2-3 short sentences that help the traveller decide: mention the price vs. history, any connection/timing concerns, and whether to act now or wait. Be specific (cite numbers), not generic. If a nearby airport offers significant savings, mention the best alternative in the reasoning.
 
 Respond with JSON only:
 {{
@@ -94,11 +95,12 @@ class DealScorer:
         home_airport: str = "AMS",
         traveller_preferences: list[str] | None = None,
         past_feedback: list[dict] | None = None,
+        nearby_comparison: list[dict] | None = None,
     ) -> DealScore:
         prompt = self._build_prompt(
             snapshot, route, price_history, community_flagged,
             traveller_name, home_airport, traveller_preferences,
-            past_feedback,
+            past_feedback, nearby_comparison,
         )
 
         response = await self._client.messages.create(
@@ -129,6 +131,7 @@ class DealScorer:
         home_airport: str,
         traveller_preferences: list[str] | None = None,
         past_feedback: list[dict] | None = None,
+        nearby_comparison: list[dict] | None = None,
     ) -> str:
         # Price history section
         if price_history.get("count", 0) > 0:
@@ -183,6 +186,28 @@ class DealScorer:
             lines.append("")
             past_decisions_section = "\n".join(lines)
 
+        # Nearby airports section
+        nearby_section = ""
+        if nearby_comparison:
+            from src.utils.airports import airport_name
+            origin_name = airport_name(getattr(route, "origin", ""))
+            lines = ["", "NEARBY AIRPORTS (door-to-door cost comparison):"]
+            for alt in nearby_comparison:
+                name = alt.get("airport_name") or alt.get("airport_code", "?")
+                mode = alt.get("transport_mode", "transport")
+                t_cost = alt.get("transport_cost", 0)
+                t_min = alt.get("transport_time_min", 0)
+                hours = t_min / 60
+                fare = alt.get("fare_pp", 0)
+                net = alt.get("net_cost", 0)
+                savings = alt.get("savings", 0)
+                lines.append(
+                    f"- {name} ({mode}, €{t_cost:.0f} return, {hours:.1f}h): "
+                    f"€{fare:,.0f}/pp, €{net:,.0f} net → save €{savings:,.0f} vs {origin_name}"
+                )
+            lines.append("")
+            nearby_section = "\n".join(lines)
+
         # Route fields — support both config Route and db Route
         origin = getattr(route, "origin", "")
         destination = getattr(route, "destination", "")
@@ -208,6 +233,7 @@ class DealScorer:
             traveller_preferences_section=traveller_preferences_section,
             preferred_airlines_section=preferred_airlines_section,
             past_decisions_section=past_decisions_section,
+            nearby_section=nearby_section,
         )
 
     def _parse_response(self, raw: str) -> DealScore:

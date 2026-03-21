@@ -501,3 +501,114 @@ def test_detect_inflection_no_uptick(db, sample_route):
 
     detected, bottom = db.detect_price_inflection("ams-nrt")
     assert detected is False
+
+
+# --- Airport Transport ---
+
+SAMPLE_AIRPORTS = [
+    {
+        "code": "AMS",
+        "name": "Amsterdam Schiphol",
+        "transport_mode": "train",
+        "transport_cost_eur": 12,
+        "transport_time_min": 45,
+        "parking_cost_eur": None,
+        "is_primary": True,
+    },
+    {
+        "code": "BRU",
+        "name": "Brussels",
+        "transport_mode": "Thalys",
+        "transport_cost_eur": 70,
+        "transport_time_min": 150,
+        "parking_cost_eur": None,
+        "is_primary": False,
+    },
+    {
+        "code": "EIN",
+        "name": "Eindhoven",
+        "transport_mode": "car",
+        "transport_cost_eur": 30,
+        "transport_time_min": 50,
+        "parking_cost_eur": 50,
+        "is_primary": False,
+    },
+]
+
+
+def test_seed_airport_transport(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    all_airports = db.get_all_airport_transports()
+    assert len(all_airports) == 3
+
+
+def test_seed_airport_transport_upsert(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    updated = [{"code": "AMS", "name": "Schiphol Updated", "transport_mode": "train",
+                "transport_cost_eur": 15, "transport_time_min": 45, "is_primary": True}]
+    db.seed_airport_transport(updated)
+    ams = db.get_airport_transport("AMS")
+    assert ams["airport_name"] == "Schiphol Updated"
+    assert ams["transport_cost_eur"] == 15
+    assert db.get_all_airport_transports().__len__() == 3
+
+
+def test_get_airport_transport(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    ams = db.get_airport_transport("AMS")
+    assert ams is not None
+    assert ams["airport_code"] == "AMS"
+    assert ams["airport_name"] == "Amsterdam Schiphol"
+    assert ams["transport_cost_eur"] == 12
+    assert ams["is_primary"] is True
+
+
+def test_get_airport_transport_not_found(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    assert db.get_airport_transport("JFK") is None
+
+
+def test_get_all_airport_transports(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    all_airports = db.get_all_airport_transports()
+    assert len(all_airports) == 3
+    codes = {a["airport_code"] for a in all_airports}
+    assert codes == {"AMS", "BRU", "EIN"}
+
+
+def test_get_primary_airport(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    primary = db.get_primary_airport()
+    assert primary is not None
+    assert primary["airport_code"] == "AMS"
+    assert primary["is_primary"] is True
+
+
+def test_get_primary_airport_none(db):
+    non_primary = [{"code": "BRU", "name": "Brussels", "is_primary": False}]
+    db.seed_airport_transport(non_primary)
+    assert db.get_primary_airport() is None
+
+
+def test_get_secondary_airports(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    secondary = db.get_secondary_airports()
+    assert len(secondary) == 2
+    codes = {a["airport_code"] for a in secondary}
+    assert codes == {"BRU", "EIN"}
+    for ap in secondary:
+        assert ap["is_primary"] is False
+
+
+def test_get_secondary_airports_empty(db):
+    primary_only = [{"code": "AMS", "name": "Amsterdam", "is_primary": True}]
+    db.seed_airport_transport(primary_only)
+    assert db.get_secondary_airports() == []
+
+
+def test_airport_transport_parking_cost(db):
+    db.seed_airport_transport(SAMPLE_AIRPORTS)
+    ein = db.get_airport_transport("EIN")
+    assert ein["parking_cost_eur"] == 50
+    ams = db.get_airport_transport("AMS")
+    assert ams["parking_cost_eur"] is None
