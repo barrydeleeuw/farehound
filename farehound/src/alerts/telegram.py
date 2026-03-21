@@ -44,7 +44,9 @@ class TelegramNotifier:
         self._bot_token = bot_token
         self._chat_id = chat_id
 
-    async def _send_message(self, text: str, parse_mode: str = "Markdown") -> None:
+    async def _send_message(
+        self, text: str, parse_mode: str = "Markdown", reply_markup: dict | None = None
+    ) -> None:
         url = f"{TELEGRAM_API}/bot{self._bot_token}/sendMessage"
         payload = {
             "chat_id": self._chat_id,
@@ -52,6 +54,8 @@ class TelegramNotifier:
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(url, json=payload)
@@ -123,7 +127,17 @@ class TelegramNotifier:
 
         lines.append(f"[Search Flights]({search_url})")
 
-        await self._send_message("\n".join(lines))
+        deal_id = deal_info.get("deal_id")
+        reply_markup = None
+        if deal_id:
+            reply_markup = {
+                "inline_keyboard": [[
+                    {"text": "Book Now ✈️", "callback_data": f"book:{deal_id}"},
+                    {"text": "Not Interested 👎", "callback_data": f"dismiss:{deal_id}"},
+                ]]
+            }
+
+        await self._send_message("\n".join(lines), reply_markup=reply_markup)
 
     async def send_error_fare_alert(self, deal_info: dict) -> None:
         origin = deal_info.get("origin", "???")
@@ -149,7 +163,17 @@ class TelegramNotifier:
             lines.append(f"_{reasoning}_")
         lines.append(f"[Book Now]({booking_url})")
 
-        await self._send_message("\n".join(lines))
+        deal_id = deal_info.get("deal_id")
+        reply_markup = None
+        if deal_id:
+            reply_markup = {
+                "inline_keyboard": [[
+                    {"text": "Book Now ✈️", "callback_data": f"book:{deal_id}"},
+                    {"text": "Not Interested 👎", "callback_data": f"dismiss:{deal_id}"},
+                ]]
+            }
+
+        await self._send_message("\n".join(lines), reply_markup=reply_markup)
 
     async def send_daily_digest(self, routes_summary: list[dict]) -> None:
         if not routes_summary:

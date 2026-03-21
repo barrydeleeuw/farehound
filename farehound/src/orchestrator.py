@@ -36,6 +36,45 @@ DROP_PERCENT_THRESHOLD = 0.15
 COLD_START_THRESHOLD = 5
 
 
+def _generate_weekend_windows(
+    earliest_departure: date,
+    latest_return: date,
+    trip_duration_days: int,
+    preferred_departure_days: list[int],
+    preferred_return_days: list[int],
+    max_windows: int = 4,
+) -> list[tuple[date, date]]:
+    """Generate weekend-specific date windows within a travel range.
+
+    Finds departure dates that fall on preferred_departure_days (e.g. Thu/Fri)
+    and return dates on preferred_return_days (e.g. Sun/Mon), spaced throughout
+    the date range.
+    """
+    all_candidates: list[tuple[date, date]] = []
+    dep_set = set(preferred_departure_days)
+
+    current = earliest_departure
+    while current <= latest_return - timedelta(days=trip_duration_days):
+        if current.weekday() in dep_set:
+            ret = current + timedelta(days=trip_duration_days)
+            if ret <= latest_return:
+                all_candidates.append((current, ret))
+        current += timedelta(days=1)
+
+    if not all_candidates:
+        raise ValueError(
+            f"No weekend windows fit in {earliest_departure} to {latest_return} "
+            f"with {trip_duration_days}-day duration"
+        )
+
+    if len(all_candidates) <= max_windows:
+        return all_candidates
+
+    # Evenly space across candidates
+    step = (len(all_candidates) - 1) / (max_windows - 1)
+    return [all_candidates[round(step * i)] for i in range(max_windows)]
+
+
 def _config_route_to_db(r: ConfigRoute) -> DBRoute:
     return DBRoute(
         route_id=r.id,
@@ -381,15 +420,25 @@ class Orchestrator:
             logger.warning("Route %s missing date range, skipping", route.route_id)
             return
 
-        # Generate date windows
-        trip_duration = DEFAULT_TRIP_DURATION_DAYS
+        # Generate date windows based on trip duration type
+        trip_duration = route.trip_duration_days or DEFAULT_TRIP_DURATION_DAYS
         try:
-            windows = generate_date_windows(
-                earliest_departure=route.earliest_departure,
-                latest_return=route.latest_return,
-                trip_duration_days=trip_duration,
-                max_windows=DEFAULT_MAX_WINDOWS,
-            )
+            if route.trip_duration_type == "weekend":
+                windows = _generate_weekend_windows(
+                    earliest_departure=route.earliest_departure,
+                    latest_return=route.latest_return,
+                    trip_duration_days=trip_duration,
+                    preferred_departure_days=route.preferred_departure_days or [3, 4],
+                    preferred_return_days=route.preferred_return_days or [0, 6],
+                    max_windows=DEFAULT_MAX_WINDOWS,
+                )
+            else:
+                windows = generate_date_windows(
+                    earliest_departure=route.earliest_departure,
+                    latest_return=route.latest_return,
+                    trip_duration_days=trip_duration,
+                    max_windows=DEFAULT_MAX_WINDOWS,
+                )
         except ValueError as e:
             logger.error("Cannot generate windows for route %s: %s", route.route_id, e)
             return

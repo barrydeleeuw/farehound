@@ -56,6 +56,8 @@ def test_route_to_dict_roundtrip():
         "earliest_departure", "latest_return", "date_flex_days",
         "max_stops", "passengers", "preferred_airlines", "notes",
         "active", "created_at",
+        "trip_duration_type", "trip_duration_days",
+        "preferred_departure_days", "preferred_return_days",
     }
 
 

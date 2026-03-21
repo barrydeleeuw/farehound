@@ -56,6 +56,10 @@ class Route:
     notes: str | None = None
     active: bool = True
     created_at: datetime | None = None
+    trip_duration_type: str | None = None
+    trip_duration_days: int | None = None
+    preferred_departure_days: list[int] | None = None
+    preferred_return_days: list[int] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +76,10 @@ class Route:
             "notes": self.notes,
             "active": self.active,
             "created_at": self.created_at,
+            "trip_duration_type": self.trip_duration_type,
+            "trip_duration_days": self.trip_duration_days,
+            "preferred_departure_days": self.preferred_departure_days,
+            "preferred_return_days": self.preferred_return_days,
         }
 
     @classmethod
@@ -80,6 +88,12 @@ class Route:
         pa = d.get("preferred_airlines")
         if isinstance(pa, str):
             pa = _parse_json(pa) or []
+        pdd = d.get("preferred_departure_days")
+        if isinstance(pdd, str):
+            pdd = _parse_json(pdd)
+        prd = d.get("preferred_return_days")
+        if isinstance(prd, str):
+            prd = _parse_json(prd)
         return cls(
             route_id=d["route_id"],
             origin=d["origin"],
@@ -94,6 +108,10 @@ class Route:
             notes=d.get("notes"),
             active=_parse_bool(d.get("active", True)),
             created_at=_parse_datetime(d.get("created_at")),
+            trip_duration_type=d.get("trip_duration_type"),
+            trip_duration_days=d.get("trip_duration_days"),
+            preferred_departure_days=pdd,
+            preferred_return_days=prd,
         )
 
 

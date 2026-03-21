@@ -19,14 +19,27 @@ _PARSE_PROMPT = """\
 Extract flight route from this text. Return ONLY valid JSON with these fields:
 - origin: IATA airport code or null if not specified
 - destination: IATA airport code (use city codes like TYO for Tokyo when multiple airports)
-- earliest_departure: YYYY-MM-DD
-- latest_return: YYYY-MM-DD
+- earliest_departure: YYYY-MM-DD (first day of the travel window)
+- latest_return: YYYY-MM-DD (last day of the travel window)
 - passengers: int (default 2)
 - max_stops: int (default 1, 0 if user says "direct only" or "nonstop")
 - notes: string or null
 - needs_clarification: boolean (true if destination is a country or ambiguous region)
 - clarification_question: string or null (ask which city if ambiguous)
 - options: list of strings or null (suggested cities/airports to choose from)
+- trip_duration_type: string or null — one of "weekend", "weeks", "days", "flexible", null
+- trip_duration_days: int or null — length of trip in days
+- preferred_departure_days: list of ints or null — preferred days of week to depart (0=Mon..6=Sun)
+- preferred_return_days: list of ints or null — preferred days of week to return (0=Mon..6=Sun)
+
+Duration type rules:
+- "long weekend" or "weekend trip" → trip_duration_type="weekend", trip_duration_days=3, preferred_departure_days=[3,4], preferred_return_days=[0,6]
+- "2 weeks" → trip_duration_type="weeks", trip_duration_days=14
+- "10 days" → trip_duration_type="days", trip_duration_days=10
+- "sometime in October" or "in May" with no specific dates → trip_duration_type="flexible"
+- Specific dates like "Oct 18 - Nov 8" → trip_duration_type=null (exact dates given)
+
+For "long weekend in May", set earliest_departure to May 1 and latest_return to May 31 (the search window), NOT the trip dates.
 
 If the destination is a country (e.g. "Japan", "Mexico", "Spain"), set needs_clarification=true
 and suggest the top 2-3 cities with their airport codes.
@@ -73,9 +86,79 @@ Intent-specific parameters:
 
 For general_chat, just set response_text to your helpful answer. No parameters needed.
 
+CRITICAL SAFETY RULES:
+- NEVER return modify_trip or remove_trip intent for informational questions (e.g. "when's the best time to fly?", "how much does it cost?", "what's the weather like?").
+- Only return add_trip, modify_trip, or remove_trip when the user EXPLICITLY asks to change, add, or remove something.
+- A follow-up "yes", "ok", "sure", "yeah" after an informational response means "tell me more" or agreement with the information — it does NOT mean "change my data".
+- Questions about travel (best time, prices, weather, tips) are ALWAYS general_chat or query_prices, never action intents.
+
 When the user refers to a destination by name (e.g. "Japan", "Mexico"), match it to the active route if one exists.
 When the user says "all of them" or similar, look at the conversation history to understand what they're referring to.
 If modifying a trip, include all the changed fields in parameters.changes — use YYYY-MM-DD for dates."""
+
+
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _format_date_display(route_or_pending: dict | Route) -> str:
+    """Build a human-readable date/duration string for confirmation and /trips."""
+    if isinstance(route_or_pending, Route):
+        dur_type = route_or_pending.trip_duration_type
+        dur_days = route_or_pending.trip_duration_days
+        dep_days = route_or_pending.preferred_departure_days
+        ret_days = route_or_pending.preferred_return_days
+        earliest = route_or_pending.earliest_departure
+        latest = route_or_pending.latest_return
+    else:
+        dur_type = route_or_pending.get("trip_duration_type")
+        dur_days = route_or_pending.get("trip_duration_days")
+        dep_days = route_or_pending.get("preferred_departure_days")
+        ret_days = route_or_pending.get("preferred_return_days")
+        earliest = route_or_pending.get("earliest_departure", "")
+        latest = route_or_pending.get("latest_return", "")
+
+    if dur_type == "weekend":
+        dep_str = "/".join(_DAY_NAMES[d] for d in (dep_days or [3, 4]))
+        ret_str = "/".join(_DAY_NAMES[d] for d in (ret_days or [0, 6]))
+        period = _format_period(earliest, latest)
+        return f"Long weekends ({dep_str}-{ret_str}) throughout {period}"
+    elif dur_type == "weeks" and dur_days:
+        weeks = dur_days // 7
+        label = f"{weeks} week{'s' if weeks > 1 else ''}"
+        period = _format_period(earliest, latest)
+        return f"{label} trips throughout {period}"
+    elif dur_type == "days" and dur_days:
+        period = _format_period(earliest, latest)
+        return f"{dur_days}-day trips throughout {period}"
+    elif dur_type == "flexible":
+        period = _format_period(earliest, latest)
+        return f"Flexible dates in {period}"
+    else:
+        return f"{earliest} → {latest}"
+
+
+def _format_period(earliest, latest) -> str:
+    """Format a date range as 'May 2026' or 'May-Jun 2026'."""
+    from datetime import date as date_type
+    if not earliest:
+        return str(latest) if latest else ""
+    if isinstance(earliest, str):
+        try:
+            earliest = date_type.fromisoformat(earliest)
+        except (ValueError, TypeError):
+            return f"{earliest} → {latest}"
+    if isinstance(latest, str) and latest:
+        try:
+            latest = date_type.fromisoformat(latest)
+        except (ValueError, TypeError):
+            return f"{earliest} → {latest}"
+    if not latest:
+        return earliest.strftime("%b %Y")
+    if earliest.year == latest.year and earliest.month == latest.month:
+        return earliest.strftime("%b %Y")
+    if earliest.year == latest.year:
+        return f"{earliest.strftime('%b')}-{latest.strftime('%b')} {earliest.year}"
+    return f"{earliest.strftime('%b %Y')} - {latest.strftime('%b %Y')}"
 
 
 class TripBot:
@@ -98,6 +181,7 @@ class TripBot:
         self._reload_callback = reload_callback
         self._offset: int = 0
         self._pending: dict[str, dict] = {}  # chat_id -> pending confirmation
+        self._last_intent: dict[str, str] = {}  # chat_id -> last intent type
         self._conversation_history: dict[str, list[dict]] = {}  # chat_id -> [{role, text}]
         self._running = False
 
@@ -123,7 +207,7 @@ class TripBot:
 
     async def _get_updates(self, client: httpx.AsyncClient) -> list[dict]:
         url = f"{TELEGRAM_API}/bot{self._bot_token}/getUpdates"
-        params = {"offset": self._offset, "timeout": 30, "allowed_updates": '["message"]'}
+        params = {"offset": self._offset, "timeout": 30, "allowed_updates": '["message","callback_query"]'}
         resp = await client.get(url, params=params)
         resp.raise_for_status()
         data = resp.json()
@@ -146,6 +230,11 @@ class TripBot:
         return "\n".join(f"{m['role']}: {m['text']}" for m in history)
 
     async def _handle_update(self, update: dict, client: httpx.AsyncClient) -> None:
+        callback = update.get("callback_query")
+        if callback:
+            await self._handle_callback(callback, client)
+            return
+
         msg = update.get("message")
         if not msg:
             return
@@ -181,9 +270,66 @@ class TripBot:
                 await self._handle_no(chat_id, client)
                 return
 
+        # Guard: casual affirmatives after informational responses should NOT
+        # trigger pending confirmations — re-interpret them instead.
+        _CASUAL_AFFIRMATIVES = {"yes", "yeah", "yep", "ok", "okay", "sure", "yea", "right", "correct"}
+        if text.lower().strip() in _CASUAL_AFFIRMATIVES:
+            last = self._last_intent.get(chat_id)
+            if last in ("general_chat", "query_prices", "query_trips", None):
+                # Clear any stale pending state — this is not a confirmation
+                self._pending.pop(chat_id, None)
+
         # Non-command text: route through Claude for interpretation
         self._add_history(chat_id, "user", text)
         await self._interpret_message(text, chat_id, client)
+
+    async def _handle_callback(self, callback: dict, client: httpx.AsyncClient) -> None:
+        callback_id = callback.get("id")
+        data = callback.get("data", "")
+        message = callback.get("message", {})
+
+        parts = data.split(":", 1)
+        if len(parts) != 2:
+            return
+        action, deal_id = parts
+
+        if action == "book":
+            self._db.update_deal_feedback(deal_id, "booked")
+            answer_text = "Marked as booked!"
+            suffix = "\n\n✅ Marked as booked!"
+        elif action == "dismiss":
+            self._db.update_deal_feedback(deal_id, "dismissed")
+            answer_text = "Dismissed"
+            suffix = "\n\n👎 Dismissed"
+        else:
+            return
+
+        # Answer the callback to dismiss the loading spinner
+        answer_url = f"{TELEGRAM_API}/bot{self._bot_token}/answerCallbackQuery"
+        try:
+            await client.post(answer_url, json={
+                "callback_query_id": callback_id,
+                "text": answer_text,
+            })
+        except Exception:
+            logger.exception("Failed to answer callback query")
+
+        # Edit original message to append feedback confirmation
+        original_text = message.get("text", "")
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        message_id = message.get("message_id")
+        if chat_id and message_id and original_text:
+            edit_url = f"{TELEGRAM_API}/bot{self._bot_token}/editMessageText"
+            try:
+                await client.post(edit_url, json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": original_text + suffix,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True,
+                })
+            except Exception:
+                logger.exception("Failed to edit message after callback")
 
     async def _interpret_message(self, text: str, chat_id: str, client: httpx.AsyncClient) -> None:
         loop = asyncio.get_running_loop()
@@ -240,6 +386,13 @@ class TripBot:
         params = result.get("parameters", {})
         response_text = result.get("response_text", "")
 
+        # Track last intent per chat for safety guards
+        self._last_intent[chat_id] = intent
+
+        # Clear stale pending state after non-action intents
+        if intent in ("general_chat", "query_prices", "query_trips"):
+            self._pending.pop(chat_id, None)
+
         if intent == "general_chat":
             self._add_history(chat_id, "assistant", response_text)
             await self._send(client, chat_id, response_text)
@@ -257,7 +410,7 @@ class TripBot:
             max_stops = params.get("max_stops", 1)
             notes = params.get("notes") or ""
 
-            self._pending[chat_id] = {
+            pending = {
                 "action": "add",
                 "origin": origin,
                 "destination": destination,
@@ -266,12 +419,18 @@ class TripBot:
                 "passengers": passengers,
                 "max_stops": max_stops,
                 "notes": notes,
+                "trip_duration_type": params.get("trip_duration_type"),
+                "trip_duration_days": params.get("trip_duration_days"),
+                "preferred_departure_days": params.get("preferred_departure_days"),
+                "preferred_return_days": params.get("preferred_return_days"),
             }
+            self._pending[chat_id] = pending
 
             stops_str = "direct only" if max_stops == 0 else f"max {max_stops} stop{'s' if max_stops > 1 else ''}"
+            date_display = _format_date_display(pending)
             msg = (
                 f"Add route: *{route_name(origin, destination)}*\n"
-                f"📅 {earliest} → {latest}\n"
+                f"📅 {date_display}\n"
                 f"👥 {passengers} pax | {stops_str}"
             )
             if notes:
@@ -439,8 +598,12 @@ class TripBot:
         passengers = parsed.get("passengers", 2)
         max_stops = parsed.get("max_stops", 1)
         notes = parsed.get("notes") or ""
+        trip_duration_type = parsed.get("trip_duration_type")
+        trip_duration_days = parsed.get("trip_duration_days")
+        preferred_departure_days = parsed.get("preferred_departure_days")
+        preferred_return_days = parsed.get("preferred_return_days")
 
-        self._pending[chat_id] = {
+        pending = {
             "action": "add",
             "origin": origin,
             "destination": destination,
@@ -449,12 +612,18 @@ class TripBot:
             "passengers": passengers,
             "max_stops": max_stops,
             "notes": notes,
+            "trip_duration_type": trip_duration_type,
+            "trip_duration_days": trip_duration_days,
+            "preferred_departure_days": preferred_departure_days,
+            "preferred_return_days": preferred_return_days,
         }
+        self._pending[chat_id] = pending
 
         stops_str = "direct only" if max_stops == 0 else f"max {max_stops} stop{'s' if max_stops > 1 else ''}"
+        date_display = _format_date_display(pending)
         msg = (
             f"Add route: *{route_name(origin, destination)}*\n"
-            f"📅 {earliest} → {latest}\n"
+            f"📅 {date_display}\n"
             f"👥 {passengers} pax | {stops_str}"
         )
         if notes:
@@ -487,11 +656,7 @@ class TripBot:
             cheapest = await loop.run_in_executor(None, self._db.get_cheapest_recent_snapshot, r.route_id)
 
             name = route_name(r.origin, r.destination)
-            dates = ""
-            if r.earliest_departure:
-                dates = f"{r.earliest_departure}"
-                if r.latest_return:
-                    dates += f" → {r.latest_return}"
+            dates = _format_date_display(r)
 
             price_line = ""
             if cheapest and cheapest.lowest_price:
@@ -585,6 +750,8 @@ class TripBot:
         await self._send(client, chat_id, f"Remove *{route_name(r.origin, r.destination)}*? Reply /yes or /no")
 
     async def _handle_yes(self, chat_id: str, client: httpx.AsyncClient) -> None:
+        from src.utils.airports import route_name
+
         pending = self._pending.pop(chat_id, None)
         if not pending:
             await self._send(client, chat_id, "Nothing pending to confirm.")
@@ -603,13 +770,17 @@ class TripBot:
                 passengers=pending["passengers"],
                 notes=pending["notes"],
                 active=True,
+                trip_duration_type=pending.get("trip_duration_type"),
+                trip_duration_days=pending.get("trip_duration_days"),
+                preferred_departure_days=pending.get("preferred_departure_days"),
+                preferred_return_days=pending.get("preferred_return_days"),
             )
             await loop.run_in_executor(None, self._db.upsert_route, route)
 
             if self._reload_callback:
                 await self._reload_callback()
 
-            await self._send(client, chat_id, f"Route added: {route.origin} → {route.destination}")
+            await self._send(client, chat_id, f"Route added: {route_name(route.origin, route.destination)}")
 
         elif pending["action"] == "remove":
             await loop.run_in_executor(None, self._db.deactivate_route, pending["route_id"])
@@ -617,11 +788,15 @@ class TripBot:
             if self._reload_callback:
                 await self._reload_callback()
 
-            await self._send(client, chat_id, f"Route `{pending['route_id']}` removed.")
+            # Parse origin/destination from route_id (format: origin_destination)
+            parts = pending["route_id"].split("_", 1)
+            if len(parts) == 2:
+                removed_name = route_name(parts[0], parts[1])
+            else:
+                removed_name = pending["route_id"]
+            await self._send(client, chat_id, f"Route removed: {removed_name}")
 
         elif pending["action"] == "modify":
-            from src.utils.airports import route_name
-
             route_id = pending["route_id"]
             changes = pending["changes"]
             updated = await loop.run_in_executor(

@@ -33,7 +33,11 @@ CREATE TABLE IF NOT EXISTS routes (
     preferred_airlines TEXT,
     notes             TEXT,
     active            INTEGER DEFAULT 1,
-    created_at        TEXT DEFAULT (datetime('now'))
+    created_at        TEXT DEFAULT (datetime('now')),
+    trip_duration_type TEXT,
+    trip_duration_days INTEGER,
+    preferred_departure_days TEXT,
+    preferred_return_days TEXT
 );
 
 CREATE TABLE IF NOT EXISTS poll_windows (
@@ -156,8 +160,10 @@ class Database:
             INSERT INTO routes (
                 route_id, origin, destination, trip_type,
                 earliest_departure, latest_return, date_flex_days,
-                max_stops, passengers, preferred_airlines, notes, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                max_stops, passengers, preferred_airlines, notes, active,
+                trip_duration_type, trip_duration_days,
+                preferred_departure_days, preferred_return_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (route_id) DO UPDATE SET
                 origin = excluded.origin,
                 destination = excluded.destination,
@@ -169,7 +175,11 @@ class Database:
                 passengers = excluded.passengers,
                 preferred_airlines = excluded.preferred_airlines,
                 notes = excluded.notes,
-                active = excluded.active
+                active = excluded.active,
+                trip_duration_type = excluded.trip_duration_type,
+                trip_duration_days = excluded.trip_duration_days,
+                preferred_departure_days = excluded.preferred_departure_days,
+                preferred_return_days = excluded.preferred_return_days
             """,
             [
                 route.route_id,
@@ -184,6 +194,10 @@ class Database:
                 json.dumps(route.preferred_airlines) if route.preferred_airlines else None,
                 route.notes,
                 1 if route.active else 0,
+                route.trip_duration_type,
+                route.trip_duration_days,
+                _to_json(route.preferred_departure_days),
+                _to_json(route.preferred_return_days),
             ],
         )
         self._conn.commit()
@@ -201,15 +215,22 @@ class Database:
             "origin", "destination", "trip_type", "earliest_departure",
             "latest_return", "date_flex_days", "max_stops", "passengers",
             "preferred_airlines", "notes", "active",
+            "trip_duration_type", "trip_duration_days",
+            "preferred_departure_days", "preferred_return_days",
         }
+        json_fields = {"preferred_departure_days", "preferred_return_days"}
         to_update = {k: v for k, v in fields.items() if k in allowed}
         if not to_update:
             return False
         sets = ", ".join(f"{k} = ?" for k in to_update)
-        vals = [
-            _to_isoformat(v) if k in ("earliest_departure", "latest_return") else v
-            for k, v in to_update.items()
-        ]
+        vals = []
+        for k, v in to_update.items():
+            if k in ("earliest_departure", "latest_return"):
+                vals.append(_to_isoformat(v))
+            elif k in json_fields:
+                vals.append(_to_json(v))
+            else:
+                vals.append(v)
         vals.append(route_id)
         cursor = self._conn.execute(
             f"UPDATE routes SET {sets} WHERE route_id = ?",
