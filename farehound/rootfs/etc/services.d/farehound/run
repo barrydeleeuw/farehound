@@ -1,0 +1,28 @@
+#!/usr/bin/with-contenv bashio
+
+# API keys from add-on options
+export SERPAPI_API_KEY=$(bashio::config 'serpapi_api_key')
+export ANTHROPIC_API_KEY=$(bashio::config 'anthropic_api_key')
+
+# Optional Telegram credentials
+TG_API_ID=$(bashio::config 'telegram_api_id')
+TG_API_HASH=$(bashio::config 'telegram_api_hash')
+if bashio::var.has_value "${TG_API_ID}"; then
+    export TELEGRAM_API_ID="${TG_API_ID}"
+    export TELEGRAM_API_HASH="${TG_API_HASH}"
+fi
+
+TG_BOT=$(bashio::config 'telegram_bot_token')
+TG_CHAT=$(bashio::config 'telegram_chat_id')
+if bashio::var.has_value "${TG_BOT}"; then
+    export TELEGRAM_BOT_TOKEN="${TG_BOT}"
+    export TELEGRAM_CHAT_ID="${TG_CHAT}"
+fi
+
+export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
+export FAREHOUND_DATA_DIR="/data"
+
+bashio::log.info "Starting FareHound..."
+
+cd /app
+exec python3 -m src.orchestrator

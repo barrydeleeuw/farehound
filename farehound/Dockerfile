@@ -13,9 +13,5 @@ RUN pip install --no-cache-dir --break-system-packages .
 
 COPY app-config.yaml ./config.yaml
 
-# s6-overlay v3 service: place run script in the right location
-RUN mkdir -p /etc/s6-overlay/s6-rc.d/farehound /etc/s6-overlay/s6-rc.d/user/contents.d
-COPY run.sh /etc/s6-overlay/s6-rc.d/farehound/run
-RUN chmod +x /etc/s6-overlay/s6-rc.d/farehound/run && \
-    echo "longrun" > /etc/s6-overlay/s6-rc.d/farehound/type && \
-    touch /etc/s6-overlay/s6-rc.d/user/contents.d/farehound
+# s6-overlay: copy rootfs overlay (services.d structure)
+COPY rootfs /
