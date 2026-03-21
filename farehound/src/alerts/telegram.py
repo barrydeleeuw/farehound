@@ -132,8 +132,8 @@ class TelegramNotifier:
         if deal_id:
             reply_markup = {
                 "inline_keyboard": [[
-                    {"text": "Book Now ✈️", "callback_data": f"book:{deal_id}"},
-                    {"text": "Not Interested 👎", "callback_data": f"dismiss:{deal_id}"},
+                    {"text": "Search Flights ✈️", "url": search_url},
+                    {"text": "Wait 🕐", "callback_data": f"wait:{deal_id}"},
                 ]]
             }
 
@@ -168,12 +168,32 @@ class TelegramNotifier:
         if deal_id:
             reply_markup = {
                 "inline_keyboard": [[
-                    {"text": "Book Now ✈️", "callback_data": f"book:{deal_id}"},
-                    {"text": "Not Interested 👎", "callback_data": f"dismiss:{deal_id}"},
+                    {"text": "Search Flights ✈️", "url": booking_url},
+                    {"text": "Wait 🕐", "callback_data": f"wait:{deal_id}"},
                 ]]
             }
 
         await self._send_message("\n".join(lines), reply_markup=reply_markup)
+
+    async def send_follow_up(self, deal_info: dict) -> None:
+        """Send a follow-up message for deals with no feedback after 3+ days."""
+        route = route_name(deal_info.get("origin", "???"), deal_info.get("destination", "???"))
+        price = deal_info.get("price", "?")
+        deal_id = deal_info.get("deal_id")
+
+        text = (
+            f"You saw the {route} deal at €{float(price):,.0f} three days ago. "
+            "Did you book it?"
+        )
+        reply_markup = None
+        if deal_id:
+            reply_markup = {
+                "inline_keyboard": [[
+                    {"text": "Yes, booked ✅", "callback_data": f"booked:{deal_id}"},
+                    {"text": "Still watching 👀", "callback_data": f"watching:{deal_id}"},
+                ]]
+            }
+        await self._send_message(text, reply_markup=reply_markup)
 
     async def send_daily_digest(self, routes_summary: list[dict]) -> None:
         if not routes_summary:

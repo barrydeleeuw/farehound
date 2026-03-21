@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import anthropic
 
@@ -31,13 +31,27 @@ Scoring guidance:
 IMPORTANT: Anchor your scoring primarily to the real data provided. Your historical \
 knowledge should enrich the analysis, not override it. A price that is genuinely \
 the lowest in 90 days of observations IS a good deal even if error fares have \
-historically gone lower — the traveller can't wait forever for a unicorn."""
+historically gone lower — the traveller can't wait forever for a unicorn.
+
+HONESTY RULES:
+- NEVER claim certainty about future price direction. State facts about where the \
+price sits relative to the data provided.
+- With fewer than 10 data points, always acknowledge limited data in your reasoning.
+- Do NOT use urgency language ("book now", "act fast", "don't wait") unless the \
+price is genuinely exceptional: below Google's typical low AND below our observed minimum.
+
+URGENCY FIELD RULES:
+- "book_now": ONLY when price < Google's typical low AND sample_count >= 5
+- "watch": good price but limited data (< 5 samples), OR price is in the lower \
+half of the typical range
+- "skip": price is above typical range or above our observed average"""
 
 _SCORE_PROMPT = """\
 TODAY: {today}
 ROUTE: {origin} → {destination}
 TRIP TYPE: {trip_type}
 TRAVEL DATES: {outbound_date} to {return_date} (±{date_flex} days flexible)
+DEPARTURE: {days_until_departure} days away
 PASSENGERS: {passengers}
 
 CURRENT FARE:
@@ -49,6 +63,8 @@ PRICE CONTEXT:
 {price_history_section}
 {serpapi_section}
 
+DATA CONFIDENCE: {sample_count} observations over {days_observed} days
+
 TRAVELLER PREFERENCES:
 - {traveller_name}, based at {home_airport}
 - Travelling with {passengers} passenger(s)
@@ -56,13 +72,13 @@ TRAVELLER PREFERENCES:
 {preferred_airlines_section}
 {past_decisions_section}
 {nearby_section}
-Score this deal. Use these past decisions to calibrate your scoring. The traveller's revealed preferences from actual booking behavior matter more than stated preferences when they conflict. The "reasoning" field will be shown as a phone notification, so keep it to 2-3 short sentences that help the traveller decide: mention the price vs. history, any connection/timing concerns, and whether to act now or wait. Be specific (cite numbers), not generic. If a nearby airport offers significant savings, mention the best alternative in the reasoning.
+Score this deal. Use these past decisions to calibrate your scoring. The traveller's revealed preferences from actual booking behavior matter more than stated preferences when they conflict. The "reasoning" field will be shown as a phone notification, so keep it to 2-3 short sentences that help the traveller decide: mention the price vs. ranges, any connection/timing concerns, and whether the data supports acting or waiting. Be factual. State price vs ranges. Acknowledge uncertainty when data is limited. Do not predict future prices. If a nearby airport offers significant savings, mention the best alternative in the reasoning.
 
 Respond with JSON only:
 {{
   "score": 0.0-1.0,
   "urgency": "book_now" | "watch" | "skip",
-  "reasoning": "2-3 sentences — specific, actionable, phone-friendly",
+  "reasoning": "2-3 sentences — specific, factual, phone-friendly",
   "booking_window_hours": estimated hours this fare is likely available
 }}"""
 
@@ -217,8 +233,35 @@ class DealScorer:
         date_flex = getattr(route, "date_flex_days", None) or getattr(route, "date_flexibility_days", 3)
         passengers = getattr(route, "passengers", snapshot.passengers)
 
+        # Days until departure
+        earliest_dep = getattr(route, "earliest_departure", None)
+        today = datetime.now(UTC).date()
+        if earliest_dep:
+            dep_date = earliest_dep if isinstance(earliest_dep, date) else today
+            days_until_departure = max(0, (dep_date - today).days)
+        else:
+            days_until_departure = "unknown"
+
+        # Data confidence
+        sample_count = price_history.get("count", 0)
+        first_seen = price_history.get("first_seen")
+        if first_seen and sample_count > 0:
+            if isinstance(first_seen, str):
+                first_date = datetime.fromisoformat(first_seen).date()
+            elif isinstance(first_seen, datetime):
+                first_date = first_seen.date()
+            elif isinstance(first_seen, date):
+                first_date = first_seen
+            else:
+                first_date = today
+            days_observed = max(1, (today - first_date).days)
+        elif sample_count > 0:
+            days_observed = "unknown"
+        else:
+            days_observed = 0
+
         return _SCORE_PROMPT.format(
-            today=datetime.now(UTC).strftime("%Y-%m-%d"),
+            today=today.strftime("%Y-%m-%d"),
             origin=origin,
             destination=destination,
             trip_type=trip_type,
@@ -231,6 +274,9 @@ class DealScorer:
             source=snapshot.source,
             price_history_section=price_history_section,
             serpapi_section=serpapi_section,
+            days_until_departure=days_until_departure,
+            sample_count=sample_count,
+            days_observed=days_observed,
             traveller_name=traveller_name,
             home_airport=home_airport,
             traveller_preferences_section=traveller_preferences_section,

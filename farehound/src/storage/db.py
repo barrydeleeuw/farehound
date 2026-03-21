@@ -344,6 +344,28 @@ class Database:
         )
         self._conn.commit()
 
+    def get_deals_pending_feedback(self, older_than_days: int = 3) -> list[dict]:
+        """Return deals where alert was sent 3+ days ago with no feedback."""
+        cutoff = _to_isoformat(datetime.now(UTC) - timedelta(days=older_than_days))
+        cursor = self._conn.execute(
+            """
+            SELECT
+                d.deal_id, d.route_id, r.origin, r.destination,
+                ps.lowest_price AS price
+            FROM deals d
+            JOIN routes r ON d.route_id = r.route_id
+            LEFT JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
+            WHERE d.alert_sent = 1
+              AND d.feedback IS NULL
+              AND d.alert_sent_at IS NOT NULL
+              AND d.alert_sent_at <= ?
+            ORDER BY d.alert_sent_at ASC
+            """,
+            [cutoff],
+        )
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
     def get_recent_feedback(self, limit: int = 20) -> list[dict]:
         cursor = self._conn.execute(
             """

@@ -6,7 +6,7 @@ WORKDIR /app
 # Install Python and jq
 RUN apk add --no-cache python3 py3-pip jq
 
-# Cache-bust: v1.2.2
+# Cache-bust: v1.3.0
 COPY pyproject.toml .
 COPY src/ ./src/
 

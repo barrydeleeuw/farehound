@@ -86,6 +86,15 @@ Intent-specific parameters:
 
 For general_chat, just set response_text to your helpful answer. No parameters needed.
 
+TIMING AND PRICING HONESTY:
+- When answering questions about timing (e.g. "when should I book?", "is this a good time?"), \
+check whether the user has an active route with price data. If so, reference that data — \
+don't give generic advice that could contradict the deal scoring.
+- Never claim certainty about future price direction. Say what the data shows, not what \
+prices "will" do.
+- If the user's trip is far out (> 3 months), acknowledge that prices can change \
+significantly and early data is directional, not definitive.
+
 CRITICAL SAFETY RULES:
 - NEVER return modify_trip or remove_trip intent for informational questions (e.g. "when's the best time to fly?", "how much does it cost?", "what's the weather like?").
 - Only return add_trip, modify_trip, or remove_trip when the user EXPLICITLY asks to change, add, or remove something.
@@ -301,6 +310,18 @@ class TripBot:
             self._db.update_deal_feedback(deal_id, "dismissed")
             answer_text = "Dismissed"
             suffix = "\n\n👎 Dismissed"
+        elif action == "wait":
+            self._db.update_deal_feedback(deal_id, "waiting")
+            answer_text = "Still watching this route"
+            suffix = "\n\n🕐 Noted — still watching this route"
+        elif action == "booked":
+            self._db.update_deal_feedback(deal_id, "booked")
+            answer_text = "Marked as booked!"
+            suffix = "\n\n✅ Marked as booked!"
+        elif action == "watching":
+            self._db.update_deal_feedback(deal_id, "watching")
+            answer_text = "Still watching"
+            suffix = "\n\n👀 Still watching this route"
         else:
             return
 

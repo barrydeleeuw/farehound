@@ -668,3 +668,68 @@ def test_airport_transport_parking_cost(db):
     assert ein["parking_cost_eur"] == 50
     ams = db.get_airport_transport("AMS")
     assert ams["parking_cost_eur"] is None
+
+
+# --- get_deals_pending_feedback ---
+
+def test_get_deals_pending_feedback(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    snap = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now - timedelta(days=4),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+    )
+    db.insert_snapshot(snap)
+    # Deal alerted 4 days ago, no feedback
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.85"), alert_sent=True,
+        alert_sent_at=now - timedelta(days=4),
+    )
+    db.insert_deal(deal)
+
+    pending = db.get_deals_pending_feedback(older_than_days=3)
+    assert len(pending) == 1
+    assert pending[0]["deal_id"] == "d1"
+    assert pending[0]["origin"] == "AMS"
+    assert float(pending[0]["price"]) == 400.0
+
+
+def test_get_deals_pending_feedback_excludes_recent(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    snap = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now - timedelta(hours=12),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+    )
+    db.insert_snapshot(snap)
+    # Deal alerted 12 hours ago — too recent
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.85"), alert_sent=True,
+        alert_sent_at=now - timedelta(hours=12),
+    )
+    db.insert_deal(deal)
+
+    pending = db.get_deals_pending_feedback(older_than_days=3)
+    assert len(pending) == 0
+
+
+def test_get_deals_pending_feedback_excludes_with_feedback(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    snap = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now - timedelta(days=4),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+    )
+    db.insert_snapshot(snap)
+    # Deal with feedback already provided
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.85"), alert_sent=True,
+        alert_sent_at=now - timedelta(days=4), feedback="booked",
+    )
+    db.insert_deal(deal)
+
+    pending = db.get_deals_pending_feedback(older_than_days=3)
+    assert len(pending) == 0

@@ -784,6 +784,7 @@ async def test_callback_unknown_action_ignored(bot):
         },
     }
     await bot._handle_update(update, client)
+    # unknown action: no API calls
     client.post.assert_not_called()
 
 
@@ -807,4 +808,96 @@ async def test_callback_skips_message_handling(bot):
         },
     }
     await bot._handle_update(update, client)
+    # callback with bad format: no API calls
     client.post.assert_not_called()
+
+
+# --- New callback actions: wait, booked, watching ---
+
+
+@pytest.mark.asyncio
+async def test_callback_wait_updates_feedback(bot, db):
+    """Wait callback stores 'waiting' feedback in DB."""
+    from src.storage.models import Deal, PriceSnapshot
+    from datetime import UTC, datetime
+
+    route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
+    db.upsert_route(route)
+    snap = PriceSnapshot(
+        snapshot_id="snap_w", route_id="ams_nrt", window_id=None,
+        observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
+    )
+    db.insert_snapshot(snap)
+    deal = Deal(deal_id="deal_wait", snapshot_id="snap_w", route_id="ams_nrt", score=0.8)
+    db.insert_deal(deal)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_callback_update("wait", "deal_wait"), client)
+
+    feedback = db.get_recent_feedback(limit=1)
+    assert len(feedback) == 1
+    assert feedback[0]["feedback"] == "waiting"
+
+    edit_calls = [c for c in client.post.call_args_list if "editMessageText" in str(c)]
+    assert len(edit_calls) == 1
+    edit_payload = edit_calls[0].kwargs.get("json") or edit_calls[0][1]["json"]
+    assert "🕐 Noted" in edit_payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_callback_booked_updates_feedback(bot, db):
+    """Booked follow-up callback stores 'booked' feedback in DB."""
+    from src.storage.models import Deal, PriceSnapshot
+    from datetime import UTC, datetime
+
+    route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
+    db.upsert_route(route)
+    snap = PriceSnapshot(
+        snapshot_id="snap_b", route_id="ams_nrt", window_id=None,
+        observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
+    )
+    db.insert_snapshot(snap)
+    deal = Deal(deal_id="deal_booked", snapshot_id="snap_b", route_id="ams_nrt", score=0.9)
+    db.insert_deal(deal)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_callback_update("booked", "deal_booked"), client)
+
+    feedback = db.get_recent_feedback(limit=1)
+    assert len(feedback) == 1
+    assert feedback[0]["feedback"] == "booked"
+
+
+@pytest.mark.asyncio
+async def test_callback_watching_updates_feedback(bot, db):
+    """Watching follow-up callback stores 'watching' feedback in DB."""
+    from src.storage.models import Deal, PriceSnapshot
+    from datetime import UTC, datetime
+
+    route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
+    db.upsert_route(route)
+    snap = PriceSnapshot(
+        snapshot_id="snap_wt", route_id="ams_nrt", window_id=None,
+        observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
+    )
+    db.insert_snapshot(snap)
+    deal = Deal(deal_id="deal_watching", snapshot_id="snap_wt", route_id="ams_nrt", score=0.7)
+    db.insert_deal(deal)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_callback_update("watching", "deal_watching"), client)
+
+    feedback = db.get_recent_feedback(limit=1)
+    assert len(feedback) == 1
+    assert feedback[0]["feedback"] == "watching"
+
+    edit_calls = [c for c in client.post.call_args_list if "editMessageText" in str(c)]
+    assert len(edit_calls) == 1
+    edit_payload = edit_calls[0].kwargs.get("json") or edit_calls[0][1]["json"]
+    assert "👀 Still watching" in edit_payload["text"]

@@ -210,6 +210,16 @@ class Orchestrator:
         )
         logger.info("Scheduled daily digest at %02d:%02d", digest_hour, digest_minute)
 
+        # Schedule pending feedback follow-ups (hourly)
+        self.scheduler.add_job(
+            self._check_pending_feedback,
+            "interval",
+            hours=1,
+            id="check_pending_feedback",
+            misfire_grace_time=60,
+        )
+        logger.info("Scheduled pending feedback check every hour")
+
         # Register signal handlers
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.shutdown(s)))
@@ -257,6 +267,21 @@ class Orchestrator:
         exc = task.exception()
         if exc:
             logger.error("Community listener crashed: %s", exc, exc_info=exc)
+
+    async def _check_pending_feedback(self) -> None:
+        """Send follow-up messages for deals alerted 3+ days ago with no feedback."""
+        if self.telegram_notifier is None:
+            return
+        loop = asyncio.get_running_loop()
+        pending = await loop.run_in_executor(None, self.db.get_deals_pending_feedback)
+        if not pending:
+            return
+        logger.info("Sending follow-up for %d deals with no feedback", len(pending))
+        for deal in pending:
+            try:
+                await self.telegram_notifier.send_follow_up(deal)
+            except Exception:
+                logger.exception("Failed to send follow-up for deal %s", deal.get("deal_id"))
 
     async def shutdown(self, sig: signal.Signals | None = None) -> None:
         if sig:
@@ -393,10 +418,16 @@ class Orchestrator:
                 "destination": route.destination,
                 "lowest_price": float(latest.lowest_price) if latest.lowest_price else None,
                 "trend": trend,
+                "passengers": route.passengers,
             }
 
             if watch_deals:
                 summary["watch_deals"] = len(watch_deals)
+
+            # Add nearby airport comparison for digest
+            nearby = self._latest_nearby_comparison.get(route.route_id)
+            if nearby:
+                summary["nearby_prices"] = nearby
 
             summaries.append(summary)
 
@@ -733,6 +764,7 @@ class Orchestrator:
                 home_airport=self.config.traveller.home_airport,
                 traveller_preferences=self.config.traveller.preferences or None,
                 past_feedback=feedback or None,
+                nearby_comparison=self._latest_nearby_comparison.get(route.route_id),
             )
             logger.info(
                 "Route %s scored: %.2f (%s) — %s",

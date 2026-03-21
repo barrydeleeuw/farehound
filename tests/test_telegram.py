@@ -147,7 +147,7 @@ async def test_send_error_fare_alert_format(notifier):
         assert "Error Fare" in text
         assert "BOOK NOW" in text
         assert "€200" in text
-        assert "Book Now" in text
+        assert "Search Flights" in text or "Book Now" in text
 
 
 # --- send_daily_digest ---
@@ -247,3 +247,112 @@ def test_google_flights_url(notifier):
     assert "2026-10-01" in url
     assert "2026-10-15" in url
     assert url.startswith("https://www.google.com/travel/flights")
+
+
+# --- send_deal_alert inline keyboard ---
+
+@pytest.mark.asyncio
+async def test_send_deal_alert_buttons(notifier):
+    """Deal alert buttons: Search Flights (URL) + Wait (callback)."""
+    deal_info = {
+        "origin": "AMS",
+        "destination": "NRT",
+        "price": 485,
+        "score": 0.88,
+        "airline": "KLM",
+        "dates": "2026-10-01 to 2026-10-15",
+        "deal_id": "deal_123",
+    }
+
+    with patch("src.alerts.telegram.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
+        await notifier.send_deal_alert(deal_info)
+
+        payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
+        keyboard = payload["reply_markup"]["inline_keyboard"]
+        assert len(keyboard) == 1
+        row = keyboard[0]
+        assert row[0]["text"] == "Search Flights ✈️"
+        assert "url" in row[0]
+        assert row[0]["url"].startswith("https://www.google.com/travel/flights")
+        assert row[1]["text"] == "Wait 🕐"
+        assert row[1]["callback_data"] == "wait:deal_123"
+
+
+# --- send_error_fare_alert inline keyboard ---
+
+@pytest.mark.asyncio
+async def test_send_error_fare_alert_buttons(notifier):
+    """Error fare alert buttons: Search Flights (URL) + Wait (callback)."""
+    deal_info = {
+        "origin": "AMS",
+        "destination": "NRT",
+        "price": 200,
+        "score": 0.95,
+        "airline": "QR",
+        "dates": "2026-10-01 to 2026-10-15",
+        "deal_id": "deal_456",
+    }
+
+    with patch("src.alerts.telegram.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
+        await notifier.send_error_fare_alert(deal_info)
+
+        payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
+        keyboard = payload["reply_markup"]["inline_keyboard"]
+        row = keyboard[0]
+        assert row[0]["text"] == "Search Flights ✈️"
+        assert "url" in row[0]
+        assert row[1]["text"] == "Wait 🕐"
+        assert row[1]["callback_data"] == "wait:deal_456"
+
+
+# --- send_follow_up ---
+
+@pytest.mark.asyncio
+async def test_send_follow_up(notifier):
+    """Follow-up message has booked/watching buttons."""
+    deal_info = {
+        "origin": "AMS",
+        "destination": "NRT",
+        "price": 485,
+        "deal_id": "deal_789",
+    }
+
+    with patch("src.alerts.telegram.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
+        await notifier.send_follow_up(deal_info)
+
+        payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
+        text = payload["text"]
+        assert "Amsterdam" in text
+        assert "Tokyo Narita" in text
+        assert "€485" in text
+        assert "three days ago" in text
+        keyboard = payload["reply_markup"]["inline_keyboard"]
+        row = keyboard[0]
+        assert row[0]["text"] == "Yes, booked ✅"
+        assert row[0]["callback_data"] == "booked:deal_789"
+        assert row[1]["text"] == "Still watching 👀"
+        assert row[1]["callback_data"] == "watching:deal_789"

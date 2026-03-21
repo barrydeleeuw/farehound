@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -98,6 +98,7 @@ async def test_score_deal_mocked():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     result = await scorer.score_deal(
         snapshot=snapshot,
@@ -126,6 +127,7 @@ def test_build_prompt_no_history():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     prompt = scorer._build_prompt(
         snapshot=snapshot,
@@ -139,6 +141,7 @@ def test_build_prompt_no_history():
     assert "NRT" in prompt
     assert "No historical price data" in prompt
     assert "Barry" in prompt
+    assert "DATA CONFIDENCE: 0 observations" in prompt
 
 
 def test_build_prompt_with_history():
@@ -159,6 +162,7 @@ def test_build_prompt_with_history():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = ["KLM"]
+    route.earliest_departure = date(2026, 7, 1)
 
     prompt = scorer._build_prompt(
         snapshot=snapshot,
@@ -171,6 +175,7 @@ def test_build_prompt_with_history():
     assert "observed average" in prompt
     assert "error fare: YES" in prompt
     assert "KLM" in prompt
+    assert "DATA CONFIDENCE: 10 observations" in prompt
 
 
 def test_build_prompt_with_past_feedback():
@@ -188,6 +193,7 @@ def test_build_prompt_with_past_feedback():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     past_feedback = [
         {
@@ -239,6 +245,7 @@ def test_build_prompt_without_past_feedback():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     prompt = scorer._build_prompt(
         snapshot=snapshot,
@@ -267,6 +274,7 @@ def test_build_prompt_past_feedback_null_fields():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     past_feedback = [
         {"feedback": None, "origin": "AMS", "destination": "NRT", "price": None, "score": None},
@@ -300,6 +308,7 @@ def test_build_prompt_with_nearby_comparison():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     nearby = [
         {
@@ -357,6 +366,7 @@ def test_build_prompt_without_nearby_comparison():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     prompt = scorer._build_prompt(
         snapshot=snapshot,
@@ -401,6 +411,7 @@ async def test_score_deal_with_past_feedback():
     route.date_flex_days = 3
     route.passengers = 2
     route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
 
     past_feedback = [
         {"feedback": "booked", "origin": "AMS", "destination": "NRT", "price": 400.0, "score": 0.90},
