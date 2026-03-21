@@ -52,10 +52,10 @@ async def test_send_deal_alert_format(notifier):
 
         assert "123:ABC" in url
         assert payload["chat_id"] == "-100999"
-        assert "AMS" in payload["text"]
-        assert "NRT" in payload["text"]
+        assert "Amsterdam" in payload["text"]
+        assert "Tokyo Narita" in payload["text"]
         assert "€485" in payload["text"]
-        assert "0.88" in payload["text"]
+        assert "Good Deal" in payload["text"]
         assert "Search Flights" in payload["text"]
         assert payload["parse_mode"] == "Markdown"
         assert payload["disable_web_page_preview"] is True
@@ -120,9 +120,9 @@ async def test_send_daily_digest_format(notifier):
         assert "2 route(s)" in text
         assert "Amsterdam → Tokyo Narita" in text
         assert "€485" in text
-        assert "↓" in text
+        assert "📉" in text
         assert "Amsterdam → Istanbul" in text
-        assert "→" in text  # stable trend
+        assert "➡️" in text  # stable trend
 
 
 @pytest.mark.asyncio

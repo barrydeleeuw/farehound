@@ -147,7 +147,7 @@ class Orchestrator:
             "interval",
             hours=interval_hours,
             id="poll_routes",
-            next_run_time=datetime.now(UTC),  # run immediately on start
+            misfire_grace_time=60,  # allow 60s grace for startup delays
         )
         logger.info("Scheduled polling every %d hours", interval_hours)
 
@@ -192,6 +192,9 @@ class Orchestrator:
 
         self.scheduler.start()
         logger.info("Orchestrator started")
+
+        # Run first poll immediately (scheduler interval starts after this)
+        asyncio.create_task(self.poll_routes())
 
         # Keep running until shutdown
         try:

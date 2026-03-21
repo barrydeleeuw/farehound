@@ -11,6 +11,32 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org"
 
 
+def _deal_emoji(score: float | None, urgency: str | None = None) -> str:
+    """Return an emoji indicating deal quality."""
+    if score is None:
+        return "✈️"
+    if score >= 0.9:
+        return "🔥"  # Exceptional
+    if score >= 0.75:
+        return "💰"  # Good deal
+    if score >= 0.50:
+        return "👀"  # Worth watching
+    return "😴"  # Skip
+
+
+def _deal_label(score: float | None, urgency: str | None = None) -> str:
+    """Return a human-readable deal quality label."""
+    if score is None:
+        return "Deal"
+    if score >= 0.9:
+        return "Exceptional Deal"
+    if score >= 0.75:
+        return "Good Deal"
+    if score >= 0.50:
+        return "Worth Watching"
+    return "Not Great"
+
+
 class TelegramNotifier:
     """Send flight deal alerts via Telegram Bot API."""
 
@@ -59,15 +85,17 @@ class TelegramNotifier:
         dest = deal_info.get("destination", "???")
         price = deal_info.get("price", "?")
         score = deal_info.get("score")
+        urgency = deal_info.get("urgency")
         reasoning = deal_info.get("reasoning", "")
         airline = deal_info.get("airline", "Unknown")
         dates = deal_info.get("dates", "")
         search_url = deal_info.get("google_flights_url") or self._google_flights_url(deal_info)
 
-        score_str = f" ({score:.2f})" if score is not None else ""
+        emoji = _deal_emoji(score, urgency)
+        label = _deal_label(score, urgency)
         route = route_name(origin, dest)
         lines = [
-            f"✈️ *Deal{score_str}* — {route}",
+            f"{emoji} *{label}* — {route}",
             f"*€{price}* | {airline} | {dates}",
         ]
         if reasoning:
@@ -90,10 +118,9 @@ class TelegramNotifier:
             or self._google_flights_url(deal_info)
         )
 
-        score_str = f" ({score:.2f})" if score is not None else ""
         route = route_name(origin, dest)
         lines = [
-            f"🔥 *Error Fare{score_str}* — {route}",
+            f"🔥 *Error Fare* — {route}",
             f"*€{price}* | {airline} | {dates}",
             "BOOK NOW — these usually disappear fast!",
         ]
@@ -107,13 +134,15 @@ class TelegramNotifier:
         if not routes_summary:
             return
 
-        lines = [f"✈️ *FareHound Daily* — {len(routes_summary)} route(s)\n"]
+        lines = [f"📊 *FareHound Daily* — {len(routes_summary)} route(s)\n"]
         for route in routes_summary:
             origin = route.get("origin", "?")
             dest = route.get("destination", "?")
             lowest = route.get("lowest_price", "—")
             trend = route.get("trend", "")
-            trend_icon = {"down": "↓", "up": "↑", "stable": "→"}.get(trend, "")
-            lines.append(f"{route_name(origin, dest)}: *€{lowest}* {trend_icon}")
+            trend_icon = {"down": "📉", "up": "📈", "stable": "➡️"}.get(trend, "")
+            score = route.get("deal_score")
+            emoji = _deal_emoji(score)
+            lines.append(f"{emoji} {route_name(origin, dest)}: *€{lowest}* {trend_icon}")
 
         await self._send_message("\n".join(lines))
