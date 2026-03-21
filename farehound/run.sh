@@ -1,23 +1,23 @@
-#!/usr/bin/with-contenv bashio
+#!/usr/bin/env bash
 
-# API keys (read from HA add-on options, exported for config.py env resolution)
-export SERPAPI_API_KEY=$(bashio::config 'serpapi_api_key')
-export ANTHROPIC_API_KEY=$(bashio::config 'anthropic_api_key')
+# API keys (read from HA add-on options via /data/options.json)
+if [ -f /data/options.json ]; then
+    export SERPAPI_API_KEY=$(jq -r '.serpapi_api_key' /data/options.json)
+    export ANTHROPIC_API_KEY=$(jq -r '.anthropic_api_key' /data/options.json)
 
-# Optional Telegram credentials
-TELEGRAM_API_ID=$(bashio::config 'telegram_api_id')
-TELEGRAM_API_HASH=$(bashio::config 'telegram_api_hash')
-if [[ -n "$TELEGRAM_API_ID" ]]; then
-    export TELEGRAM_API_ID
-    export TELEGRAM_API_HASH
-fi
+    TG_API_ID=$(jq -r '.telegram_api_id // empty' /data/options.json)
+    TG_API_HASH=$(jq -r '.telegram_api_hash // empty' /data/options.json)
+    if [ -n "$TG_API_ID" ]; then
+        export TELEGRAM_API_ID="$TG_API_ID"
+        export TELEGRAM_API_HASH="$TG_API_HASH"
+    fi
 
-# Optional Telegram bot alerts
-TELEGRAM_BOT_TOKEN=$(bashio::config 'telegram_bot_token')
-TELEGRAM_CHAT_ID=$(bashio::config 'telegram_chat_id')
-if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
-    export TELEGRAM_BOT_TOKEN
-    export TELEGRAM_CHAT_ID
+    TG_BOT=$(jq -r '.telegram_bot_token // empty' /data/options.json)
+    TG_CHAT=$(jq -r '.telegram_chat_id // empty' /data/options.json)
+    if [ -n "$TG_BOT" ]; then
+        export TELEGRAM_BOT_TOKEN="$TG_BOT"
+        export TELEGRAM_CHAT_ID="$TG_CHAT"
+    fi
 fi
 
 # HA Supervisor token for API access (injected by Supervisor)
@@ -26,7 +26,7 @@ export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
 # DuckDB data directory
 export FAREHOUND_DATA_DIR="/data"
 
-bashio::log.info "Starting FareHound..."
+echo "Starting FareHound..."
 
 cd /app
 exec python3 -m src.orchestrator

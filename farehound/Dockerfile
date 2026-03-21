@@ -3,9 +3,9 @@ FROM ${BUILD_FROM}
 
 WORKDIR /app
 
-# Install Python on Debian base
+# Install Python and jq on Debian base
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv jq && \
     rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
@@ -15,7 +15,8 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir --break-system-packages .
 
 COPY app-config.yaml ./config.yaml
+COPY run.sh /run.sh
+RUN chmod +x /run.sh
 
-# s6-overlay service directory — this is how HA add-ons run long-lived services
-COPY run.sh /etc/services.d/farehound/run
-RUN chmod +x /etc/services.d/farehound/run
+ENTRYPOINT []
+CMD ["/run.sh"]
