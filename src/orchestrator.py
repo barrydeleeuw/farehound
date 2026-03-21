@@ -11,7 +11,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts.homeassistant import HomeAssistantNotifier
 from src.analysis.scorer import DealScorer
-from src.apis.serpapi import SerpAPIClient, SerpAPIError, generate_date_windows
+from src.apis.community import CommunityListener
+from src.apis.community import CommunityFeedConfig as CommunityFeed
+from src.apis.serpapi import SerpAPIClient, SerpAPIError, VerificationResult, generate_date_windows
 from src.config import AppConfig, Route as ConfigRoute, load_config
 from src.storage.db import Database
 from src.storage.models import Deal, PollWindow, PriceSnapshot, Route as DBRoute
@@ -68,6 +70,19 @@ class Orchestrator:
         self._first_run = True
         self._last_full_rescan: datetime | None = None
 
+        # Community listener (Layer 2) — only if Telegram is configured
+        self.community_listener: CommunityListener | None = None
+        if config.telegram is not None and config.community_feeds:
+            feeds = [
+                CommunityFeed(channel=f.channel, filter_origins=f.filter_origins)
+                for f in config.community_feeds
+            ]
+            self.community_listener = CommunityListener(
+                api_id=config.telegram.api_id,
+                api_hash=config.telegram.api_hash,
+                feeds=feeds,
+            )
+
     async def start(self) -> None:
         loop = asyncio.get_event_loop()
 
@@ -107,6 +122,12 @@ class Orchestrator:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.shutdown(s)))
 
+        # Start community listener as concurrent task
+        if self.community_listener is not None:
+            await self.community_listener.start(callback=self.on_community_deal)
+            asyncio.create_task(self.community_listener.run_until_disconnected())
+            logger.info("Community listener started")
+
         self.scheduler.start()
         logger.info("Orchestrator started")
 
@@ -122,6 +143,9 @@ class Orchestrator:
             logger.info("Received signal %s, shutting down", sig.name)
         else:
             logger.info("Shutting down")
+
+        if self.community_listener is not None:
+            await self.community_listener.disconnect()
 
         self.scheduler.shutdown(wait=False)
         self.db.close()
@@ -457,6 +481,224 @@ class Orchestrator:
                 await self.notifier.send_deal_alert(deal_info)
             except Exception:
                 logger.exception("Failed to send alert for route %s", route.route_id)
+
+    async def on_community_deal(self, deal_info: dict) -> None:
+        """Handle a deal detected from community channels (Layer 2).
+
+        1. Match against active routes
+        2. Verify fare via SerpAPI
+        3. Score with Claude (community_flagged=True)
+        4. Send error fare alert if score meets threshold
+        """
+        loop = asyncio.get_event_loop()
+        origin = (deal_info.get("origin") or "").upper()
+        destination = (deal_info.get("destination") or "").upper()
+        community_price = deal_info.get("price")
+
+        if not origin or not destination:
+            logger.debug("Community deal missing origin/destination, skipping")
+            return
+
+        # Match against active routes
+        routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
+        matched = [
+            r for r in routes
+            if r.origin.upper() == origin and r.destination.upper() == destination
+        ]
+
+        if not matched:
+            logger.debug(
+                "Community deal %s → %s does not match any active route", origin, destination,
+            )
+            return
+
+        route = matched[0]
+        logger.info(
+            "Community deal matches route %s: %s → %s (community price: %s)",
+            route.route_id, origin, destination, community_price,
+        )
+
+        # Pick a verification date — use community dates if available, else route defaults
+        dates = deal_info.get("dates", [])
+        outbound_date: date | None = None
+        return_date: date | None = None
+        if dates:
+            try:
+                outbound_date = date.fromisoformat(dates[0])
+                if len(dates) > 1:
+                    return_date = date.fromisoformat(dates[1])
+            except (ValueError, TypeError):
+                pass
+        if outbound_date is None and route.earliest_departure:
+            outbound_date = route.earliest_departure
+            return_date = route.latest_return
+
+        if outbound_date is None:
+            logger.warning("No dates available for verification of community deal, skipping")
+            return
+
+        # Verify fare via SerpAPI
+        try:
+            verification = await self.serpapi.verify_fare(
+                origin=origin,
+                destination=destination,
+                outbound_date=outbound_date,
+                return_date=return_date,
+                expected_price=community_price or 0,
+                passengers=route.passengers,
+            )
+        except SerpAPIError as e:
+            logger.error("SerpAPI verification failed for community deal: %s", e)
+            return
+
+        if not verification.verified:
+            logger.info(
+                "Community deal %s → %s not verified (actual: €%s, expected: €%s)",
+                origin, destination, verification.actual_price, community_price,
+            )
+            return
+
+        actual_price = verification.actual_price
+        if actual_price is None:
+            logger.warning("Verification returned no price for %s → %s", origin, destination)
+            return
+
+        # Store snapshot from verification
+        now = datetime.now(UTC)
+        best_flight = verification.flights[0] if verification.flights else None
+        insights = verification.price_insights
+        typical_range = insights.get("typical_price_range", [])
+
+        snapshot = PriceSnapshot(
+            snapshot_id=uuid4().hex,
+            route_id=route.route_id,
+            observed_at=now,
+            source="serpapi_verify",
+            passengers=route.passengers,
+            outbound_date=outbound_date,
+            return_date=return_date,
+            lowest_price=Decimal(str(actual_price)),
+            currency=self.config.serpapi.currency,
+            best_flight=best_flight,
+            all_flights=verification.flights,
+            price_level=insights.get("price_level"),
+            typical_low=Decimal(str(typical_range[0])) if len(typical_range) > 0 else None,
+            typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
+            price_history=insights.get("price_history"),
+        )
+
+        await loop.run_in_executor(None, self.db.insert_snapshot, snapshot)
+        logger.info(
+            "Stored verification snapshot for %s: €%s", route.route_id, actual_price,
+        )
+
+        # Score with Claude (community_flagged=True)
+        history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
+        avg_price = history.get("avg_price")
+
+        score_result = None
+        try:
+            score_result = await self.scorer.score_deal(
+                snapshot=snapshot,
+                route=route,
+                price_history=history,
+                community_flagged=True,
+                traveller_name=self.config.traveller.name,
+                home_airport=self.config.traveller.home_airport,
+                traveller_preferences=self.config.traveller.preferences or None,
+            )
+            logger.info(
+                "Community deal scored: %.2f (%s) — %s",
+                score_result.score, score_result.urgency, score_result.reasoning,
+            )
+        except Exception:
+            logger.exception("Claude scoring failed for community deal, sending price-only alert")
+            # Fallback: send price-only alert without scoring
+            fallback_info = {
+                "origin": origin,
+                "destination": destination,
+                "price": actual_price,
+                "airline": "Unknown",
+                "dates": f"{outbound_date} to {return_date}" if return_date else str(outbound_date),
+                "outbound_date": str(outbound_date),
+                "return_date": str(return_date) if return_date else "",
+                "passengers": route.passengers,
+                "booking_url": verification.booking_url,
+                "reasoning": f"Community error fare (scoring unavailable). Verified at €{actual_price}.",
+            }
+            try:
+                await self.notifier.send_error_fare_alert(fallback_info)
+            except Exception:
+                logger.exception("Failed to send fallback error fare alert")
+            # Still store the deal
+            deal = Deal(
+                deal_id=uuid4().hex,
+                snapshot_id=snapshot.snapshot_id,
+                route_id=route.route_id,
+                score=Decimal("0.70"),
+                urgency="book_now",
+                reasoning="Community error fare (scoring unavailable)",
+                booking_url=verification.booking_url,
+                alert_sent=True,
+                alert_sent_at=now,
+            )
+            await loop.run_in_executor(None, self.db.insert_deal, deal)
+            return
+
+        # Store deal record
+        booking_url = verification.booking_url
+        deal = Deal(
+            deal_id=uuid4().hex,
+            snapshot_id=snapshot.snapshot_id,
+            route_id=route.route_id,
+            score=Decimal(str(round(score_result.score, 2))),
+            urgency=score_result.urgency,
+            reasoning=score_result.reasoning,
+            booking_url=booking_url,
+        )
+
+        alert_threshold = self.config.scoring.alert_threshold
+        if score_result.score >= alert_threshold:
+            deal.alert_sent = True
+            deal.alert_sent_at = now
+
+            # Extract airline info from best flight
+            airline = "Unknown"
+            stops = 0
+            if best_flight:
+                flights_list = best_flight.get("flights", [])
+                if flights_list:
+                    airline = flights_list[0].get("airline", "Unknown")
+                stops = max(0, len(flights_list) - 1) if flights_list else 0
+
+            alert_info = {
+                "origin": origin,
+                "destination": destination,
+                "price": actual_price,
+                "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
+                "airline": airline,
+                "stops": stops,
+                "dates": f"{outbound_date} to {return_date}" if return_date else str(outbound_date),
+                "outbound_date": str(outbound_date),
+                "return_date": str(return_date) if return_date else "",
+                "passengers": route.passengers,
+                "score": score_result.score,
+                "urgency": score_result.urgency,
+                "reasoning": score_result.reasoning,
+                "booking_url": booking_url,
+            }
+
+            try:
+                await self.notifier.send_error_fare_alert(alert_info)
+            except Exception:
+                logger.exception("Failed to send error fare alert for %s", route.route_id)
+        else:
+            logger.info(
+                "Community deal scored %.2f (below threshold %.2f), not alerting",
+                score_result.score, alert_threshold,
+            )
+
+        await loop.run_in_executor(None, self.db.insert_deal, deal)
 
     @staticmethod
     def _static_fallback(price: float, avg_price: Decimal | None):

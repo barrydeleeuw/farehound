@@ -53,10 +53,13 @@ scoring:
 
 community_feeds:
   - type: telegram_channel
-    channel: "@secretflyingdeals"
+    channel: "@fly4free_com"
     filter_origins: [AMS, BRU, DUS, RTM]
   - type: telegram_channel
-    channel: "@error_fares"
+    channel: "@holidaypiratesUK"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: telegram_channel
+    channel: "@trip4world"
     filter_origins: [AMS, BRU, DUS, RTM]
 
 telegram:

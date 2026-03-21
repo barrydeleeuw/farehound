@@ -17,6 +17,15 @@ class SerpAPIError(Exception):
 
 
 @dataclass
+class VerificationResult:
+    verified: bool
+    actual_price: float | None = None
+    booking_url: str | None = None
+    price_insights: dict = field(default_factory=dict)
+    flights: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class FlightSearchResult:
     best_flights: list[dict] = field(default_factory=list)
     other_flights: list[dict] = field(default_factory=list)
@@ -114,6 +123,92 @@ class SerpAPIClient:
         )
 
         return result
+
+    async def verify_fare(
+        self,
+        origin: str,
+        destination: str,
+        outbound_date: str | date,
+        return_date: str | date | None = None,
+        expected_price: float = 0,
+        passengers: int = 2,
+    ) -> VerificationResult:
+        """Verify a community-flagged fare via SerpAPI (Layer 2).
+
+        Searches Google Flights for the given route and compares the actual
+        price against the expected price. A fare is considered verified if
+        the actual price is within 20% of the expected price.
+
+        Args:
+            origin: IATA airport code.
+            destination: IATA airport code.
+            outbound_date: Departure date.
+            return_date: Return date (optional for one-way).
+            expected_price: Price reported by the community source.
+            passengers: Number of adult passengers.
+
+        Returns:
+            VerificationResult with verification status, actual price,
+            booking URL, price insights, and flight options.
+        """
+        logger.info(
+            "Verifying fare %s → %s (expected €%.0f, %d pax)",
+            origin, destination, expected_price, passengers,
+        )
+
+        result = await self.search_flights(
+            origin=origin,
+            destination=destination,
+            outbound_date=outbound_date,
+            return_date=return_date,
+            passengers=passengers,
+            trip_type="round_trip" if return_date else "one_way",
+        )
+
+        # Find the lowest actual price from results
+        all_flights = result.best_flights + result.other_flights
+        actual_price: float | None = None
+        if all_flights:
+            prices = [f["price"] for f in all_flights if "price" in f]
+            if prices:
+                actual_price = min(prices)
+
+        # Fall back to price_insights lowest_price
+        if actual_price is None:
+            actual_price = result.price_insights.get("lowest_price")
+
+        # Extract booking URL from booking_options or fall back to Google Flights URL
+        booking_url: str | None = None
+        for option in result.booking_options:
+            together = option.get("together", {})
+            req = together.get("booking_request", {})
+            if req.get("url"):
+                booking_url = req["url"]
+                break
+        if not booking_url:
+            gf_url = result.raw_response.get("search_metadata", {}).get(
+                "google_flights_url"
+            )
+            if gf_url:
+                booking_url = gf_url
+
+        # Verified if actual price is within 20% of expected
+        verified = False
+        if actual_price is not None and expected_price > 0:
+            verified = actual_price <= expected_price * 1.2
+
+        logger.info(
+            "Verification: actual=€%s, expected=€%.0f, verified=%s",
+            actual_price, expected_price, verified,
+        )
+
+        return VerificationResult(
+            verified=verified,
+            actual_price=actual_price,
+            booking_url=booking_url,
+            price_insights=result.price_insights,
+            flights=all_flights,
+        )
 
     def _warn_rate_limit(self) -> None:
         if self._calls_this_month >= 900:
