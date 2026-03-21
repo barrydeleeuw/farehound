@@ -445,13 +445,7 @@ class Orchestrator:
         # Decide which windows to poll
         windows_to_poll = await self._select_windows(route, windows)
 
-        # Poll secondary airports BEFORE main search so nearby comparison
-        # data is available when alerts fire (every other cycle to save API calls)
-        if self._secondary_poll_counter % 2 == 0:
-            await self._poll_secondary_airports(route, windows_to_poll)
-        else:
-            logger.info("Skipping secondary airport poll this cycle (counter=%d)", self._secondary_poll_counter)
-
+        # Poll primary airport first for all windows
         for outbound, return_dt in windows_to_poll:
             try:
                 await self._search_and_store(route, outbound, return_dt)
@@ -466,6 +460,13 @@ class Orchestrator:
                     route.route_id, outbound, return_dt, e,
                     exc_info=True,
                 )
+
+        # Now poll secondary airports (primary data is available for comparison)
+        if self._secondary_poll_counter % 2 == 0:
+            try:
+                await self._poll_secondary_airports(route, windows_to_poll)
+            except Exception as e:
+                logger.error("Secondary airport polling failed for %s: %s", route.route_id, e, exc_info=True)
 
     async def _select_windows(
         self, route: DBRoute, all_windows: list[tuple[date, date]]

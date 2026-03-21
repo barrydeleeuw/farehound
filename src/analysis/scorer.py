@@ -241,7 +241,14 @@ class DealScorer:
 
     def _parse_response(self, raw: str) -> DealScore:
         try:
-            data = json.loads(raw)
+            # Strip markdown code fences if present
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+            data = json.loads(cleaned)
             return DealScore(
                 score=float(data["score"]),
                 urgency=data["urgency"],
