@@ -1,6 +1,6 @@
 # FareHound — Technical Reference
 
-FareHound is a personal flight fare monitoring service deployed as a Home Assistant add-on. It combines scheduled price polling via SerpAPI Google Flights with real-time community error fare detection (Telegram channels), AI-powered deal scoring (Claude), and HA native notifications. Designed to run 24/7 on existing HAOS hardware with near-zero cost.
+FareHound is a personal flight fare monitoring service deployed as a Home Assistant add-on. It combines scheduled price polling via SerpAPI Google Flights with real-time community error fare detection (Telegram channels + RSS feeds), AI-powered deal scoring with behavioral learning (Claude), and multi-channel notifications. Designed to run 24/7 on existing HAOS hardware with near-zero cost.
 
 ## Architecture
 
@@ -8,49 +8,54 @@ FareHound is a personal flight fare monitoring service deployed as a Home Assist
 ┌──────────────────────────────────────────────────────────────┐
 │                       DATA SOURCES                            │
 │                                                               │
-│  ┌─────────────────────┐       ┌──────────────────────────┐  │
-│  │  SerpAPI             │       │  Telegram Channels       │  │
-│  │  (Google Flights)    │       │  (error fare communities)│  │
-│  │                      │       │                          │  │
-│  │  LAYER 1: scheduled  │       │  LAYER 2: detection      │  │
-│  │  polling (2-4h)      │       │  (real-time listener)    │  │
-│  │                      │       │                          │  │
-│  │  LAYER 2: on-demand  │       │  Via Telethon            │  │
-│  │  verification        │       │                          │  │
-│  └──────────┬───────────┘       └────────────┬─────────────┘  │
-└─────────────┼────────────────────────────────┼────────────────┘
-              │                                │
-              ▼                                ▼
-┌─────────────────────────┐   ┌──────────────────────────────────┐
-│  Scheduled Poller       │   │  Community Listener              │
-│                         │   │                                  │
-│  • Smart date polling   │   │  • Match deal against watchlist  │
-│    (spread windows,     │   │  • Verify via SerpAPI ───────┐   │
-│     focus on cheapest)  │   │  • Urgent alert path         │   │
-│  • Store snapshots      │   │                              │   │
-│  • ~150-300 calls/mo    │   └──────────┬───────────────────┘   │
-│    per route            │              │                       │
-└────────────┬────────────┘              │                       │
-             │                           │                       │
-             ▼                           ▼                       │
-┌──────────────────────────────────────────────────────────────┐ │
-│  DuckDB (/data/flights.duckdb)                               │ │
-│  price_snapshots, routes, deals, alert_rules, poll_windows   │ │
-└──────────────────────────┬───────────────────────────────────┘ │
-                           │                                     │
-                           ▼                                     │
-┌──────────────────────────────────────────────────────────────┐ │
-│  Analysis Engine (Claude API)                                │ │
-│  • Score against DuckDB history + SerpAPI price_insights     │ │
-│  • Urgency classification: book_now / watch / skip           │ │
-└──────────────────────────┬───────────────────────────────────┘ │
-                           │                                     │
-                           ▼                                     │
-┌──────────────────────────────────────────────────────────────┐ │
-│  Alerting                                                    │ │
-│  • HA native notifications (primary) — Companion App push    │ │
-│  • Lovelace dashboard card (Phase 4)                         │ │
-│  • No web UI                                                 │ │
+│  ┌─────────────────────┐  ┌────────────────┐  ┌───────────┐ │
+│  │  SerpAPI             │  │  Telegram      │  │  RSS      │ │
+│  │  (Google Flights)    │  │  Channels      │  │  Feeds    │ │
+│  │                      │  │  (Telethon)    │  │           │ │
+│  │  LAYER 1: scheduled  │  │                │  │  Reddit   │ │
+│  │  polling (2-4h)      │  │  @trip4world   │  │  Secret   │ │
+│  │                      │  │  @holidaypirat │  │  Flying   │ │
+│  │  LAYER 2: on-demand  │  │               │  │  etc.     │ │
+│  │  verification        │  │  LAYER 2       │  │  LAYER 2  │ │
+│  └──────────┬───────────┘  └───────┬────────┘  └─────┬─────┘ │
+└─────────────┼──────────────────────┼─────────────────┼───────┘
+              │                      │                 │
+              ▼                      ▼                 ▼
+┌─────────────────────────┐   ┌──────────────────────────────┐
+│  Scheduled Poller       │   │  Community Listeners         │
+│                         │   │                              │
+│  • Smart date polling   │   │  • Telegram (real-time)      │
+│    (spread windows,     │   │  • RSS (every 5 min)         │
+│     focus on cheapest)  │   │  • Pre-filters:              │
+│  • Store snapshots      │   │    - Route match             │
+│  • ~150-300 calls/mo    │   │    - Date window check       │
+│    per route            │   │    - Price sanity (< avg)    │
+│                         │   │  • Verify via SerpAPI        │
+└────────────┬────────────┘   └────────────┬─────────────────┘
+             │                             │
+             ▼                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│  DuckDB (/data/flights.duckdb)                               │
+│  routes, price_snapshots, deals, alert_rules, poll_windows   │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Analysis Engine (Claude API)                                │
+│  • Score against DuckDB history + SerpAPI price_insights     │
+│  • Behavioral feedback: learns from booked/dismissed deals   │
+│  • Urgency classification: book_now / watch / skip           │
+│  • Pre-filter: only scores deals 10%+ below avg              │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Alerting                                                    │
+│  • HA notifications (primary) — push + action buttons        │
+│  • Telegram bot (optional) — @BotFather bot                  │
+│  • Lovelace sensors — sensor.farehound_{route}_price         │
+│  • Daily digest — scheduled summary of all routes            │
+│  • Feedback loop — "Book Now" / "Not Interested" actions     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,17 +63,19 @@ FareHound is a personal flight fare monitoring service deployed as a Home Assist
 
 | Component | File Path | Responsibility |
 |-----------|-----------|----------------|
-| Config loader | `src/config.py` | Load/validate YAML config, resolve env vars for secrets |
-| SerpAPI client | `src/apis/serpapi.py` | All Google Flights queries (Layer 1 polling + Layer 2 verification) |
-| Community listener | `src/apis/community.py` | Telegram channel listener via Telethon, route matching |
-| Database layer | `src/storage/db.py` | DuckDB connection pool, all queries, schema migrations |
-| Data models | `src/storage/models.py` | Dataclasses for routes, snapshots, deals, poll windows |
-| Deal scorer | `src/analysis/scorer.py` | Claude API scoring prompt, response parsing |
-| HA notifier | `src/alerts/homeassistant.py` | HA REST API notifications with action buttons |
-| Orchestrator | `src/orchestrator.py` | Event loop, scheduling (APScheduler), pipeline coordination |
-| Entrypoint | `ha-addon/run.sh` | Container startup script |
-| HA add-on config | `ha-addon/config.yaml` | Add-on metadata, options schema, ports |
-| App config | `config.yaml` | Routes, preferences, API key refs, alert channels |
+| Config loader | `src/config.py` | Load/validate YAML config, resolve env vars, HA options translation |
+| SerpAPI client | `src/apis/serpapi.py` | Google Flights search + verify_fare + date windowing + rate tracking |
+| Community listener | `src/apis/community.py` | Telegram (Telethon) + RSS (feedparser) listeners, deal message parsing |
+| Database layer | `src/storage/db.py` | DuckDB queries, schema, feedback tracking |
+| Data models | `src/storage/models.py` | Dataclasses: Route, PriceSnapshot, Deal, PollWindow, AlertRule |
+| Deal scorer | `src/analysis/scorer.py` | Claude API scoring with behavioral feedback enrichment |
+| HA notifier | `src/alerts/homeassistant.py` | HA REST API notifications, action buttons, sensor updates |
+| Telegram notifier | `src/alerts/telegram.py` | Telegram Bot API alerts (optional secondary channel) |
+| Orchestrator | `src/orchestrator.py` | Event loop, scheduling, pipeline coordination, community callback |
+| Entrypoint | `ha-addon/run.sh` | Container startup, env var export, graceful shutdown |
+| HA add-on config | `ha-addon/config.yaml` | Add-on metadata, options schema |
+| Lovelace card | `ha-addon/lovelace-card.yaml` | Dashboard card configs (entities, markdown, history-graph) |
+| App config | `config.yaml` | Routes, preferences, API key refs, alert channels, community feeds |
 | Manual search | `scripts/search_once.py` | One-off SerpAPI search for testing |
 
 ## Data Flow
@@ -77,30 +84,49 @@ FareHound is a personal flight fare monitoring service deployed as a Home Assist
 
 ```
 APScheduler timer (every 2-4h)
-  → orchestrator.run_scheduled_poll()
+  → orchestrator.poll_routes()
     → For each active route:
-      → Determine poll windows (smart date strategy)
+      → Select poll windows (smart date strategy)
       → serpapi.search_flights(route, dates, passengers)
-      → db.store_snapshot(result)
-      → scorer.score_deal(snapshot, history_from_db)
-      → If score >= threshold:
-        → homeassistant.send_alert(deal, google_flights_url)
-        → db.record_alert(deal)
+      → db.insert_snapshot(result)
+      → Pre-filter: price < 90-day avg or cold start?
+        → Yes: scorer.score_deal(snapshot, history, feedback)
+        → If score >= alert_threshold:
+          → notifier.send_deal_alert(deal_info)
+          → telegram.send_deal_alert(deal_info)  [if enabled]
+          → db.insert_deal(deal)
+    → notifier.update_sensors(routes_summary)
 ```
 
 ### Layer 2 — Community-Triggered
 
 ```
-Telethon listener (always-on)
-  → community.on_message(message)
-    → Parse origin/destination/price from message
-    → Match against active routes in DB
-    → If match:
-      → serpapi.verify_fare(route, dates, passengers)
-      → db.store_snapshot(verification_result)
-      → scorer.score_deal(snapshot, history, price_insights)
-      → homeassistant.send_urgent_alert(deal, booking_url)
-      → db.record_alert(deal)
+Telegram listener (real-time) + RSS poller (every 5 min)
+  → community.parse_deal_message(text)
+    → Pre-filter 1: route matches active watchlist?
+    → Pre-filter 2: dates within route travel window?
+    → Pre-filter 3: community price < 90-day average?
+    → serpapi.verify_fare(route, dates, expected_price)
+    → Pre-filter 4: verified price 10%+ below average?
+    → scorer.score_deal(snapshot, history, community_flagged=True, feedback)
+    → If score >= threshold:
+      → notifier.send_error_fare_alert(deal_info, booking_url)
+      → telegram.send_error_fare_alert(deal_info)  [if enabled]
+      → db.insert_deal(deal)
+```
+
+### Feedback Loop
+
+```
+User receives notification
+  → Taps "Book Now" → deal.feedback = 'booked'
+  → Taps "Not Interested" → deal.feedback = 'dismissed'
+  → Ignores → deal.feedback = NULL
+
+Next scoring call:
+  → db.get_recent_feedback(limit=20)
+  → Injected as PAST DECISIONS in Claude prompt
+  → Claude calibrates scores based on revealed preferences
 ```
 
 ### Smart Date Polling Strategy
@@ -108,9 +134,9 @@ Telethon listener (always-on)
 Goal: stay within ~150-300 SerpAPI searches/month per route.
 
 1. **Initial scan**: 3-4 spread date windows across the travel period
-2. **Focus polling**: concentrate on the window with lowest prices (poll every 2-4h)
+2. **Focus polling**: concentrate on the window with lowest prices
 3. **Weekly rescan**: re-check all windows for price shifts
-4. **Expand on drops**: if a price drop detected, poll adjacent dates to find the optimum
+4. **Expand on drops**: if a price drop detected, poll adjacent dates
 
 ## DuckDB Schema
 
@@ -136,7 +162,7 @@ CREATE TABLE poll_windows (
     route_id          VARCHAR REFERENCES routes(route_id),
     outbound_date     DATE NOT NULL,
     return_date       DATE,
-    priority          VARCHAR DEFAULT 'normal',  -- 'focus' | 'normal' | 'rescan'
+    priority          VARCHAR DEFAULT 'normal',
     last_polled_at    TIMESTAMP,
     lowest_seen_price DECIMAL(10,2),
     created_at        TIMESTAMP DEFAULT now()
@@ -145,21 +171,20 @@ CREATE TABLE poll_windows (
 CREATE TABLE price_snapshots (
     snapshot_id       VARCHAR PRIMARY KEY,
     route_id          VARCHAR REFERENCES routes(route_id),
-    window_id         VARCHAR REFERENCES poll_windows(window_id),
     observed_at       TIMESTAMP NOT NULL,
-    source            VARCHAR NOT NULL,          -- 'serpapi_poll' | 'serpapi_verify'
+    source            VARCHAR NOT NULL,       -- 'serpapi_poll' | 'serpapi_verify'
+    passengers        INTEGER NOT NULL,
     outbound_date     DATE,
     return_date       DATE,
-    passengers        INTEGER NOT NULL,
     lowest_price      DECIMAL(10,2),
     currency          VARCHAR DEFAULT 'EUR',
     best_flight       JSON,
     all_flights       JSON,
-    price_level       VARCHAR,                   -- from price_insights
+    price_level       VARCHAR,
     typical_low       DECIMAL(10,2),
     typical_high      DECIMAL(10,2),
     price_history     JSON,
-    search_params     JSON,                      -- SerpAPI request params for debugging
+    search_params     JSON,
     created_at        TIMESTAMP DEFAULT now()
 );
 
@@ -168,32 +193,25 @@ CREATE TABLE deals (
     snapshot_id       VARCHAR REFERENCES price_snapshots(snapshot_id),
     route_id          VARCHAR REFERENCES routes(route_id),
     score             DECIMAL(3,2),
-    urgency           VARCHAR,                   -- 'book_now' | 'watch' | 'skip'
+    urgency           VARCHAR,                -- 'book_now' | 'watch' | 'skip'
     reasoning         VARCHAR,
     booking_url       VARCHAR,
     alert_sent        BOOLEAN DEFAULT false,
     alert_sent_at     TIMESTAMP,
     booked            BOOLEAN DEFAULT false,
+    feedback          VARCHAR,                -- 'booked' | 'dismissed' | NULL
     created_at        TIMESTAMP DEFAULT now()
 );
 
 CREATE TABLE alert_rules (
     rule_id           VARCHAR PRIMARY KEY,
     route_id          VARCHAR REFERENCES routes(route_id),
-    rule_type         VARCHAR NOT NULL,          -- 'price_below' | 'score_above'
+    rule_type         VARCHAR NOT NULL,
     threshold         DECIMAL(10,2),
-    channel           VARCHAR NOT NULL,          -- 'ha_notify'
+    channel           VARCHAR NOT NULL,
     active            BOOLEAN DEFAULT true
 );
 ```
-
-Key differences from spec schema:
-- `source` values are `serpapi_poll` / `serpapi_verify` (no Amadeus)
-- Added `poll_windows` table for smart date strategy
-- Added `passengers` to `price_snapshots` (variable traveller count)
-- Added `window_id` FK in snapshots
-- Added `search_params` for debugging
-- Routes have `passengers` column (configurable, not hardcoded to 2)
 
 ## Key Patterns
 
@@ -205,47 +223,41 @@ async with httpx.AsyncClient() as client:
     response = await client.get(url, params=params)
 
 # DuckDB via run_in_executor (no native async)
-loop = asyncio.get_event_loop()
-result = await loop.run_in_executor(None, db.execute_query, sql, params)
+loop = asyncio.get_running_loop()
+result = await loop.run_in_executor(None, db.method, *args)
 
-# Telethon listener and APScheduler share one event loop
-loop = asyncio.get_event_loop()
-scheduler.start()
-await client.run_until_disconnected()  # Telethon blocks the loop
+# Telegram listener, RSS poller, and APScheduler share one event loop
 ```
 
 ### Config Loading
 
 ```python
-# Secrets resolved from environment variables
-# config.yaml references env var names, not values:
-#   serpapi:
-#     api_key_env: SERPAPI_API_KEY
-# At load time: os.environ[config["serpapi"]["api_key_env"]]
+# HA add-on mode: flat options in /data/options.json
+#   → _translate_ha_options() → nested AppConfig structure
+# Local dev: config.yaml with nested structure directly
+# Secrets: env var names in config, resolved at runtime
 ```
 
 ### Error Handling
 
-- API failures: log + skip, don't crash the loop. Retry on next poll cycle.
-- Telegram disconnect: Telethon auto-reconnects. Log reconnection events.
-- DuckDB write failures: log + continue. Alerting should not depend on successful DB write.
-- SerpAPI rate limits: track monthly usage in memory, pause polling when approaching limit.
-
-### ID Generation
-
-UUIDs for all primary keys (`uuid.uuid4().hex`).
+- API failures: log + skip, don't crash. Retry on next poll cycle.
+- Claude scoring failure: fall back to static 15%-drop threshold.
+- Telegram disconnect: Telethon auto-reconnects. Task crash logged via done_callback.
+- Community feed errors: per-feed isolation, one failing feed doesn't stop others.
+- SerpAPI rate limits: in-memory monthly counter, warnings at 80%/90%.
 
 ## Dependencies
 
 ```
 # Core
-httpx              # Async HTTP client (all API calls)
+httpx              # Async HTTP (all API calls)
 duckdb             # Embedded analytical database
 anthropic          # Claude API client
 pyyaml             # Config parsing
 
 # Community feeds
 telethon           # Telegram channel monitoring
+feedparser         # RSS feed parsing
 
 # Scheduling
 apscheduler        # Job scheduling (AsyncIOScheduler)
@@ -256,101 +268,44 @@ pytest-asyncio     # Async test support
 rich               # CLI output formatting (scripts)
 ```
 
-Not used (dropped from spec):
-- `amadeus` — Amadeus self-service API decommissioned July 2026
-- `serpapi` Python package — using httpx directly against SerpAPI REST endpoint
-- `requests` — replaced by httpx
-- `feedparser` — RSS dropped, Telegram-first
-- `python-telegram-bot` — alerts via HA only, not Telegram bot
-- `aiosmtplib` — email alerts dropped
-
 ## SerpAPI Google Flights — API Reference
 
 **Endpoint:** `https://serpapi.com/search`
 
-**Request params:**
-
 | Param | Value | Notes |
 |-------|-------|-------|
 | `engine` | `google_flights` | Required |
-| `api_key` | `{key}` | From env |
 | `departure_id` | `AMS` | IATA airport code |
 | `arrival_id` | `NRT` | IATA airport code |
 | `outbound_date` | `2026-10-08` | YYYY-MM-DD |
-| `return_date` | `2026-10-22` | YYYY-MM-DD, omit for one-way |
+| `return_date` | `2026-10-22` | Omit for one-way |
 | `type` | `1` | 1=round trip, 2=one way |
 | `adults` | `2` | Variable per route |
 | `currency` | `EUR` | |
 | `hl` | `en` | Language |
 | `deep_search` | `true` | Browser-identical results |
-| `sort_by` | `2` | 2=price sorted |
+| `sort_by` | `2` | Price sorted |
 
-**Response structure (key fields):**
+**Key response paths:**
+- `best_flights[].price` — cheapest options
+- `price_insights.lowest_price` — lowest available
+- `price_insights.price_level` — "low" / "typical" / "high"
+- `price_insights.typical_price_range` — [low, high]
+- `booking_options[].together.booking_request.url` — booking deep link
+- `search_metadata.google_flights_url` — Google Flights fallback URL
 
-```json
-{
-  "best_flights": [
-    {
-      "flights": [
-        {
-          "airline": "KLM",
-          "flight_number": "KL861",
-          "departure_airport": { "id": "AMS", "time": "10:25" },
-          "arrival_airport": { "id": "NRT", "time": "06:15+1" },
-          "duration": 660,
-          "airplane": "Boeing 787-9",
-          "legroom": "31 in",
-          "extensions": ["Carbon emissions estimate: 500 kg"]
-        }
-      ],
-      "total_duration": 660,
-      "price": 485,
-      "type": "Round trip"
-    }
-  ],
-  "other_flights": [ "..." ],
-  "price_insights": {
-    "lowest_price": 485,
-    "price_level": "low",
-    "typical_price_range": [650, 900],
-    "price_history": [[1711929600, 720], [1712016000, 715]]
-  },
-  "search_metadata": {
-    "google_flights_url": "https://www.google.com/travel/flights?..."
-  }
-}
-```
+**Pricing:** Free=250/mo, Starter($25)=1,000/mo, Developer($75)=5,000/mo
 
-**Booking URLs:** Found in `booking_options[].together.booking_request.url` when available. Fall back to `search_metadata.google_flights_url` for Layer 1 alerts.
+## Build Phases (all complete)
 
-**Rate limits:** Free tier = 250/month. Starter ($25/month) = 1,000/month. Track usage via monthly call counter in memory.
-
-## Build Phases
-
-### Phase 1 — Core Monitoring Loop (current)
-- SerpAPI client (`src/apis/serpapi.py`) — search + parse responses
-- DuckDB storage — schema init, snapshot writes, history queries
-- Config-driven route watchlist with variable passengers
-- Smart date polling logic (spread windows, focus on cheapest)
-- Basic HA notifications on static price thresholds
-- `scripts/search_once.py` for manual testing
-- HA add-on packaging (Dockerfile, config.yaml, run.sh)
+### Phase 1 — Core Monitoring Loop
+SerpAPI client, DuckDB storage, config system, smart date polling, static threshold alerts, HA notifications, add-on scaffolding, search_once.py test script.
 
 ### Phase 2 — Claude Scoring
-- Scoring prompt with DuckDB price history context
-- Replace static thresholds with AI-scored alerts
-- Daily digest via HA notification
-- Google Flights URLs in all alerts
+Deal scorer with Claude API, replaced static thresholds with AI scoring, daily digest, Google Flights URLs in alerts, traveller preferences in config.
 
 ### Phase 3 — Community Feed Integration
-- Telegram channel listener (Telethon) for error fare channels
-- Message parsing — extract origin/dest/price from deal posts
-- Route matching against watchlist
-- SerpAPI verification on match (confirm price + booking link)
-- Urgent alert path with "Book Now" action button
+Telegram channel listener (Telethon), RSS feed listener (feedparser) for Reddit + Secret Flying, deal message parsing with date normalization, SerpAPI error fare verification, pre-filters (route match, date window, price sanity, Claude gate), urgent alert path.
 
 ### Phase 4 — Polish
-- Lovelace dashboard card for price trends
-- Historical trend visualisation
-- HA automations (lights, speaker announcements for error fares)
-- Data retention policy (archive to Parquet after 90 days)
+Feedback loop (booked/dismissed tracking, behavioral prompt enrichment), Lovelace dashboard card with HA sensors, Telegram bot alerts (optional secondary), full test suite (139 tests).
