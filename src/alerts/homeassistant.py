@@ -182,7 +182,7 @@ class HomeAssistantNotifier:
         """
         for route in routes_summary:
             route_id = route.get("route_id", "unknown")
-            entity_id = f"sensor.farehound_{route_id}_price"
+            entity_id = f"sensor.farehound_{route_id.replace('-', '_')}_price"
             price = route.get("lowest_price")
             state = str(price) if price is not None else "unknown"
 

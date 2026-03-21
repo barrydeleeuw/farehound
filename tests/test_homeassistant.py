@@ -150,7 +150,7 @@ async def test_update_sensors_payload(notifier):
         url = call_args[0][0] if call_args[0] else call_args.kwargs.get("url", "")
         payload = call_args.kwargs.get("json") or call_args[1]["json"]
 
-        assert "sensor.farehound_ams-nrt_price" in url
+        assert "sensor.farehound_ams_nrt_price" in url
         assert payload["state"] == "485.0"
         attrs = payload["attributes"]
         assert attrs["route_name"] == "AMS → NRT"
