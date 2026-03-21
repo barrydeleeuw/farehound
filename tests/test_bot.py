@@ -103,8 +103,8 @@ async def test_trip_sends_confirmation(bot):
         await bot._handle_update(_make_update("/trip Tokyo, Oct 18 - Nov 8"), client)
 
     payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
-    assert "AMS" in payload["text"]  # default origin
-    assert "NRT" in payload["text"]
+    assert "Amsterdam" in payload["text"]  # default origin
+    assert "Tokyo Narita" in payload["text"]
     assert "/yes" in payload["text"]
     assert "42" in bot._pending  # chat_id stored
 
@@ -183,7 +183,7 @@ async def test_remove_not_found(bot):
     await bot._handle_update(_make_update("/remove bogus"), client)
 
     payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
-    assert "not found" in payload["text"]
+    assert "No route matching" in payload["text"]
 
 
 @pytest.mark.asyncio

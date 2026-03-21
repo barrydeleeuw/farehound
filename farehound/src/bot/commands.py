@@ -16,10 +16,20 @@ logger = logging.getLogger("farehound.bot")
 TELEGRAM_API = "https://api.telegram.org"
 
 _PARSE_PROMPT = """\
-Extract flight route from this text. Return JSON with fields:
-origin (IATA code or null if not specified), destination (IATA code),
-earliest_departure (YYYY-MM-DD), latest_return (YYYY-MM-DD),
-passengers (int, default 2), notes (string or null).
+Extract flight route from this text. Return ONLY valid JSON with these fields:
+- origin: IATA airport code or null if not specified
+- destination: IATA airport code (use city codes like TYO for Tokyo when multiple airports)
+- earliest_departure: YYYY-MM-DD
+- latest_return: YYYY-MM-DD
+- passengers: int (default 2)
+- max_stops: int (default 1, 0 if user says "direct only" or "nonstop")
+- notes: string or null
+- needs_clarification: boolean (true if destination is a country or ambiguous region)
+- clarification_question: string or null (ask which city if ambiguous)
+- options: list of strings or null (suggested cities/airports to choose from)
+
+If the destination is a country (e.g. "Japan", "Mexico", "Spain"), set needs_clarification=true
+and suggest the top 2-3 cities with their airport codes.
 
 If dates have no year, assume the next occurrence of that date.
 Today is {today}.
@@ -87,7 +97,11 @@ class TripBot:
         text = (msg.get("text") or "").strip()
         chat_id = str(msg["chat"]["id"])
 
+        # Handle replies to clarification questions (not commands)
         if not text.startswith("/"):
+            pending = self._pending.get(chat_id)
+            if pending and pending.get("action") == "clarify":
+                await self._handle_clarification_reply(text, chat_id, client)
             return
 
         cmd = text.split()[0].lower()
@@ -115,8 +129,8 @@ class TripBot:
             "  You can say 'direct only' or 'max 2 stops'.\n\n"
             "`/trips`\n"
             "  List your active routes with latest prices.\n\n"
-            "`/remove ams-nrt`\n"
-            "  Stop monitoring a route.\n\n"
+            "`/remove Tokyo` or `/remove ams-nrt`\n"
+            "  Stop monitoring a route. Just `/remove` to see options.\n\n"
             "I'll send you alerts when I find genuinely good deals — "
             "not every price check, only new lows or confirmed bargains."
         ), parse_mode="Markdown")
@@ -136,15 +150,33 @@ class TripBot:
             await self._send(client, chat_id, "Sorry, I couldn't parse that. Try: /trip Tokyo, Oct 18 - Nov 8, 2 people")
             return
 
+        # Handle ambiguous destinations (countries, regions)
+        if parsed.get("needs_clarification"):
+            question = parsed.get("clarification_question", "Which city did you mean?")
+            options = parsed.get("options", [])
+            if options:
+                question += "\n\n" + "\n".join(f"• {opt}" for opt in options)
+            question += "\n\nJust reply with the city name."
+            self._pending[chat_id] = {
+                "action": "clarify",
+                "original_text": user_text,
+                "parsed": parsed,
+            }
+            await self._send(client, chat_id, question)
+            return
+
         origin = parsed.get("origin") or self._home_airport
         destination = parsed.get("destination")
         if not destination:
             await self._send(client, chat_id, "I couldn't determine the destination. Please try again.")
             return
 
+        from src.utils.airports import route_name
+
         earliest = parsed.get("earliest_departure", "")
         latest = parsed.get("latest_return", "")
         passengers = parsed.get("passengers", 2)
+        max_stops = parsed.get("max_stops", 1)
         notes = parsed.get("notes") or ""
 
         self._pending[chat_id] = {
@@ -154,17 +186,30 @@ class TripBot:
             "earliest_departure": earliest,
             "latest_return": latest,
             "passengers": passengers,
+            "max_stops": max_stops,
             "notes": notes,
         }
 
+        stops_str = "direct only" if max_stops == 0 else f"max {max_stops} stop{'s' if max_stops > 1 else ''}"
         msg = (
-            f"Add route: {origin} → {destination}, "
-            f"{earliest} - {latest}, {passengers} pax"
+            f"Add route: *{route_name(origin, destination)}*\n"
+            f"📅 {earliest} → {latest}\n"
+            f"👥 {passengers} pax | {stops_str}"
         )
         if notes:
-            msg += f", {notes}"
-        msg += "?\nReply /yes or /no"
+            msg += f"\n📝 {notes}"
+        msg += "\n\nReply /yes or /no"
         await self._send(client, chat_id, msg)
+
+    async def _handle_clarification_reply(self, reply: str, chat_id: str, client: httpx.AsyncClient) -> None:
+        """User replied to a clarification question — re-parse with the specific city."""
+        pending = self._pending.pop(chat_id, None)
+        if not pending:
+            return
+        original = pending.get("original_text", "")
+        # Replace the ambiguous part with the user's specific answer
+        new_text = f"{reply}, {original}"
+        await self._handle_trip(new_text, chat_id, client)
 
     async def _handle_trips(self, chat_id: str, client: httpx.AsyncClient) -> None:
         from src.utils.airports import route_name
@@ -208,22 +253,49 @@ class TripBot:
 
         await self._send(client, chat_id, "\n\n".join(lines))
 
-    async def _handle_remove(self, route_id: str, chat_id: str, client: httpx.AsyncClient) -> None:
-        if not route_id:
-            await self._send(client, chat_id, "Usage: /remove <route\\_id>")
+    async def _handle_remove(self, query: str, chat_id: str, client: httpx.AsyncClient) -> None:
+        from src.utils.airports import route_name, AIRPORTS
+
+        if not query:
+            # Show routes with IDs for easy removal
+            loop = asyncio.get_running_loop()
+            routes = await loop.run_in_executor(None, self._db.get_active_routes)
+            if not routes:
+                await self._send(client, chat_id, "No active routes to remove.")
+                return
+            lines = ["Which route do you want to remove?\n"]
+            for r in routes:
+                lines.append(f"  `/remove {r.route_id}` — {route_name(r.origin, r.destination)}")
+            await self._send(client, chat_id, "\n".join(lines))
             return
 
         loop = asyncio.get_running_loop()
         routes = await loop.run_in_executor(None, self._db.get_active_routes)
-        match = [r for r in routes if r.route_id == route_id]
+
+        # Match by route_id, destination IATA, or destination city name
+        query_upper = query.upper().strip()
+        query_lower = query.lower().strip()
+        match = [r for r in routes if (
+            r.route_id == query_lower
+            or r.route_id == query_upper
+            or r.destination == query_upper
+            or AIRPORTS.get(r.destination, "").lower() == query_lower
+        )]
 
         if not match:
-            await self._send(client, chat_id, f"Route `{route_id}` not found.")
+            await self._send(client, chat_id, f"No route matching '{query}'. Use /remove to see options.")
+            return
+
+        if len(match) > 1:
+            lines = ["Multiple matches — be more specific:\n"]
+            for r in match:
+                lines.append(f"  `/remove {r.route_id}` — {route_name(r.origin, r.destination)}")
+            await self._send(client, chat_id, "\n".join(lines))
             return
 
         r = match[0]
-        self._pending[chat_id] = {"action": "remove", "route_id": route_id}
-        await self._send(client, chat_id, f"Remove {r.origin} → {r.destination}? Reply /yes or /no")
+        self._pending[chat_id] = {"action": "remove", "route_id": r.route_id}
+        await self._send(client, chat_id, f"Remove *{route_name(r.origin, r.destination)}*? Reply /yes or /no")
 
     async def _handle_yes(self, chat_id: str, client: httpx.AsyncClient) -> None:
         pending = self._pending.pop(chat_id, None)
