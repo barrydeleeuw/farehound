@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/command/with-contenv sh
 
 # API keys (read from HA add-on options via /data/options.json)
 if [ -f /data/options.json ]; then
@@ -23,7 +23,6 @@ fi
 # HA Supervisor token for API access (injected by Supervisor)
 export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
 
-# DuckDB data directory
 export FAREHOUND_DATA_DIR="/data"
 
 echo "Starting FareHound..."
