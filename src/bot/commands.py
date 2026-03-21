@@ -167,31 +167,46 @@ class TripBot:
         await self._send(client, chat_id, msg)
 
     async def _handle_trips(self, chat_id: str, client: httpx.AsyncClient) -> None:
+        from src.utils.airports import route_name
+
         loop = asyncio.get_running_loop()
         routes = await loop.run_in_executor(None, self._db.get_active_routes)
 
         if not routes:
-            await self._send(client, chat_id, "No active routes.")
+            await self._send(client, chat_id, "No active routes. Add one with /trip")
             return
 
-        lines = ["*Active Routes*\n"]
+        lines = ["✈️ *Your Routes*\n"]
         for r in routes:
             latest = await loop.run_in_executor(None, self._db.get_latest_snapshot, r.route_id)
-            price_str = f"€{latest.lowest_price:.0f}" if latest and latest.lowest_price else "no data"
 
-            since = datetime.now(UTC) - timedelta(days=1)
-            deals = await loop.run_in_executor(None, self._db.get_deals_since, r.route_id, since)
-            score_str = f" (score: {float(deals[0].score):.2f})" if deals and deals[0].score else ""
-
+            name = route_name(r.origin, r.destination)
             dates = ""
             if r.earliest_departure:
-                dates = f" | {r.earliest_departure}"
+                dates = f"{r.earliest_departure}"
                 if r.latest_return:
-                    dates += f" - {r.latest_return}"
+                    dates += f" → {r.latest_return}"
 
-            lines.append(f"`{r.route_id}` {r.origin}→{r.destination} | {price_str}{score_str}{dates}")
+            price_line = ""
+            if latest and latest.lowest_price:
+                price_line = f"💰 €{latest.lowest_price:.0f}"
+                since = datetime.now(UTC) - timedelta(days=1)
+                deals = await loop.run_in_executor(None, self._db.get_deals_since, r.route_id, since)
+                if deals and deals[0].score:
+                    price_line += f" (score: {float(deals[0].score):.2f})"
+            else:
+                price_line = "⏳ Waiting for first price check"
 
-        await self._send(client, chat_id, "\n".join(lines))
+            stops = "direct" if r.max_stops == 0 else f"max {r.max_stops} stop{'s' if r.max_stops > 1 else ''}"
+            lines.append(
+                f"*{name}*\n"
+                f"  📅 {dates}\n"
+                f"  👥 {r.passengers} pax | {stops}\n"
+                f"  {price_line}\n"
+                f"  ID: `{r.route_id}`"
+            )
+
+        await self._send(client, chat_id, "\n\n".join(lines))
 
     async def _handle_remove(self, route_id: str, chat_id: str, client: httpx.AsyncClient) -> None:
         if not route_id:

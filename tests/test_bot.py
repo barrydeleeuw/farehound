@@ -70,8 +70,8 @@ async def test_trips_lists_routes(bot, db):
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
     await bot._handle_update(_make_update("/trips"), client)
     payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
-    assert "AMS" in payload["text"]
-    assert "NRT" in payload["text"]
+    assert "Amsterdam" in payload["text"]
+    assert "Tokyo Narita" in payload["text"]
     assert "ams_nrt" in payload["text"]
 
 
