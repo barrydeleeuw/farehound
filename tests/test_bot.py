@@ -83,7 +83,7 @@ async def test_trip_empty_text(bot):
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
     await bot._handle_update(_make_update("/trip "), client)
     payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
-    assert "Usage" in payload["text"]
+    assert "where you want to go" in payload["text"]
 
 
 @pytest.mark.asyncio

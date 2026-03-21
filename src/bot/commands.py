@@ -90,20 +90,45 @@ class TripBot:
         if not text.startswith("/"):
             return
 
-        if text == "/trips":
+        cmd = text.split()[0].lower()
+        if cmd in ("/start", "/help"):
+            await self._handle_help(chat_id, client)
+        elif cmd == "/trips":
             await self._handle_trips(chat_id, client)
-        elif text.startswith("/trip"):
+        elif cmd == "/trip":
             await self._handle_trip(text[5:].strip(), chat_id, client)
-        elif text.startswith("/remove"):
+        elif cmd == "/remove":
             await self._handle_remove(text[7:].strip(), chat_id, client)
-        elif text == "/yes":
+        elif cmd == "/yes":
             await self._handle_yes(chat_id, client)
-        elif text == "/no":
+        elif cmd == "/no":
             await self._handle_no(chat_id, client)
+
+    async def _handle_help(self, chat_id: str, client: httpx.AsyncClient) -> None:
+        await self._send(client, chat_id, (
+            "🐕 *FareHound Bot*\n\n"
+            "I monitor flight prices and alert you when deals are good.\n\n"
+            "*Commands:*\n"
+            "`/trip Tokyo, Oct 18 - Nov 8, 2 people`\n"
+            "  Add a route to monitor. I'll figure out the airports and dates.\n\n"
+            "`/trip Alicante, end of June, 2 weeks, direct only`\n"
+            "  You can say 'direct only' or 'max 2 stops'.\n\n"
+            "`/trips`\n"
+            "  List your active routes with latest prices.\n\n"
+            "`/remove ams-nrt`\n"
+            "  Stop monitoring a route.\n\n"
+            "I'll send you alerts when I find genuinely good deals — "
+            "not every price check, only new lows or confirmed bargains."
+        ), parse_mode="Markdown")
 
     async def _handle_trip(self, user_text: str, chat_id: str, client: httpx.AsyncClient) -> None:
         if not user_text:
-            await self._send(client, chat_id, "Usage: /trip Tokyo, Oct 18 - Nov 8, 2 people")
+            await self._send(client, chat_id, (
+                "Tell me where you want to go! Examples:\n\n"
+                "`/trip Tokyo, Oct 18 - Nov 8, 2 people`\n"
+                "`/trip Mexico City, end of December, 3 weeks`\n"
+                "`/trip Alicante, late June, 2 weeks, direct only`"
+            ), parse_mode="Markdown")
             return
 
         parsed = await self._parse_route(user_text)
@@ -245,12 +270,12 @@ class TripBot:
             logger.exception("Failed to parse route text")
             return None
 
-    async def _send(self, client: httpx.AsyncClient, chat_id: str, text: str) -> None:
+    async def _send(self, client: httpx.AsyncClient, chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
         url = f"{TELEGRAM_API}/bot{self._bot_token}/sendMessage"
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "Markdown",
+            "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
         try:

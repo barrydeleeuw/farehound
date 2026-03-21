@@ -281,7 +281,7 @@ class RSSListener:
         now = monotonic()
         self._seen_ids = {k: v for k, v in self._seen_ids.items() if now - v < _MAX_AGE}
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": "FareHound/1.0 (flight deal monitor)"}) as client:
             for feed_config in self.feeds:
                 if not feed_config.url:
                     continue
