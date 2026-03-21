@@ -55,6 +55,22 @@ scoring:
 community_feeds:
   # RSS feeds — polled every 5 minutes, no auth needed
   - type: rss
+    channel: "SecretFlying"
+    url: "https://www.secretflying.com/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "SecretFlying-ErrorFares"
+    url: "https://www.secretflying.com/posts/category/error-fare/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "TheFlightDeal"
+    url: "https://www.theflightdeal.com/feed/"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
+    channel: "r/cheapflights"
+    url: "https://www.reddit.com/r/cheapflights/new/.rss"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: rss
     channel: "r/flights"
     url: "https://www.reddit.com/r/flights/new/.rss"
     filter_origins: [AMS, BRU, DUS, RTM]
@@ -63,12 +79,8 @@ community_feeds:
     url: "https://www.reddit.com/r/TravelHacking/new/.rss"
     filter_origins: [AMS, BRU, DUS, RTM]
   - type: rss
-    channel: "SecretFlying"
-    url: "https://www.secretflying.com/feed/"
-    filter_origins: [AMS, BRU, DUS, RTM]
-  - type: rss
-    channel: "TheFlightDeal"
-    url: "https://www.theflightdeal.com/feed/"
+    channel: "r/Shoestring"
+    url: "https://www.reddit.com/r/Shoestring/new/.rss"
     filter_origins: [AMS, BRU, DUS, RTM]
   # Telegram channels — real-time via Telethon
   - type: telegram_channel

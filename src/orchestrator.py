@@ -551,7 +551,8 @@ class Orchestrator:
             route.route_id, origin, destination, community_price,
         )
 
-        # Pick a verification date — use community dates if available, else route defaults
+        # --- Pre-filter 1: Date window check ---
+        # If the deal specifies dates, check they fall within the route's travel window
         dates = deal_info.get("dates", [])
         outbound_date: date | None = None
         return_date: date | None = None
@@ -562,6 +563,16 @@ class Orchestrator:
                     return_date = date.fromisoformat(dates[1])
             except (ValueError, TypeError):
                 pass
+
+        if outbound_date is not None and route.earliest_departure and route.latest_return:
+            if outbound_date < route.earliest_departure or outbound_date > route.latest_return:
+                logger.debug(
+                    "Community deal date %s outside route window %s–%s, skipping",
+                    outbound_date, route.earliest_departure, route.latest_return,
+                )
+                return
+
+        # Fall back to route dates if community deal didn't specify
         if outbound_date is None and route.earliest_departure:
             outbound_date = route.earliest_departure
             return_date = route.latest_return
@@ -569,6 +580,18 @@ class Orchestrator:
         if outbound_date is None:
             logger.warning("No dates available for verification of community deal, skipping")
             return
+
+        # --- Pre-filter 2: Price sanity check ---
+        # Skip if community price is higher than our historical average (not a deal)
+        if community_price is not None:
+            history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
+            avg_price_precheck = history.get("avg_price")
+            if avg_price_precheck is not None and community_price > float(avg_price_precheck):
+                logger.debug(
+                    "Community price €%.0f above 90-day avg €%.0f for %s, skipping",
+                    community_price, float(avg_price_precheck), route.route_id,
+                )
+                return
 
         # Verify fare via SerpAPI
         try:
@@ -625,9 +648,20 @@ class Orchestrator:
             "Stored verification snapshot for %s: €%s", route.route_id, actual_price,
         )
 
-        # Score with Claude (community_flagged=True)
+        # --- Pre-filter 3: Only score with Claude if price looks genuinely good ---
         history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
         avg_price = history.get("avg_price")
+        min_price = history.get("min_price")
+        snapshot_count = history.get("count", 0)
+
+        # If we have enough history, skip Claude if price isn't at least 10% below average
+        if snapshot_count >= COLD_START_THRESHOLD and avg_price is not None:
+            if actual_price > float(avg_price) * 0.90:
+                logger.info(
+                    "Verified price €%.0f not significantly below avg €%.0f for %s, skipping Claude",
+                    actual_price, float(avg_price), route.route_id,
+                )
+                return
 
         score_result = None
         try:
