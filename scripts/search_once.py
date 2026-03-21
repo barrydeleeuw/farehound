@@ -21,7 +21,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.apis.serpapi import SerpAPIClient, SerpAPIError, FlightSearchResult
 from src.config import load_config
 from src.storage.db import Database
-from src.storage.models import PriceSnapshot
+from src.storage.models import PriceSnapshot, Route
 
 try:
     from rich.console import Console
@@ -176,6 +176,14 @@ async def search(origin: str, destination: str, outbound: str,
     db = Database()
     try:
         db.init_schema()
+
+        # Ensure route exists for FK constraint
+        db.upsert_route(Route(
+            route_id=route_id,
+            origin=origin,
+            destination=destination,
+            passengers=passengers,
+        ))
 
         insights = result.price_insights
         lowest = insights.get("lowest_price")
