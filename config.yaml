@@ -1,0 +1,58 @@
+serpapi:
+  api_key_env: SERPAPI_API_KEY
+  currency: EUR
+  deep_search: true
+
+anthropic:
+  api_key_env: ANTHROPIC_API_KEY
+  model: claude-sonnet-4-20250514
+
+traveller:
+  name: Barry
+  home_airport: AMS
+
+routes:
+  - id: ams-nrt-oct
+    origin: AMS
+    destination: NRT
+    trip_type: round_trip
+    earliest_departure: "2026-10-01"
+    latest_return: "2026-10-31"
+    date_flexibility_days: 3
+    max_stops: 1
+    passengers: 2
+    notes: "Japan trip — autumn colours"
+
+  - id: ams-ist-flex
+    origin: AMS
+    destination: IST
+    trip_type: round_trip
+    earliest_departure: "2026-06-01"
+    latest_return: "2026-09-30"
+    date_flexibility_days: 7
+    max_stops: 0
+    passengers: 2
+    notes: "Istanbul — flexible timing"
+
+alerts:
+  homeassistant:
+    notify_service: notify.mobile_app_barry_phone
+    base_url_env: HA_BASE_URL
+    token_env: HA_LONG_LIVED_TOKEN
+
+scoring:
+  alert_threshold: 0.75
+  watch_threshold: 0.50
+  poll_interval_hours: 4
+
+community_feeds:
+  - type: telegram_channel
+    channel: "@secretflyingdeals"
+    filter_origins: [AMS, BRU, DUS, RTM]
+  - type: telegram_channel
+    channel: "@error_fares"
+    filter_origins: [AMS, BRU, DUS, RTM]
+
+telegram:
+  api_id_env: TELEGRAM_API_ID
+  api_hash_env: TELEGRAM_API_HASH
