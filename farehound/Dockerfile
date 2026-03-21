@@ -1,23 +1,17 @@
-FROM python:3.11-slim AS builder
+ARG BUILD_FROM
+FROM ${BUILD_FROM}
 
 WORKDIR /app
+
+# Install build dependencies for compiled packages
+RUN apk add --no-cache gcc musl-dev python3-dev
 
 COPY pyproject.toml .
 COPY src/ ./src/
-RUN pip install --no-cache-dir --prefix=/install .
+RUN pip install --no-cache-dir .
 
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY --from=builder /install /usr/local
-
-COPY src/ ./src/
 COPY app-config.yaml ./config.yaml
-
-VOLUME /data
-
 COPY run.sh /run.sh
 RUN chmod +x /run.sh
 
-ENTRYPOINT ["/run.sh"]
+CMD ["/run.sh"]
