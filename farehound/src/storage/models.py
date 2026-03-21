@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -8,6 +9,36 @@ from uuid import uuid4
 
 def _new_id() -> str:
     return uuid4().hex
+
+
+def _parse_date(val) -> date | None:
+    if val is None:
+        return None
+    if isinstance(val, date):
+        return val
+    return date.fromisoformat(str(val))
+
+
+def _parse_datetime(val) -> datetime | None:
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    return datetime.fromisoformat(str(val))
+
+
+def _parse_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    return bool(val)
+
+
+def _parse_json(val):
+    if val is None:
+        return None
+    if isinstance(val, (dict, list)):
+        return val
+    return json.loads(val)
 
 
 @dataclass
@@ -46,20 +77,23 @@ class Route:
     @classmethod
     def from_row(cls, row: tuple, columns: list[str]) -> Route:
         d = dict(zip(columns, row))
+        pa = d.get("preferred_airlines")
+        if isinstance(pa, str):
+            pa = _parse_json(pa) or []
         return cls(
             route_id=d["route_id"],
             origin=d["origin"],
             destination=d["destination"],
             trip_type=d.get("trip_type", "round_trip"),
-            earliest_departure=d.get("earliest_departure"),
-            latest_return=d.get("latest_return"),
+            earliest_departure=_parse_date(d.get("earliest_departure")),
+            latest_return=_parse_date(d.get("latest_return")),
             date_flex_days=d.get("date_flex_days", 3),
             max_stops=d.get("max_stops", 1),
             passengers=d.get("passengers", 2),
-            preferred_airlines=d.get("preferred_airlines") or [],
+            preferred_airlines=pa or [],
             notes=d.get("notes"),
-            active=d.get("active", True),
-            created_at=d.get("created_at"),
+            active=_parse_bool(d.get("active", True)),
+            created_at=_parse_datetime(d.get("created_at")),
         )
 
 
@@ -92,12 +126,12 @@ class PollWindow:
         return cls(
             window_id=d["window_id"],
             route_id=d["route_id"],
-            outbound_date=d["outbound_date"],
-            return_date=d.get("return_date"),
+            outbound_date=_parse_date(d["outbound_date"]),
+            return_date=_parse_date(d.get("return_date")),
             priority=d.get("priority", "normal"),
-            last_polled_at=d.get("last_polled_at"),
+            last_polled_at=_parse_datetime(d.get("last_polled_at")),
             lowest_seen_price=d.get("lowest_seen_price"),
-            created_at=d.get("created_at"),
+            created_at=_parse_datetime(d.get("created_at")),
         )
 
 
@@ -151,21 +185,21 @@ class PriceSnapshot:
             snapshot_id=d["snapshot_id"],
             route_id=d["route_id"],
             window_id=d.get("window_id"),
-            observed_at=d["observed_at"],
+            observed_at=_parse_datetime(d["observed_at"]),
             source=d["source"],
-            outbound_date=d.get("outbound_date"),
-            return_date=d.get("return_date"),
+            outbound_date=_parse_date(d.get("outbound_date")),
+            return_date=_parse_date(d.get("return_date")),
             passengers=d["passengers"],
             lowest_price=d.get("lowest_price"),
             currency=d.get("currency", "EUR"),
-            best_flight=d.get("best_flight"),
-            all_flights=d.get("all_flights"),
+            best_flight=_parse_json(d.get("best_flight")),
+            all_flights=_parse_json(d.get("all_flights")),
             price_level=d.get("price_level"),
             typical_low=d.get("typical_low"),
             typical_high=d.get("typical_high"),
-            price_history=d.get("price_history"),
-            search_params=d.get("search_params"),
-            created_at=d.get("created_at"),
+            price_history=_parse_json(d.get("price_history")),
+            search_params=_parse_json(d.get("search_params")),
+            created_at=_parse_datetime(d.get("created_at")),
         )
 
 
@@ -211,11 +245,11 @@ class Deal:
             urgency=d.get("urgency"),
             reasoning=d.get("reasoning"),
             booking_url=d.get("booking_url"),
-            alert_sent=d.get("alert_sent", False),
-            alert_sent_at=d.get("alert_sent_at"),
-            booked=d.get("booked", False),
+            alert_sent=_parse_bool(d.get("alert_sent", False)),
+            alert_sent_at=_parse_datetime(d.get("alert_sent_at")),
+            booked=_parse_bool(d.get("booked", False)),
             feedback=d.get("feedback"),
-            created_at=d.get("created_at"),
+            created_at=_parse_datetime(d.get("created_at")),
         )
 
 

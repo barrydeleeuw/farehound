@@ -11,7 +11,7 @@ from src.storage.models import Deal, PollWindow, PriceSnapshot, Route
 
 @pytest.fixture
 def db(tmp_path):
-    database = Database(db_path=tmp_path / "test.duckdb")
+    database = Database(db_path=tmp_path / "test.db")
     database.init_schema()
     yield database
     database.close()

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import os
-
-import duckdb
 
 from src.storage.models import (
     AlertRule,
@@ -22,75 +21,75 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS routes (
-    route_id          VARCHAR PRIMARY KEY,
-    origin            VARCHAR NOT NULL,
-    destination       VARCHAR NOT NULL,
-    trip_type         VARCHAR DEFAULT 'round_trip',
-    earliest_departure DATE,
-    latest_return     DATE,
+    route_id          TEXT PRIMARY KEY,
+    origin            TEXT NOT NULL,
+    destination       TEXT NOT NULL,
+    trip_type         TEXT DEFAULT 'round_trip',
+    earliest_departure TEXT,
+    latest_return     TEXT,
     date_flex_days    INTEGER DEFAULT 3,
     max_stops         INTEGER DEFAULT 1,
     passengers        INTEGER DEFAULT 2,
-    preferred_airlines VARCHAR[],
-    notes             VARCHAR,
-    active            BOOLEAN DEFAULT true,
-    created_at        TIMESTAMP DEFAULT now()
+    preferred_airlines TEXT,
+    notes             TEXT,
+    active            INTEGER DEFAULT 1,
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS poll_windows (
-    window_id         VARCHAR PRIMARY KEY,
-    route_id          VARCHAR REFERENCES routes(route_id),
-    outbound_date     DATE NOT NULL,
-    return_date       DATE,
-    priority          VARCHAR DEFAULT 'normal',
-    last_polled_at    TIMESTAMP,
-    lowest_seen_price DECIMAL(10,2),
-    created_at        TIMESTAMP DEFAULT now()
+    window_id         TEXT PRIMARY KEY,
+    route_id          TEXT REFERENCES routes(route_id),
+    outbound_date     TEXT NOT NULL,
+    return_date       TEXT,
+    priority          TEXT DEFAULT 'normal',
+    last_polled_at    TEXT,
+    lowest_seen_price REAL,
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS price_snapshots (
-    snapshot_id       VARCHAR PRIMARY KEY,
-    route_id          VARCHAR REFERENCES routes(route_id),
-    window_id         VARCHAR REFERENCES poll_windows(window_id),
-    observed_at       TIMESTAMP NOT NULL,
-    source            VARCHAR NOT NULL,
-    outbound_date     DATE,
-    return_date       DATE,
+    snapshot_id       TEXT PRIMARY KEY,
+    route_id          TEXT REFERENCES routes(route_id),
+    window_id         TEXT REFERENCES poll_windows(window_id),
+    observed_at       TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    outbound_date     TEXT,
+    return_date       TEXT,
     passengers        INTEGER NOT NULL,
-    lowest_price      DECIMAL(10,2),
-    currency          VARCHAR DEFAULT 'EUR',
-    best_flight       JSON,
-    all_flights       JSON,
-    price_level       VARCHAR,
-    typical_low       DECIMAL(10,2),
-    typical_high      DECIMAL(10,2),
-    price_history     JSON,
-    search_params     JSON,
-    created_at        TIMESTAMP DEFAULT now()
+    lowest_price      REAL,
+    currency          TEXT DEFAULT 'EUR',
+    best_flight       TEXT,
+    all_flights       TEXT,
+    price_level       TEXT,
+    typical_low       REAL,
+    typical_high      REAL,
+    price_history     TEXT,
+    search_params     TEXT,
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS deals (
-    deal_id           VARCHAR PRIMARY KEY,
-    snapshot_id       VARCHAR REFERENCES price_snapshots(snapshot_id),
-    route_id          VARCHAR REFERENCES routes(route_id),
-    score             DECIMAL(3,2),
-    urgency           VARCHAR,
-    reasoning         VARCHAR,
-    booking_url       VARCHAR,
-    alert_sent        BOOLEAN DEFAULT false,
-    alert_sent_at     TIMESTAMP,
-    booked            BOOLEAN DEFAULT false,
-    feedback          VARCHAR,
-    created_at        TIMESTAMP DEFAULT now()
+    deal_id           TEXT PRIMARY KEY,
+    snapshot_id       TEXT REFERENCES price_snapshots(snapshot_id),
+    route_id          TEXT REFERENCES routes(route_id),
+    score             REAL,
+    urgency           TEXT,
+    reasoning         TEXT,
+    booking_url       TEXT,
+    alert_sent        INTEGER DEFAULT 0,
+    alert_sent_at     TEXT,
+    booked            INTEGER DEFAULT 0,
+    feedback          TEXT,
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS alert_rules (
-    rule_id           VARCHAR PRIMARY KEY,
-    route_id          VARCHAR REFERENCES routes(route_id),
-    rule_type         VARCHAR NOT NULL,
-    threshold         DECIMAL(10,2),
-    channel           VARCHAR NOT NULL,
-    active            BOOLEAN DEFAULT true
+    rule_id           TEXT PRIMARY KEY,
+    route_id          TEXT REFERENCES routes(route_id),
+    rule_type         TEXT NOT NULL,
+    threshold         REAL,
+    channel           TEXT NOT NULL,
+    active            INTEGER DEFAULT 1
 );
 """
 
@@ -101,29 +100,45 @@ def _to_json(val) -> str | None:
     return json.dumps(val)
 
 
+def _to_isoformat(val) -> str | None:
+    """Convert datetime/date to ISO string for sqlite storage (UTC, no tz suffix)."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        # Store as naive UTC with space separator to match sqlite's datetime('now')
+        utc = val.astimezone(UTC).replace(tzinfo=None)
+        return utc.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(val, date):
+        return val.isoformat()
+    return str(val)
+
+
 class Database:
     def __init__(self, db_path: str | Path | None = None):
         if db_path is None:
             data_dir = os.environ.get("FAREHOUND_DATA_DIR", "data")
-            db_path = Path(data_dir) / "flights.duckdb"
+            db_path = Path(data_dir) / "flights.db"
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = duckdb.connect(str(self._db_path))
+        self._conn = sqlite3.connect(str(self._db_path))
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
 
     def close(self) -> None:
         self._conn.close()
 
     def init_schema(self) -> None:
-        self._conn.execute(_SCHEMA_SQL)
+        self._conn.executescript(_SCHEMA_SQL)
+        self._conn.commit()
 
     # --- Routes ---
 
     def get_active_routes(self) -> list[Route]:
-        result = self._conn.execute(
-            "SELECT * FROM routes WHERE active = true"
+        cursor = self._conn.execute(
+            "SELECT * FROM routes WHERE active = 1"
         )
-        columns = [desc[0] for desc in result.description]
-        return [Route.from_row(row, columns) for row in result.fetchall()]
+        columns = [desc[0] for desc in cursor.description]
+        return [Route.from_row(row, columns) for row in cursor.fetchall()]
 
     def upsert_route(self, route: Route) -> None:
         self._conn.execute(
@@ -134,33 +149,34 @@ class Database:
                 max_stops, passengers, preferred_airlines, notes, active
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (route_id) DO UPDATE SET
-                origin = EXCLUDED.origin,
-                destination = EXCLUDED.destination,
-                trip_type = EXCLUDED.trip_type,
-                earliest_departure = EXCLUDED.earliest_departure,
-                latest_return = EXCLUDED.latest_return,
-                date_flex_days = EXCLUDED.date_flex_days,
-                max_stops = EXCLUDED.max_stops,
-                passengers = EXCLUDED.passengers,
-                preferred_airlines = EXCLUDED.preferred_airlines,
-                notes = EXCLUDED.notes,
-                active = EXCLUDED.active
+                origin = excluded.origin,
+                destination = excluded.destination,
+                trip_type = excluded.trip_type,
+                earliest_departure = excluded.earliest_departure,
+                latest_return = excluded.latest_return,
+                date_flex_days = excluded.date_flex_days,
+                max_stops = excluded.max_stops,
+                passengers = excluded.passengers,
+                preferred_airlines = excluded.preferred_airlines,
+                notes = excluded.notes,
+                active = excluded.active
             """,
             [
                 route.route_id,
                 route.origin,
                 route.destination,
                 route.trip_type,
-                route.earliest_departure,
-                route.latest_return,
+                _to_isoformat(route.earliest_departure),
+                _to_isoformat(route.latest_return),
                 route.date_flex_days,
                 route.max_stops,
                 route.passengers,
-                route.preferred_airlines,
+                json.dumps(route.preferred_airlines) if route.preferred_airlines else None,
                 route.notes,
-                route.active,
+                1 if route.active else 0,
             ],
         )
+        self._conn.commit()
 
     # --- Snapshots ---
 
@@ -178,22 +194,23 @@ class Database:
                 snapshot.snapshot_id,
                 snapshot.route_id,
                 snapshot.window_id,
-                snapshot.observed_at,
+                _to_isoformat(snapshot.observed_at),
                 snapshot.source,
-                snapshot.outbound_date,
-                snapshot.return_date,
+                _to_isoformat(snapshot.outbound_date),
+                _to_isoformat(snapshot.return_date),
                 snapshot.passengers,
-                snapshot.lowest_price,
+                float(snapshot.lowest_price) if snapshot.lowest_price is not None else None,
                 snapshot.currency,
                 _to_json(snapshot.best_flight),
                 _to_json(snapshot.all_flights),
                 snapshot.price_level,
-                snapshot.typical_low,
-                snapshot.typical_high,
+                float(snapshot.typical_low) if snapshot.typical_low is not None else None,
+                float(snapshot.typical_high) if snapshot.typical_high is not None else None,
                 _to_json(snapshot.price_history),
                 _to_json(snapshot.search_params),
             ],
         )
+        self._conn.commit()
 
     def get_price_history(self, route_id: str, days: int = 90) -> dict:
         cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -209,7 +226,7 @@ class Database:
               AND observed_at >= ?
               AND lowest_price IS NOT NULL
             """,
-            [route_id, cutoff],
+            [route_id, _to_isoformat(cutoff)],
         ).fetchone()
         return {
             "avg_price": row[0],
@@ -221,7 +238,7 @@ class Database:
     def get_recent_snapshots(
         self, route_id: str, limit: int = 10
     ) -> list[PriceSnapshot]:
-        result = self._conn.execute(
+        cursor = self._conn.execute(
             """
             SELECT * FROM price_snapshots
             WHERE route_id = ?
@@ -230,8 +247,8 @@ class Database:
             """,
             [route_id, limit],
         )
-        columns = [desc[0] for desc in result.description]
-        return [PriceSnapshot.from_row(row, columns) for row in result.fetchall()]
+        columns = [desc[0] for desc in cursor.description]
+        return [PriceSnapshot.from_row(row, columns) for row in cursor.fetchall()]
 
     # --- Deals ---
 
@@ -247,25 +264,27 @@ class Database:
                 deal.deal_id,
                 deal.snapshot_id,
                 deal.route_id,
-                deal.score,
+                float(deal.score) if deal.score is not None else None,
                 deal.urgency,
                 deal.reasoning,
                 deal.booking_url,
-                deal.alert_sent,
-                deal.alert_sent_at,
-                deal.booked,
+                1 if deal.alert_sent else 0,
+                _to_isoformat(deal.alert_sent_at),
+                1 if deal.booked else 0,
                 deal.feedback,
             ],
         )
+        self._conn.commit()
 
     def update_deal_feedback(self, deal_id: str, feedback: str) -> None:
         self._conn.execute(
             "UPDATE deals SET feedback = ? WHERE deal_id = ?",
             [feedback, deal_id],
         )
+        self._conn.commit()
 
     def get_recent_feedback(self, limit: int = 20) -> list[dict]:
-        result = self._conn.execute(
+        cursor = self._conn.execute(
             """
             SELECT
                 d.deal_id, d.route_id, r.origin, r.destination,
@@ -280,18 +299,18 @@ class Database:
             """,
             [limit],
         )
-        columns = [desc[0] for desc in result.description]
-        return [dict(zip(columns, row)) for row in result.fetchall()]
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     # --- Poll Windows ---
 
     def get_poll_windows(self, route_id: str) -> list[PollWindow]:
-        result = self._conn.execute(
+        cursor = self._conn.execute(
             "SELECT * FROM poll_windows WHERE route_id = ? ORDER BY outbound_date",
             [route_id],
         )
-        columns = [desc[0] for desc in result.description]
-        return [PollWindow.from_row(row, columns) for row in result.fetchall()]
+        columns = [desc[0] for desc in cursor.description]
+        return [PollWindow.from_row(row, columns) for row in cursor.fetchall()]
 
     def update_poll_window(
         self,
@@ -305,7 +324,7 @@ class Database:
             SELECT window_id, lowest_seen_price FROM poll_windows
             WHERE route_id = ? AND outbound_date = ?
             """,
-            [route_id, window_start],
+            [route_id, _to_isoformat(window_start)],
         ).fetchone()
 
         now = datetime.now(UTC)
@@ -329,7 +348,7 @@ class Database:
                     priority = ?
                 WHERE window_id = ?
                 """,
-                [now, new_lowest, window_end, priority, window_id],
+                [_to_isoformat(now), new_lowest, _to_isoformat(window_end), priority, window_id],
             )
         else:
             window_id = uuid4().hex
@@ -340,23 +359,25 @@ class Database:
                     priority, last_polled_at, lowest_seen_price
                 ) VALUES (?, ?, ?, ?, 'normal', ?, ?)
                 """,
-                [window_id, route_id, window_start, window_end, now, latest_price],
+                [window_id, route_id, _to_isoformat(window_start),
+                 _to_isoformat(window_end), _to_isoformat(now), latest_price],
             )
+        self._conn.commit()
 
     def get_deals_since(self, route_id: str, since: datetime) -> list[Deal]:
-        result = self._conn.execute(
+        cursor = self._conn.execute(
             """
             SELECT * FROM deals
             WHERE route_id = ? AND created_at >= ?
             ORDER BY created_at DESC
             """,
-            [route_id, since],
+            [route_id, _to_isoformat(since)],
         )
-        columns = [desc[0] for desc in result.description]
-        return [Deal.from_row(row, columns) for row in result.fetchall()]
+        columns = [desc[0] for desc in cursor.description]
+        return [Deal.from_row(row, columns) for row in cursor.fetchall()]
 
     def get_latest_snapshot(self, route_id: str) -> PriceSnapshot | None:
-        result = self._conn.execute(
+        cursor = self._conn.execute(
             """
             SELECT * FROM price_snapshots
             WHERE route_id = ? AND lowest_price IS NOT NULL
@@ -365,18 +386,18 @@ class Database:
             """,
             [route_id],
         )
-        row = result.fetchone()
+        row = cursor.fetchone()
         if row is None:
             return None
-        columns = [desc[0] for desc in result.description]
+        columns = [desc[0] for desc in cursor.description]
         return PriceSnapshot.from_row(row, columns)
 
     # --- Alert Rules ---
 
     def get_alert_rules(self, route_id: str) -> list[AlertRule]:
-        result = self._conn.execute(
-            "SELECT * FROM alert_rules WHERE route_id = ? AND active = true",
+        cursor = self._conn.execute(
+            "SELECT * FROM alert_rules WHERE route_id = ? AND active = 1",
             [route_id],
         )
-        columns = [desc[0] for desc in result.description]
-        return [AlertRule.from_row(row, columns) for row in result.fetchall()]
+        columns = [desc[0] for desc in cursor.description]
+        return [AlertRule.from_row(row, columns) for row in cursor.fetchall()]
