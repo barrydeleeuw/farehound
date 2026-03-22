@@ -153,11 +153,10 @@ class Orchestrator:
         if config.telegram_alerts is not None and config.telegram_alerts.enabled:
             self.trip_bot = TripBot(
                 bot_token=config.telegram_alerts.bot_token,
-                chat_id=config.telegram_alerts.chat_id,
                 db=self.db,
                 anthropic_api_key=config.anthropic.api_key,
                 anthropic_model=config.anthropic.model,
-                home_airport=config.traveller.home_airport,
+                serpapi_key=config.serpapi.api_key,
                 reload_callback=self.reload_routes,
             )
 
