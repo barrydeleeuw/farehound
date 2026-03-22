@@ -125,12 +125,12 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** None
 - **Summary:** 3 days after "Book Now", ask "Did you actually book?" Built but needs verification on HA.
 
-### [ITEM-014] Remove HA add-on src/ duplication
+### [ITEM-014] Clean up HA add-on packaging
 - **Status:** Ready
 - **Priority:** P1 (High)
 - **Effort:** S
 - **Dependencies:** None
-- **Summary:** farehound/src/ is an exact copy of src/ causing sync issues. Dockerfile should COPY from root src/ directly.
+- **Summary:** farehound/src/ is an exact copy of src/ causing sync issues. Dockerfile should COPY from root src/ directly. Also remove HA notification code (homeassistant.py), HA sensor updates, and Lovelace card. Telegram is the sole interface.
 
 ### [ITEM-015] Adaptive polling frequency
 - **Status:** Proposed
@@ -173,7 +173,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Parked:** No affordable API. Revisit if budget increases.
 
 ### [ITEM-P02] HA Lovelace dashboard
-- **Parked:** Telegram is the sole interface.
+- **Parked:** Removed from consideration. Telegram is the sole interface. HA is the deployment platform only.
 
 ### [ITEM-P03] 1Password / passport checks
 - **Parked:** Over-engineered for current stage.
