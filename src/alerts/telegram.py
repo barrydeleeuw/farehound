@@ -102,13 +102,18 @@ class TelegramNotifier:
         dates = deal_info.get("dates", "")
         search_url = deal_info.get("google_flights_url") or self._google_flights_url(deal_info)
 
+        passengers = deal_info.get("passengers", 2)
+        price_pp = float(price) / passengers if passengers > 1 else float(price)
+
         emoji = _deal_emoji(score, urgency)
         label = _deal_label(score, urgency)
         route = route_name(origin, dest)
         lines = [
             f"{emoji} *{label}* — {route}",
-            f"*€{float(price):,.0f}* | {airline} | {dates}",
+            f"*€{price_pp:,.0f}/pp* | {airline} | {dates}",
         ]
+        if passengers > 1:
+            lines.append(f"Total: €{float(price):,.0f} for {passengers} passengers")
         if reasoning:
             lines.append(f"_{reasoning}_")
 
@@ -230,7 +235,7 @@ class TelegramNotifier:
                 lines.append(f"📅 {dates}")
             if lowest is not None:
                 price_pp = float(lowest) / passengers if passengers > 1 else float(lowest)
-                lines.append(f"💰 *€{float(lowest):,.0f}* (€{price_pp:,.0f}/pp for {passengers} pax)")
+                lines.append(f"💰 *€{price_pp:,.0f}/pp* (€{float(lowest):,.0f} total for {passengers} pax)")
             else:
                 lines.append("⏳ No price data yet")
 
