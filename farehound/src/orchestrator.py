@@ -108,7 +108,6 @@ class Orchestrator:
         if config.telegram_alerts is not None and config.telegram_alerts.enabled:
             self.telegram_notifier = TelegramNotifier(
                 bot_token=config.telegram_alerts.bot_token,
-                chat_id=config.telegram_alerts.chat_id,
             )
 
         self.scheduler = AsyncIOScheduler()
