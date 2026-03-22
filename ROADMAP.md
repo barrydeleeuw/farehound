@@ -97,6 +97,59 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** Phase A validation
 - **Summary:** Move from HA to cloud. Only if Phase A proves demand.
 
+### [ITEM-010] Fix Reddit RSS 403s
+- **Status:** Ready
+- **Priority:** P2 (Medium)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** 3 of 7 Reddit RSS feeds return 403. Fix headers or replace with working alternatives.
+
+### [ITEM-011] Weekend/short trip date windowing
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** "Long weekend in May" should generate Thu/Fri→Sun/Mon windows, not May 1-31. Trip duration model exists but needs proper orchestrator integration.
+
+### [ITEM-012] Multi-destination per trip
+- **Status:** Proposed
+- **Priority:** P2 (Medium)
+- **Effort:** M
+- **Dependencies:** [ITEM-001]
+- **Summary:** "Japan" monitors NRT + KIX + NGO as separate routes under one trip. User says "all of them" → creates routes for each.
+
+### [ITEM-013] Booking follow-up confirmation
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** 3 days after "Book Now", ask "Did you actually book?" Built but needs verification on HA.
+
+### [ITEM-014] Remove HA add-on src/ duplication
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** farehound/src/ is an exact copy of src/ causing sync issues. Dockerfile should COPY from root src/ directly.
+
+### [ITEM-015] Adaptive polling frequency
+- **Status:** Proposed
+- **Priority:** P2 (Medium)
+- **Effort:** M
+- **Dependencies:** [ITEM-001]
+- **Summary:** Poll more when departure < 6 weeks (4h), less when > 4 months (48h). Currently fixed at 24h.
+
+### [ITEM-016] Transparent cost breakdown in alerts
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** All prices pp first. Nearby alternatives show: "Flights €1,400 + €50 transport + €120 parking = €1,570 total". Primary airport costs also shown.
+
+### [ITEM-017] SerpAPI response cache for local testing
+- **Status:** Done
+- **Summary:** SERPAPI_CACHE_DIR env var enables cached responses locally. 17 responses recorded. Zero API calls during dev.
+
 ## Done
 
 ### [ITEM-D01] Core monitoring loop (v0.1-v0.3)
