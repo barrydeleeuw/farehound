@@ -151,12 +151,14 @@ class DealScorer:
         past_feedback: list[dict] | None = None,
         nearby_comparison: list[dict] | None = None,
     ) -> str:
-        # Price history section
+        passengers = getattr(route, "passengers", snapshot.passengers)
+
+        # Price history section (per-person prices)
         if price_history.get("count", 0) > 0:
             price_history_section = (
-                f"- My observed average (last 90 days): €{price_history['avg_price']:,.0f}\n"
-                f"- My observed minimum (last 90 days): €{price_history['min_price']:,.0f}\n"
-                f"- My observed maximum (last 90 days): €{price_history['max_price']:,.0f}\n"
+                f"- My observed average (last 90 days): €{price_history['avg_price'] / passengers:,.0f}\n"
+                f"- My observed minimum (last 90 days): €{price_history['min_price'] / passengers:,.0f}\n"
+                f"- My observed maximum (last 90 days): €{price_history['max_price'] / passengers:,.0f}\n"
                 f"- Sample count: {price_history['count']}"
             )
         else:
@@ -170,7 +172,7 @@ class DealScorer:
                 parts.append(f"- Google Flights price level: {snapshot.price_level}")
             if snapshot.typical_low and snapshot.typical_high:
                 parts.append(
-                    f"- Google Flights typical range: €{float(snapshot.typical_low):,.0f} - €{float(snapshot.typical_high):,.0f}"
+                    f"- Google Flights typical range: €{float(snapshot.typical_low) / passengers:,.0f} - €{float(snapshot.typical_high) / passengers:,.0f}"
                 )
             if community_flagged:
                 parts.append("- Possible error fare: YES (community flagged)")
@@ -231,7 +233,6 @@ class DealScorer:
         destination = getattr(route, "destination", "")
         trip_type = getattr(route, "trip_type", "round_trip")
         date_flex = getattr(route, "date_flex_days", None) or getattr(route, "date_flexibility_days", 3)
-        passengers = getattr(route, "passengers", snapshot.passengers)
 
         # Days until departure
         earliest_dep = getattr(route, "earliest_departure", None)
@@ -270,7 +271,7 @@ class DealScorer:
             date_flex=date_flex,
             passengers=passengers,
             best_flight_json=best_flight_json,
-            lowest_price=snapshot.lowest_price or 0,
+            lowest_price=(snapshot.lowest_price or 0) / passengers,
             source=snapshot.source,
             price_history_section=price_history_section,
             serpapi_section=serpapi_section,

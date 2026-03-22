@@ -826,72 +826,66 @@ class Orchestrator:
             reasoning=score_result.reasoning,
         )
 
-        # Determine action based on thresholds
-        alert_threshold = self.config.scoring.alert_threshold
-        watch_threshold = self.config.scoring.watch_threshold
-
+        # Smart dedup: decide whether this alert is meaningful
         should_alert = False
         inflection_msg: str | None = None
 
-        if score_result.score >= alert_threshold:
-            # Smart dedup: decide whether this alert is meaningful
-            last_alerted = await loop.run_in_executor(
-                None, self.db.get_last_alerted_price, route.route_id, user_id
+        last_alerted = await loop.run_in_executor(
+            None, self.db.get_last_alerted_price, route.route_id, user_id
+        )
+
+        # Also check in-cycle tracker
+        cycle_best = self._cycle_best_prices.get(route.route_id)
+        effective_last = last_alerted
+        if cycle_best is not None:
+            if effective_last is None or cycle_best < effective_last:
+                effective_last = cycle_best
+
+        # Rule 1: New low (or first time)
+        is_new_low = effective_last is None or price < effective_last
+
+        # Rule 2: Inflection detection (bonus trigger)
+        inflection, bottom_price = await loop.run_in_executor(
+            None, self.db.detect_price_inflection, route.route_id, user_id
+        )
+        if inflection and bottom_price is not None:
+            inflection_msg = (
+                f"Price bottomed out at €{bottom_price:,.0f}"
+                " — book now before it rises further."
             )
 
-            # Also check in-cycle tracker
-            cycle_best = self._cycle_best_prices.get(route.route_id)
-            effective_last = last_alerted
-            if cycle_best is not None:
-                if effective_last is None or cycle_best < effective_last:
-                    effective_last = cycle_best
+        should_alert = is_new_low or inflection
 
-            # Rule 1: New low
-            is_new_low = effective_last is None or price < effective_last
-
-            # Rule 2: Book now + low
-            is_book_now_and_low = (
-                score_result.urgency == "book_now"
-                and snapshot.price_level == "low"
-                and (effective_last is None or price <= effective_last)
-            )
-
-            # Rule 3: Inflection detection
-            inflection, bottom_price = await loop.run_in_executor(
-                None, self.db.detect_price_inflection, route.route_id, user_id
-            )
-            if inflection and bottom_price is not None:
-                inflection_msg = (
-                    f"Price bottomed out at €{bottom_price:,.0f}"
-                    " — book now before it rises further."
-                )
-
-            should_alert = is_new_low or is_book_now_and_low or inflection
-
-            if should_alert:
-                deal.alert_sent = True
-                deal.alert_sent_at = now
-                # Track best alerted price this cycle
-                prev = self._cycle_best_prices.get(route.route_id)
-                if prev is None or price < prev:
-                    self._cycle_best_prices[route.route_id] = price
-                if inflection_msg and not is_new_low:
-                    deal.reasoning = inflection_msg
-            else:
-                logger.info(
-                    "Route %s scored %.2f but deduped (last alerted at €%.0f, current €%.0f)",
-                    route.route_id, score_result.score,
-                    last_alerted or 0, price,
-                )
-        elif score_result.score >= watch_threshold:
-            logger.info("Route %s is watch-level (%.2f), will include in digest", route.route_id, score_result.score)
+        if should_alert:
+            deal.alert_sent = True
+            deal.alert_sent_at = now
+            # Track best alerted price this cycle
+            prev = self._cycle_best_prices.get(route.route_id)
+            if prev is None or price < prev:
+                self._cycle_best_prices[route.route_id] = price
+            if inflection_msg and not is_new_low:
+                deal.reasoning = inflection_msg
         else:
-            logger.info("Route %s scored below watch threshold (%.2f), skipping", route.route_id, score_result.score)
+            logger.info(
+                "Route %s deduped (last alerted at €%.0f, current €%.0f)",
+                route.route_id, last_alerted or 0, price,
+            )
 
         await loop.run_in_executor(None, self.db.insert_deal, deal, user_id)
 
         # Send alert for deals that passed dedup
         if deal.alert_sent:
+            # Poll secondary airports for the triggering date window
+            if snapshot.outbound_date and snapshot.return_date:
+                try:
+                    await self._poll_secondary_airports(
+                        route,
+                        [(snapshot.outbound_date, snapshot.return_date)],
+                        user,
+                    )
+                except Exception:
+                    logger.exception("Secondary airport poll failed for alert on route %s", route.route_id)
+
             airline_code = ""
             stops = 0
             flight_data = best_flight or (snapshot.all_flights[0] if snapshot.all_flights else None)

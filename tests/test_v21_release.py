@@ -523,9 +523,9 @@ class TestHACleanup:
                 f"{py_file} still imports homeassistant"
             )
 
-    def test_farehound_src_directory_removed(self):
-        """The duplicate farehound/src/ directory should not exist."""
+    def test_farehound_src_directory_exists_for_ha_build(self):
+        """farehound/src/ must exist — HA Supervisor uses it as Docker build context."""
         project_root = Path(__file__).parent.parent
-        assert not (project_root / "farehound" / "src").exists(), (
-            "farehound/src/ directory still exists"
+        assert (project_root / "farehound" / "src").exists(), (
+            "farehound/src/ missing — needed for HA Supervisor build"
         )
