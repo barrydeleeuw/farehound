@@ -78,7 +78,7 @@ Interpret the user's message and respond with JSON:
 }}
 
 Intent-specific parameters:
-- add_trip: {{"destination": "...", "origin": "..." or null, "earliest_departure": "YYYY-MM-DD", "latest_return": "YYYY-MM-DD", "passengers": int, "max_stops": int, "notes": "..."}}
+- add_trip: {{"destination": "IATA airport code (e.g. ICN, NRT, MEX — use the main city code)", "origin": "IATA airport code or null", "earliest_departure": "YYYY-MM-DD", "latest_return": "YYYY-MM-DD", "passengers": int, "max_stops": int, "notes": "...", "trip_duration_type": "weekend|weeks|days|flexible|null", "trip_duration_days": int or null, "preferred_departure_days": [int] or null, "preferred_return_days": [int] or null}}
 - modify_trip: {{"route_id": "...", "changes": {{"earliest_departure": "...", "latest_return": "...", "passengers": int, ...}}}}
 - remove_trip: {{"route_id": "...", "confirm": true/false}}
 - query_trips: {{}}
@@ -86,6 +86,15 @@ Intent-specific parameters:
 - general_chat: {{}}
 
 For general_chat, just set response_text to your helpful answer. No parameters needed.
+
+ADD_TRIP DURATION RULES:
+- "long weekend" or "weekend trip" → trip_duration_type="weekend", trip_duration_days=3, preferred_departure_days=[3,4], preferred_return_days=[0,6]
+- "2 weeks" → trip_duration_type="weeks", trip_duration_days=14
+- "10 days" → trip_duration_type="days", trip_duration_days=10
+- "sometime in October" with no specific dates → trip_duration_type="flexible", earliest_departure=first of month, latest_return=last of month
+- Specific dates like "Oct 18 - Nov 8" → trip_duration_type=null (exact dates)
+- When the user references another trip's attributes (e.g. "same dates as Japan", "like the Mexico trip"), \
+look up that route in ACTIVE ROUTES and copy the relevant fields (dates, passengers, stops, etc.).
 
 TIMING AND PRICING HONESTY:
 - When answering questions about timing (e.g. "when should I book?", "is this a good time?"), \
@@ -103,8 +112,10 @@ CRITICAL SAFETY RULES:
 - Questions about travel (best time, prices, weather, tips) are ALWAYS general_chat or query_prices, never action intents.
 
 When the user refers to a destination by name (e.g. "Japan", "Mexico"), match it to the active route if one exists.
+When the user says "same dates as X" or "like the X trip", find route X in ACTIVE ROUTES and use its dates/settings.
 When the user says "all of them" or similar, look at the conversation history to understand what they're referring to.
-If modifying a trip, include all the changed fields in parameters.changes — use YYYY-MM-DD for dates."""
+If modifying a trip, include all the changed fields in parameters.changes — use YYYY-MM-DD for dates.
+Always use IATA airport codes for origin and destination, never city or country names."""
 
 
 _DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]

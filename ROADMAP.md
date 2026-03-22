@@ -353,6 +353,10 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** None
 - **Summary:** Telethon-based integration tests that connect as a test user and walk through bot flows (onboarding, trip creation, deal alerts, booking follow-up). Verifies message content and conversation state against expectations. Requires a test Telegram account and running bot instance.
 
+### [ITEM-D07] NL add-trip prompt fix (v2.1.x)
+- **Status:** Done
+- **Summary:** Fixed NL (natural language) trip creation via Telegram. The `_INTERPRET_SYSTEM` prompt was missing IATA airport code requirements (destinations returned as city names like "Seoul" instead of "ICN", breaking flight searches), trip duration fields (`trip_duration_type`, `trip_duration_days`, `preferred_departure_days`, `preferred_return_days`), and instructions for cross-trip references ("same dates as Japan"). Added duration rules matching the `/trip` flow and explicit IATA code instructions.
+
 ## Done
 
 ### [ITEM-D01] Core monitoring loop (v0.1-v0.3)
