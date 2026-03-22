@@ -20,6 +20,18 @@ from src.storage.models import (
 logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+    user_id           TEXT PRIMARY KEY,
+    telegram_chat_id  TEXT UNIQUE NOT NULL,
+    name              TEXT,
+    home_location     TEXT,
+    home_airport      TEXT DEFAULT 'AMS',
+    preferences       TEXT,
+    onboarded         INTEGER DEFAULT 0,
+    active            INTEGER DEFAULT 1,
+    created_at        TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS routes (
     route_id          TEXT PRIMARY KEY,
     origin            TEXT NOT NULL,
@@ -107,6 +119,9 @@ CREATE TABLE IF NOT EXISTS airport_transport (
 );
 """
 
+# Tables that need a user_id column added via migration
+_USER_ID_TABLES = ["routes", "price_snapshots", "deals", "poll_windows", "airport_transport"]
+
 
 def _to_json(val) -> str | None:
     if val is None:
@@ -127,6 +142,19 @@ def _to_isoformat(val) -> str | None:
     return str(val)
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cursor = conn.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
+
+def _user_filter(user_id: str | None, params: list) -> str:
+    """Return SQL fragment and append param if user_id is provided."""
+    if user_id is None:
+        return ""
+    params.append(user_id)
+    return " AND user_id = ?"
+
+
 class Database:
     def __init__(self, db_path: str | Path | None = None):
         if db_path is None:
@@ -144,17 +172,115 @@ class Database:
     def init_schema(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
+        # Add user_id column to existing tables if missing
+        for table in _USER_ID_TABLES:
+            if not _has_column(self._conn, table, "user_id"):
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id TEXT")
+        self._conn.commit()
+        # Migrate existing data: create default user if needed
+        self._migrate_default_user()
+
+    def _migrate_default_user(self) -> None:
+        user_count = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        route_count = self._conn.execute("SELECT COUNT(*) FROM routes").fetchone()[0]
+        if user_count == 0 and route_count > 0:
+            default_id = uuid4().hex
+            self._conn.execute(
+                "INSERT INTO users (user_id, telegram_chat_id, name, onboarded, active) VALUES (?, ?, ?, 1, 1)",
+                [default_id, "default", "barry"],
+            )
+            for table in _USER_ID_TABLES:
+                self._conn.execute(
+                    f"UPDATE {table} SET user_id = ? WHERE user_id IS NULL",
+                    [default_id],
+                )
+            self._conn.commit()
+
+    # --- Users ---
+
+    def create_user(self, telegram_chat_id: str, name: str | None = None) -> str:
+        user_id = uuid4().hex
+        self._conn.execute(
+            "INSERT INTO users (user_id, telegram_chat_id, name) VALUES (?, ?, ?)",
+            [user_id, telegram_chat_id, name],
+        )
+        self._conn.commit()
+        return user_id
+
+    def get_user_by_chat_id(self, chat_id: str) -> dict | None:
+        cursor = self._conn.execute(
+            "SELECT * FROM users WHERE telegram_chat_id = ?", [chat_id]
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in cursor.description]
+        result = dict(zip(columns, row))
+        result["onboarded"] = bool(result["onboarded"])
+        result["active"] = bool(result["active"])
+        if result.get("preferences"):
+            result["preferences"] = json.loads(result["preferences"])
+        return result
+
+    def get_user(self, user_id: str) -> dict | None:
+        cursor = self._conn.execute(
+            "SELECT * FROM users WHERE user_id = ?", [user_id]
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in cursor.description]
+        result = dict(zip(columns, row))
+        result["onboarded"] = bool(result["onboarded"])
+        result["active"] = bool(result["active"])
+        if result.get("preferences"):
+            result["preferences"] = json.loads(result["preferences"])
+        return result
+
+    def update_user(self, user_id: str, **fields) -> bool:
+        allowed = {"name", "home_location", "home_airport", "preferences", "onboarded", "active"}
+        to_update = {k: v for k, v in fields.items() if k in allowed}
+        if not to_update:
+            return False
+        sets = ", ".join(f"{k} = ?" for k in to_update)
+        vals = []
+        for k, v in to_update.items():
+            if k == "preferences" and isinstance(v, (dict, list)):
+                vals.append(json.dumps(v))
+            else:
+                vals.append(v)
+        vals.append(user_id)
+        cursor = self._conn.execute(
+            f"UPDATE users SET {sets} WHERE user_id = ?", vals
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_all_active_users(self) -> list[dict]:
+        cursor = self._conn.execute("SELECT * FROM users WHERE active = 1")
+        columns = [desc[0] for desc in cursor.description]
+        results = []
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            d["onboarded"] = bool(d["onboarded"])
+            d["active"] = bool(d["active"])
+            if d.get("preferences"):
+                d["preferences"] = json.loads(d["preferences"])
+            results.append(d)
+        return results
 
     # --- Routes ---
 
-    def get_active_routes(self) -> list[Route]:
-        cursor = self._conn.execute(
-            "SELECT * FROM routes WHERE active = 1"
-        )
+    def get_active_routes(self, user_id: str | None = None) -> list[Route]:
+        params: list = []
+        sql = "SELECT * FROM routes WHERE active = 1"
+        sql += _user_filter(user_id, params)
+        cursor = self._conn.execute(sql, params)
         columns = [desc[0] for desc in cursor.description]
         return [Route.from_row(row, columns) for row in cursor.fetchall()]
 
-    def upsert_route(self, route: Route) -> None:
+    def upsert_route(self, route: Route, user_id: str | None = None) -> None:
+        uid = user_id or route.user_id
         self._conn.execute(
             """
             INSERT INTO routes (
@@ -162,8 +288,8 @@ class Database:
                 earliest_departure, latest_return, date_flex_days,
                 max_stops, passengers, preferred_airlines, notes, active,
                 trip_duration_type, trip_duration_days,
-                preferred_departure_days, preferred_return_days
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                preferred_departure_days, preferred_return_days, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (route_id) DO UPDATE SET
                 origin = excluded.origin,
                 destination = excluded.destination,
@@ -179,7 +305,8 @@ class Database:
                 trip_duration_type = excluded.trip_duration_type,
                 trip_duration_days = excluded.trip_duration_days,
                 preferred_departure_days = excluded.preferred_departure_days,
-                preferred_return_days = excluded.preferred_return_days
+                preferred_return_days = excluded.preferred_return_days,
+                user_id = excluded.user_id
             """,
             [
                 route.route_id,
@@ -198,6 +325,7 @@ class Database:
                 route.trip_duration_days,
                 _to_json(route.preferred_departure_days),
                 _to_json(route.preferred_return_days),
+                uid,
             ],
         )
         self._conn.commit()
@@ -241,15 +369,16 @@ class Database:
 
     # --- Snapshots ---
 
-    def insert_snapshot(self, snapshot: PriceSnapshot) -> None:
+    def insert_snapshot(self, snapshot: PriceSnapshot, user_id: str | None = None) -> None:
+        uid = user_id or snapshot.user_id
         self._conn.execute(
             """
             INSERT INTO price_snapshots (
                 snapshot_id, route_id, window_id, observed_at, source,
                 outbound_date, return_date, passengers, lowest_price,
                 currency, best_flight, all_flights, price_level,
-                typical_low, typical_high, price_history, search_params
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                typical_low, typical_high, price_history, search_params, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 snapshot.snapshot_id,
@@ -269,14 +398,15 @@ class Database:
                 float(snapshot.typical_high) if snapshot.typical_high is not None else None,
                 _to_json(snapshot.price_history),
                 _to_json(snapshot.search_params),
+                uid,
             ],
         )
         self._conn.commit()
 
-    def get_price_history(self, route_id: str, days: int = 90) -> dict:
+    def get_price_history(self, route_id: str, days: int = 90, user_id: str | None = None) -> dict:
         cutoff = datetime.now(UTC) - timedelta(days=days)
-        row = self._conn.execute(
-            """
+        params: list = [route_id, _to_isoformat(cutoff)]
+        sql = """
             SELECT
                 AVG(lowest_price) AS avg_price,
                 MIN(lowest_price) AS min_price,
@@ -286,9 +416,9 @@ class Database:
             WHERE route_id = ?
               AND observed_at >= ?
               AND lowest_price IS NOT NULL
-            """,
-            [route_id, _to_isoformat(cutoff)],
-        ).fetchone()
+        """
+        sql += _user_filter(user_id, params)
+        row = self._conn.execute(sql, params).fetchone()
         return {
             "avg_price": row[0],
             "min_price": row[1],
@@ -313,13 +443,14 @@ class Database:
 
     # --- Deals ---
 
-    def insert_deal(self, deal: Deal) -> None:
+    def insert_deal(self, deal: Deal, user_id: str | None = None) -> None:
+        uid = user_id or deal.user_id
         self._conn.execute(
             """
             INSERT INTO deals (
                 deal_id, snapshot_id, route_id, score, urgency,
-                reasoning, booking_url, alert_sent, alert_sent_at, booked, feedback
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reasoning, booking_url, alert_sent, alert_sent_at, booked, feedback, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 deal.deal_id,
@@ -333,6 +464,7 @@ class Database:
                 _to_isoformat(deal.alert_sent_at),
                 1 if deal.booked else 0,
                 deal.feedback,
+                uid,
             ],
         )
         self._conn.commit()
@@ -447,46 +579,44 @@ class Database:
             )
         self._conn.commit()
 
-    def get_deals_since(self, route_id: str, since: datetime) -> list[Deal]:
-        cursor = self._conn.execute(
-            """
+    def get_deals_since(self, route_id: str, since: datetime, user_id: str | None = None) -> list[Deal]:
+        params: list = [route_id, _to_isoformat(since)]
+        sql = """
             SELECT * FROM deals
             WHERE route_id = ? AND created_at >= ?
-            ORDER BY created_at DESC
-            """,
-            [route_id, _to_isoformat(since)],
-        )
+        """
+        sql += _user_filter(user_id, params)
+        sql += " ORDER BY created_at DESC"
+        cursor = self._conn.execute(sql, params)
         columns = [desc[0] for desc in cursor.description]
         return [Deal.from_row(row, columns) for row in cursor.fetchall()]
 
-    def get_cheapest_recent_snapshot(self, route_id: str, days: int = 7) -> PriceSnapshot | None:
+    def get_cheapest_recent_snapshot(self, route_id: str, days: int = 7, user_id: str | None = None) -> PriceSnapshot | None:
         cutoff = datetime.now(UTC) - timedelta(days=days)
-        cursor = self._conn.execute(
-            """
+        params: list = [route_id, _to_isoformat(cutoff)]
+        sql = """
             SELECT * FROM price_snapshots
             WHERE route_id = ? AND lowest_price IS NOT NULL
               AND observed_at >= ?
-            ORDER BY lowest_price ASC
-            LIMIT 1
-            """,
-            [route_id, _to_isoformat(cutoff)],
-        )
+        """
+        sql += _user_filter(user_id, params)
+        sql += " ORDER BY lowest_price ASC LIMIT 1"
+        cursor = self._conn.execute(sql, params)
         row = cursor.fetchone()
         if row is None:
             return None
         columns = [desc[0] for desc in cursor.description]
         return PriceSnapshot.from_row(row, columns)
 
-    def get_latest_snapshot(self, route_id: str) -> PriceSnapshot | None:
-        cursor = self._conn.execute(
-            """
+    def get_latest_snapshot(self, route_id: str, user_id: str | None = None) -> PriceSnapshot | None:
+        params: list = [route_id]
+        sql = """
             SELECT * FROM price_snapshots
             WHERE route_id = ? AND lowest_price IS NOT NULL
-            ORDER BY observed_at DESC
-            LIMIT 1
-            """,
-            [route_id],
-        )
+        """
+        sql += _user_filter(user_id, params)
+        sql += " ORDER BY observed_at DESC LIMIT 1"
+        cursor = self._conn.execute(sql, params)
         row = cursor.fetchone()
         if row is None:
             return None
@@ -495,39 +625,39 @@ class Database:
 
     # --- Alert Dedup Helpers ---
 
-    def get_last_alerted_price(self, route_id: str) -> float | None:
+    def get_last_alerted_price(self, route_id: str, user_id: str | None = None) -> float | None:
         """Return the lowest_price from the most recent deal where an alert was sent."""
-        row = self._conn.execute(
-            """
+        params: list = [route_id]
+        sql = """
             SELECT ps.lowest_price
             FROM deals d
             JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
             WHERE d.route_id = ?
               AND d.alert_sent = 1
               AND ps.lowest_price IS NOT NULL
-            ORDER BY d.alert_sent_at DESC
-            LIMIT 1
-            """,
-            [route_id],
-        ).fetchone()
+        """
+        if user_id is not None:
+            sql += " AND d.user_id = ?"
+            params.append(user_id)
+        sql += " ORDER BY d.alert_sent_at DESC LIMIT 1"
+        row = self._conn.execute(sql, params).fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
-    def detect_price_inflection(self, route_id: str) -> tuple[bool, float | None]:
+    def detect_price_inflection(self, route_id: str, user_id: str | None = None) -> tuple[bool, float | None]:
         """Check if price was dropping for 3+ snapshots then ticked up.
 
         Returns (inflection_detected, bottom_price).
         """
-        cursor = self._conn.execute(
-            """
+        params: list = [route_id]
+        sql = """
             SELECT lowest_price
             FROM price_snapshots
             WHERE route_id = ?
               AND lowest_price IS NOT NULL
-            ORDER BY observed_at DESC
-            LIMIT 5
-            """,
-            [route_id],
-        )
+        """
+        sql += _user_filter(user_id, params)
+        sql += " ORDER BY observed_at DESC LIMIT 5"
+        cursor = self._conn.execute(sql, params)
         prices = [float(row[0]) for row in cursor.fetchall()]
 
         # Need at least 4 snapshots: current (up-tick) + 3 consecutive drops before it
@@ -558,15 +688,15 @@ class Database:
 
     # --- Airport Transport ---
 
-    def seed_airport_transport(self, airports: list[dict]) -> None:
+    def seed_airport_transport(self, airports: list[dict], user_id: str | None = None) -> None:
         for ap in airports:
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO airport_transport (
                     airport_code, airport_name, transport_mode,
                     transport_cost_eur, transport_time_min,
-                    parking_cost_eur, is_primary
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    parking_cost_eur, is_primary, user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     ap["code"],
@@ -576,29 +706,33 @@ class Database:
                     ap.get("transport_time_min"),
                     ap.get("parking_cost_eur"),
                     1 if ap.get("is_primary") else 0,
+                    user_id,
                 ],
             )
         self._conn.commit()
 
-    def get_airport_transport(self, code: str) -> dict | None:
-        row = self._conn.execute(
-            "SELECT * FROM airport_transport WHERE airport_code = ?",
-            [code],
-        ).fetchone()
+    def get_airport_transport(self, code: str, user_id: str | None = None) -> dict | None:
+        params: list = [code]
+        sql = "SELECT * FROM airport_transport WHERE airport_code = ?"
+        sql += _user_filter(user_id, params)
+        row = self._conn.execute(sql, params).fetchone()
         if row is None:
             return None
         columns = ["airport_code", "airport_name", "transport_mode",
                     "transport_cost_eur", "transport_time_min",
-                    "parking_cost_eur", "is_primary"]
+                    "parking_cost_eur", "is_primary", "user_id"]
         result = dict(zip(columns, row))
         result["is_primary"] = bool(result["is_primary"])
         return result
 
-    def get_all_airport_transports(self) -> list[dict]:
-        cursor = self._conn.execute("SELECT * FROM airport_transport")
+    def get_all_airport_transports(self, user_id: str | None = None) -> list[dict]:
+        params: list = []
+        sql = "SELECT * FROM airport_transport WHERE 1=1"
+        sql += _user_filter(user_id, params)
+        cursor = self._conn.execute(sql, params)
         columns = ["airport_code", "airport_name", "transport_mode",
                     "transport_cost_eur", "transport_time_min",
-                    "parking_cost_eur", "is_primary"]
+                    "parking_cost_eur", "is_primary", "user_id"]
         results = []
         for row in cursor.fetchall():
             d = dict(zip(columns, row))
@@ -606,15 +740,17 @@ class Database:
             results.append(d)
         return results
 
-    def get_primary_airport(self) -> dict | None:
-        row = self._conn.execute(
-            "SELECT * FROM airport_transport WHERE is_primary = 1 LIMIT 1"
-        ).fetchone()
+    def get_primary_airport(self, user_id: str | None = None) -> dict | None:
+        params: list = []
+        sql = "SELECT * FROM airport_transport WHERE is_primary = 1"
+        sql += _user_filter(user_id, params)
+        sql += " LIMIT 1"
+        row = self._conn.execute(sql, params).fetchone()
         if row is None:
             return None
         columns = ["airport_code", "airport_name", "transport_mode",
                     "transport_cost_eur", "transport_time_min",
-                    "parking_cost_eur", "is_primary"]
+                    "parking_cost_eur", "is_primary", "user_id"]
         result = dict(zip(columns, row))
         result["is_primary"] = True
         return result
@@ -646,13 +782,14 @@ class Database:
                 seen[origin] = {"airport_code": origin, "lowest_price": row[1]}
         return list(seen.values())
 
-    def get_secondary_airports(self) -> list[dict]:
-        cursor = self._conn.execute(
-            "SELECT * FROM airport_transport WHERE is_primary = 0"
-        )
+    def get_secondary_airports(self, user_id: str | None = None) -> list[dict]:
+        params: list = []
+        sql = "SELECT * FROM airport_transport WHERE is_primary = 0"
+        sql += _user_filter(user_id, params)
+        cursor = self._conn.execute(sql, params)
         columns = ["airport_code", "airport_name", "transport_mode",
                     "transport_cost_eur", "transport_time_min",
-                    "parking_cost_eur", "is_primary"]
+                    "parking_cost_eur", "is_primary", "user_id"]
         results = []
         for row in cursor.fetchall():
             d = dict(zip(columns, row))

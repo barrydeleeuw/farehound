@@ -108,6 +108,10 @@ If modifying a trip, include all the changed fields in parameters.changes — us
 
 _DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+_CANDIDATE_AIRPORTS = ["AMS", "BRU", "DUS", "EIN", "CGN", "RTM", "CRL", "LGG", "NRN", "FRA", "HAM", "LHR", "CDG"]
+
+_MAX_TRAVEL_SECONDS = 10800  # 3 hours
+
 
 def _format_date_display(route_or_pending: dict | Route) -> str:
     """Build a human-readable date/duration string for confirmation and /trips."""
@@ -174,19 +178,17 @@ class TripBot:
     def __init__(
         self,
         bot_token: str,
-        chat_id: str,
         db: Database,
         anthropic_api_key: str,
         anthropic_model: str,
-        home_airport: str,
+        serpapi_key: str | None = None,
         reload_callback=None,
     ) -> None:
         self._bot_token = bot_token
-        self._chat_id = chat_id
         self._db = db
         self._anthropic_key = anthropic_api_key
         self._anthropic_model = anthropic_model
-        self._home_airport = home_airport
+        self._serpapi_key = serpapi_key
         self._reload_callback = reload_callback
         self._offset: int = 0
         self._pending: dict[str, dict] = {}  # chat_id -> pending confirmation
@@ -238,6 +240,10 @@ class TripBot:
             return "(no prior messages)"
         return "\n".join(f"{m['role']}: {m['text']}" for m in history)
 
+    def _get_user(self, chat_id: str) -> dict | None:
+        """Look up user by Telegram chat_id. Returns None if unknown."""
+        return self._db.get_user_by_chat_id(chat_id)
+
     async def _handle_update(self, update: dict, client: httpx.AsyncClient) -> None:
         callback = update.get("callback_query")
         if callback:
@@ -253,6 +259,28 @@ class TripBot:
         if not text:
             return
 
+        # Look up user
+        user = self._get_user(chat_id)
+
+        # Onboarding: check for pending onboarding flow
+        pending = self._pending.get(chat_id)
+        if pending and pending.get("action") == "onboarding":
+            await self._handle_onboarding_step(text, chat_id, pending, client)
+            return
+
+        # Unknown user → start onboarding
+        if user is None:
+            await self._start_onboarding(chat_id, client)
+            return
+
+        # User exists but not onboarded → resume onboarding
+        if not user.get("onboarded"):
+            await self._start_onboarding(chat_id, client)
+            return
+
+        user_id = user["user_id"]
+        home_airport = user.get("home_airport", "AMS")
+
         # Slash commands as shortcuts
         if text.startswith("/"):
             cmd = text.split()[0].lower()
@@ -260,20 +288,20 @@ class TripBot:
                 await self._handle_help(chat_id, client)
                 return
             elif cmd == "/trips":
-                await self._handle_trips(chat_id, client)
+                await self._handle_trips(chat_id, user_id, client)
                 return
             elif cmd == "/trip":
                 user_text = text[5:].strip()
                 if user_text:
-                    await self._handle_trip(user_text, chat_id, client)
+                    await self._handle_trip(user_text, chat_id, user_id, home_airport, client)
                 else:
-                    await self._handle_trip("", chat_id, client)
+                    await self._handle_trip("", chat_id, user_id, home_airport, client)
                 return
             elif cmd == "/remove":
-                await self._handle_remove(text[7:].strip(), chat_id, client)
+                await self._handle_remove(text[7:].strip(), chat_id, user_id, client)
                 return
             elif cmd == "/yes":
-                await self._handle_yes(chat_id, client)
+                await self._handle_yes(chat_id, user_id, home_airport, client)
                 return
             elif cmd == "/no":
                 await self._handle_no(chat_id, client)
@@ -290,7 +318,141 @@ class TripBot:
 
         # Non-command text: route through Claude for interpretation
         self._add_history(chat_id, "user", text)
-        await self._interpret_message(text, chat_id, client)
+        await self._interpret_message(text, chat_id, user_id, home_airport, client)
+
+    # --- Onboarding ---
+
+    async def _start_onboarding(self, chat_id: str, client: httpx.AsyncClient) -> None:
+        self._pending[chat_id] = {"action": "onboarding", "step": "name", "chat_id": chat_id}
+        await self._send(client, chat_id,
+            "Welcome to FareHound! I find cheap flights from airports near you.\n\nWhat's your name?")
+
+    async def _handle_onboarding_step(
+        self, text: str, chat_id: str, pending: dict, client: httpx.AsyncClient
+    ) -> None:
+        step = pending.get("step")
+        loop = asyncio.get_running_loop()
+
+        if step == "name":
+            name = text.strip()
+            # Create user in DB
+            user_id = await loop.run_in_executor(None, self._db.create_user, chat_id, name)
+            pending["user_id"] = user_id
+            pending["name"] = name
+            pending["step"] = "location"
+            await self._send(client, chat_id,
+                f"Hi {name}! Where do you live? (city, e.g. 'The Hague' or 'Amsterdam')")
+
+        elif step == "location":
+            location = text.strip()
+            user_id = pending.get("user_id")
+            if not user_id:
+                # Recover: look up user
+                user = self._get_user(chat_id)
+                if user:
+                    user_id = user["user_id"]
+                else:
+                    await self._start_onboarding(chat_id, client)
+                    return
+
+            await loop.run_in_executor(None, lambda: self._db.update_user(user_id, home_location=location))
+
+            # Resolve nearby airports
+            await self._send(client, chat_id, f"Finding airports near {location}...")
+            airports = await self._resolve_airports(location)
+
+            if airports:
+                # Store airports and set primary
+                await loop.run_in_executor(None, self._db.seed_airport_transport, airports, user_id)
+                closest = airports[0]
+                await loop.run_in_executor(
+                    None, lambda: self._db.update_user(user_id, home_airport=closest["code"], onboarded=1)
+                )
+
+                # Format airport list
+                lines = [f"Found {len(airports)} airports within 3 hours:"]
+                for ap in airports:
+                    primary = " ⭐ (primary)" if ap.get("is_primary") else ""
+                    hours = ap.get("transport_time_min", 0) / 60
+                    lines.append(f"  {ap['code']} — {ap.get('name', ap['code'])} ({hours:.1f}h){primary}")
+                lines.append(f"\nYour primary airport: *{closest['code']}*")
+                lines.append("\nNow tell me about a trip: 'Japan for 2 weeks in October, 2 passengers'")
+                await self._send(client, chat_id, "\n".join(lines))
+            else:
+                # Fallback: default to AMS
+                await loop.run_in_executor(
+                    None, lambda: self._db.update_user(user_id, home_airport="AMS", onboarded=1)
+                )
+                await self._send(client, chat_id,
+                    "Couldn't find nearby airports — defaulting to AMS (Amsterdam Schiphol).\n\n"
+                    "Now tell me about a trip: 'Japan for 2 weeks in October, 2 passengers'")
+
+            # Clear onboarding pending
+            self._pending.pop(chat_id, None)
+
+    async def _resolve_airports(self, location: str) -> list[dict]:
+        """Use SerpAPI Google Maps to find nearby airports within 3 hours."""
+        if not self._serpapi_key:
+            logger.warning("No SerpAPI key — skipping airport resolution")
+            return []
+
+        from src.utils.airports import AIRPORTS
+
+        results = []
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for code in _CANDIDATE_AIRPORTS:
+                airport_name = AIRPORTS.get(code, code)
+                try:
+                    params = {
+                        "engine": "google_maps_directions",
+                        "api_key": self._serpapi_key,
+                        "start_addr": location,
+                        "end_addr": f"{airport_name} Airport",
+                    }
+                    resp = await client.get("https://serpapi.com/search.json", params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    # Extract duration and distance from directions
+                    directions = data.get("directions", [])
+                    if not directions:
+                        continue
+                    best = directions[0]
+                    legs = best.get("legs", [])
+                    if not legs:
+                        continue
+                    leg = legs[0]
+
+                    duration_sec = leg.get("duration", {}).get("value", 99999)
+                    distance_m = leg.get("distance", {}).get("value", 0)
+                    distance_km = distance_m / 1000
+
+                    if duration_sec > _MAX_TRAVEL_SECONDS:
+                        continue
+
+                    transport_cost = round(distance_km * 0.20, 2)
+
+                    results.append({
+                        "code": code,
+                        "name": airport_name,
+                        "transport_mode": "car",
+                        "transport_cost_eur": transport_cost,
+                        "transport_time_min": round(duration_sec / 60),
+                        "parking_cost_eur": 50 if code != "AMS" else None,
+                        "is_primary": False,
+                    })
+                except Exception:
+                    logger.warning("Failed to get directions to %s", code)
+                    continue
+
+        # Sort by travel time, mark closest as primary
+        results.sort(key=lambda x: x["transport_time_min"])
+        if results:
+            results[0]["is_primary"] = True
+
+        return results
+
+    # --- Callbacks ---
 
     async def _handle_callback(self, callback: dict, client: httpx.AsyncClient) -> None:
         callback_id = callback.get("id")
@@ -352,9 +514,13 @@ class TripBot:
             except Exception:
                 logger.exception("Failed to edit message after callback")
 
-    async def _interpret_message(self, text: str, chat_id: str, client: httpx.AsyncClient) -> None:
+    # --- Message interpretation ---
+
+    async def _interpret_message(
+        self, text: str, chat_id: str, user_id: str, home_airport: str, client: httpx.AsyncClient
+    ) -> None:
         loop = asyncio.get_running_loop()
-        routes = await loop.run_in_executor(None, self._db.get_active_routes)
+        routes = await loop.run_in_executor(None, self._db.get_active_routes, user_id)
 
         from src.utils.airports import route_name
 
@@ -377,7 +543,7 @@ class TripBot:
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         system_prompt = _INTERPRET_SYSTEM.format(
             today=today,
-            home_airport=self._home_airport,
+            home_airport=home_airport,
             routes_summary=routes_summary,
             history=self._get_history_text(chat_id),
         )
@@ -424,7 +590,7 @@ class TripBot:
                 self._add_history(chat_id, "assistant", response_text)
                 await self._send(client, chat_id, response_text)
                 return
-            origin = params.get("origin") or self._home_airport
+            origin = params.get("origin") or home_airport
             earliest = params.get("earliest_departure", "")
             latest = params.get("latest_return", "")
             passengers = params.get("passengers", 2)
@@ -444,6 +610,7 @@ class TripBot:
                 "trip_duration_days": params.get("trip_duration_days"),
                 "preferred_departure_days": params.get("preferred_departure_days"),
                 "preferred_return_days": params.get("preferred_return_days"),
+                "user_id": user_id,
             }
             self._pending[chat_id] = pending
 
@@ -479,6 +646,7 @@ class TripBot:
                 "action": "modify",
                 "route_id": route_id,
                 "changes": changes,
+                "user_id": user_id,
             }
             # Build a human-readable summary of changes
             change_lines = []
@@ -506,13 +674,13 @@ class TripBot:
                 await self._send(client, chat_id, msg)
                 return
             r = matching[0]
-            self._pending[chat_id] = {"action": "remove", "route_id": r.route_id}
+            self._pending[chat_id] = {"action": "remove", "route_id": r.route_id, "user_id": user_id}
             msg = f"Remove *{route_name(r.origin, r.destination)}*? Reply /yes or /no"
             self._add_history(chat_id, "assistant", msg)
             await self._send(client, chat_id, msg)
 
         elif intent == "query_trips":
-            await self._handle_trips(chat_id, client)
+            await self._handle_trips(chat_id, user_id, client)
 
         elif intent == "query_prices":
             route_id = params.get("route_id")
@@ -576,7 +744,9 @@ class TripBot:
             "`/yes` `/no` — confirm or cancel pending actions"
         ), parse_mode="Markdown")
 
-    async def _handle_trip(self, user_text: str, chat_id: str, client: httpx.AsyncClient) -> None:
+    async def _handle_trip(
+        self, user_text: str, chat_id: str, user_id: str, home_airport: str, client: httpx.AsyncClient
+    ) -> None:
         if not user_text:
             await self._send(client, chat_id, (
                 "Tell me where you want to go! Examples:\n\n"
@@ -602,11 +772,12 @@ class TripBot:
                 "action": "clarify",
                 "original_text": user_text,
                 "parsed": parsed,
+                "user_id": user_id,
             }
             await self._send(client, chat_id, question)
             return
 
-        origin = parsed.get("origin") or self._home_airport
+        origin = parsed.get("origin") or home_airport
         destination = parsed.get("destination")
         if not destination:
             await self._send(client, chat_id, "I couldn't determine the destination. Please try again.")
@@ -637,6 +808,7 @@ class TripBot:
             "trip_duration_days": trip_duration_days,
             "preferred_departure_days": preferred_departure_days,
             "preferred_return_days": preferred_return_days,
+            "user_id": user_id,
         }
         self._pending[chat_id] = pending
 
@@ -657,16 +829,19 @@ class TripBot:
         pending = self._pending.pop(chat_id, None)
         if not pending:
             return
+        user_id = pending.get("user_id")
+        user = self._get_user(chat_id)
+        home_airport = (user or {}).get("home_airport", "AMS")
         original = pending.get("original_text", "")
         # Replace the ambiguous part with the user's specific answer
         new_text = f"{reply}, {original}"
-        await self._handle_trip(new_text, chat_id, client)
+        await self._handle_trip(new_text, chat_id, user_id, home_airport, client)
 
-    async def _handle_trips(self, chat_id: str, client: httpx.AsyncClient) -> None:
+    async def _handle_trips(self, chat_id: str, user_id: str, client: httpx.AsyncClient) -> None:
         from src.utils.airports import airport_name, route_name
 
         loop = asyncio.get_running_loop()
-        routes = await loop.run_in_executor(None, self._db.get_active_routes)
+        routes = await loop.run_in_executor(None, self._db.get_active_routes, user_id)
 
         if not routes:
             await self._send(client, chat_id, "No active routes. Add one with /trip")
@@ -726,13 +901,15 @@ class TripBot:
 
         await self._send(client, chat_id, "\n\n".join(lines))
 
-    async def _handle_remove(self, query: str, chat_id: str, client: httpx.AsyncClient) -> None:
+    async def _handle_remove(
+        self, query: str, chat_id: str, user_id: str, client: httpx.AsyncClient
+    ) -> None:
         from src.utils.airports import route_name, AIRPORTS
 
         if not query:
             # Show routes with IDs for easy removal
             loop = asyncio.get_running_loop()
-            routes = await loop.run_in_executor(None, self._db.get_active_routes)
+            routes = await loop.run_in_executor(None, self._db.get_active_routes, user_id)
             if not routes:
                 await self._send(client, chat_id, "No active routes to remove.")
                 return
@@ -743,7 +920,7 @@ class TripBot:
             return
 
         loop = asyncio.get_running_loop()
-        routes = await loop.run_in_executor(None, self._db.get_active_routes)
+        routes = await loop.run_in_executor(None, self._db.get_active_routes, user_id)
 
         # Match by route_id, destination IATA, or destination city name
         query_upper = query.upper().strip()
@@ -767,10 +944,12 @@ class TripBot:
             return
 
         r = match[0]
-        self._pending[chat_id] = {"action": "remove", "route_id": r.route_id}
+        self._pending[chat_id] = {"action": "remove", "route_id": r.route_id, "user_id": user_id}
         await self._send(client, chat_id, f"Remove *{route_name(r.origin, r.destination)}*? Reply /yes or /no")
 
-    async def _handle_yes(self, chat_id: str, client: httpx.AsyncClient) -> None:
+    async def _handle_yes(
+        self, chat_id: str, user_id: str, home_airport: str, client: httpx.AsyncClient
+    ) -> None:
         from src.utils.airports import route_name
 
         pending = self._pending.pop(chat_id, None)
@@ -779,6 +958,7 @@ class TripBot:
             return
 
         loop = asyncio.get_running_loop()
+        uid = pending.get("user_id", user_id)
 
         if pending["action"] == "add":
             route_id = f"{pending['origin'].lower()}_{pending['destination'].lower()}"
@@ -795,8 +975,9 @@ class TripBot:
                 trip_duration_days=pending.get("trip_duration_days"),
                 preferred_departure_days=pending.get("preferred_departure_days"),
                 preferred_return_days=pending.get("preferred_return_days"),
+                user_id=uid,
             )
-            await loop.run_in_executor(None, self._db.upsert_route, route)
+            await loop.run_in_executor(None, self._db.upsert_route, route, uid)
 
             if self._reload_callback:
                 await self._reload_callback()
@@ -828,7 +1009,7 @@ class TripBot:
                 await self._reload_callback()
 
             if updated:
-                routes = await loop.run_in_executor(None, self._db.get_active_routes)
+                routes = await loop.run_in_executor(None, self._db.get_active_routes, uid)
                 r = next((r for r in routes if r.route_id == route_id), None)
                 if r:
                     await self._send(client, chat_id, f"Updated *{route_name(r.origin, r.destination)}*.")

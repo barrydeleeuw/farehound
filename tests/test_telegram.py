@@ -9,15 +9,17 @@ from src.alerts.telegram import TelegramNotifier, TELEGRAM_API
 
 @pytest.fixture
 def notifier():
-    return TelegramNotifier(bot_token="123:ABC", chat_id="-100999")
+    return TelegramNotifier(bot_token="123:ABC")
+
+
+CHAT_ID = "-100999"
 
 
 # --- init ---
 
 def test_telegram_notifier_init():
-    n = TelegramNotifier(bot_token="tok", chat_id="cid")
+    n = TelegramNotifier(bot_token="tok")
     assert n._bot_token == "tok"
-    assert n._chat_id == "cid"
 
 
 # --- send_deal_alert ---
@@ -43,7 +45,7 @@ async def test_send_deal_alert_format(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_deal_alert(deal_info)
+        await notifier.send_deal_alert(deal_info, chat_id=CHAT_ID)
 
         mock_client.post.assert_called_once()
         call_args = mock_client.post.call_args
@@ -51,7 +53,7 @@ async def test_send_deal_alert_format(notifier):
         payload = call_args.kwargs.get("json") or call_args[1]["json"]
 
         assert "123:ABC" in url
-        assert payload["chat_id"] == "-100999"
+        assert payload["chat_id"] == CHAT_ID
         assert "Amsterdam" in payload["text"]
         assert "Tokyo Narita" in payload["text"]
         assert "€485" in payload["text"]
@@ -105,7 +107,7 @@ async def test_send_deal_alert_with_nearby(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_deal_alert(deal_info)
+        await notifier.send_deal_alert(deal_info, chat_id=CHAT_ID)
 
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         text = payload["text"]
@@ -140,7 +142,7 @@ async def test_send_error_fare_alert_format(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_error_fare_alert(deal_info)
+        await notifier.send_error_fare_alert(deal_info, chat_id=CHAT_ID)
 
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         text = payload["text"]
@@ -168,7 +170,7 @@ async def test_send_daily_digest_format(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_daily_digest(routes)
+        await notifier.send_daily_digest(routes, chat_id=CHAT_ID)
 
         # 3 messages: header + 2 routes
         assert mock_client.post.call_count == 3
@@ -215,7 +217,7 @@ async def test_send_daily_digest_with_nearby(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_daily_digest(routes)
+        await notifier.send_daily_digest(routes, chat_id=CHAT_ID)
 
         # 2 messages: header + 1 route
         assert mock_client.post.call_count == 2
@@ -235,7 +237,7 @@ async def test_send_daily_digest_empty(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_daily_digest([])
+        await notifier.send_daily_digest([], chat_id=CHAT_ID)
         mock_client.post.assert_not_called()
 
 
@@ -279,7 +281,7 @@ async def test_send_deal_alert_buttons(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_deal_alert(deal_info)
+        await notifier.send_deal_alert(deal_info, chat_id=CHAT_ID)
 
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         keyboard = payload["reply_markup"]["inline_keyboard"]
@@ -316,7 +318,7 @@ async def test_send_error_fare_alert_buttons(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_error_fare_alert(deal_info)
+        await notifier.send_error_fare_alert(deal_info, chat_id=CHAT_ID)
 
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         keyboard = payload["reply_markup"]["inline_keyboard"]
@@ -348,7 +350,7 @@ async def test_send_follow_up(notifier):
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_cls.return_value = mock_client
 
-        await notifier.send_follow_up(deal_info)
+        await notifier.send_follow_up(deal_info, chat_id=CHAT_ID)
 
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         text = payload["text"]

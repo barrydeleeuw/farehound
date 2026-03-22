@@ -19,14 +19,20 @@ def db(tmp_path):
 
 
 @pytest.fixture
+def user_id(db):
+    """Create an onboarded user for tests."""
+    uid = db.create_user("42", name="TestUser")
+    db.update_user(uid, home_airport="AMS", onboarded=1)
+    return uid
+
+
+@pytest.fixture
 def bot(db):
     return TripBot(
         bot_token="123:ABC",
-        chat_id="-100999",
         db=db,
         anthropic_api_key="sk-test",
         anthropic_model="claude-sonnet-4-20250514",
-        home_airport="AMS",
     )
 
 
@@ -41,20 +47,94 @@ def _make_update(text: str, chat_id: str = "42") -> dict:
     }
 
 
+# --- Onboarding ---
+
+@pytest.mark.asyncio
+async def test_unknown_user_starts_onboarding(bot):
+    """Unknown chat_id triggers onboarding welcome."""
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+    await bot._handle_update(_make_update("hello", chat_id="999"), client)
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "Welcome to FareHound" in payload["text"]
+    assert "999" in bot._pending
+    assert bot._pending["999"]["action"] == "onboarding"
+    assert bot._pending["999"]["step"] == "name"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_name_step(bot, db):
+    """User provides name during onboarding."""
+    bot._pending["999"] = {"action": "onboarding", "step": "name", "chat_id": "999"}
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+    await bot._handle_update(_make_update("Alice", chat_id="999"), client)
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "Hi Alice" in payload["text"]
+    assert "Where do you live" in payload["text"]
+    assert bot._pending["999"]["step"] == "location"
+    # User should exist in DB
+    user = db.get_user_by_chat_id("999")
+    assert user is not None
+    assert user["name"] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_location_step_no_serpapi(bot, db):
+    """Location step without SerpAPI key falls back to AMS."""
+    uid = db.create_user("999", name="Alice")
+    bot._pending["999"] = {
+        "action": "onboarding", "step": "location",
+        "chat_id": "999", "user_id": uid, "name": "Alice",
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+    await bot._handle_update(_make_update("The Hague", chat_id="999"), client)
+    # Should fallback to AMS
+    user = db.get_user(uid)
+    assert user["home_airport"] == "AMS"
+    assert user["onboarded"] is True
+    assert "999" not in bot._pending
+
+
+@pytest.mark.asyncio
+async def test_onboarding_full_flow(bot, db):
+    """Complete onboarding: unknown user → name → location → done."""
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    # Step 1: Unknown user
+    await bot._handle_update(_make_update("hi", chat_id="777"), client)
+    assert bot._pending["777"]["step"] == "name"
+
+    # Step 2: Provide name
+    await bot._handle_update(_make_update("Bob", chat_id="777"), client)
+    assert bot._pending["777"]["step"] == "location"
+
+    # Step 3: Provide location (no serpapi, will fallback)
+    await bot._handle_update(_make_update("Amsterdam", chat_id="777"), client)
+    assert "777" not in bot._pending
+
+    # User should be onboarded
+    user = db.get_user_by_chat_id("777")
+    assert user is not None
+    assert user["name"] == "Bob"
+    assert user["onboarded"] is True
+
+
 # --- /trips ---
 
 @pytest.mark.asyncio
-async def test_trips_empty(bot):
+async def test_trips_empty(bot, user_id):
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
     await bot._handle_update(_make_update("/trips"), client)
-    client.post.assert_called_once()
     payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
     assert "No active routes" in payload["text"]
 
 
 @pytest.mark.asyncio
-async def test_trips_lists_routes(bot, db):
+async def test_trips_lists_routes(bot, db, user_id):
     route = Route(
         route_id="ams_nrt",
         origin="AMS",
@@ -64,7 +144,7 @@ async def test_trips_lists_routes(bot, db):
         passengers=2,
         active=True,
     )
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -78,7 +158,7 @@ async def test_trips_lists_routes(bot, db):
 # --- /trip parsing ---
 
 @pytest.mark.asyncio
-async def test_trip_empty_text(bot):
+async def test_trip_empty_text(bot, user_id):
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
     await bot._handle_update(_make_update("/trip "), client)
@@ -87,7 +167,7 @@ async def test_trip_empty_text(bot):
 
 
 @pytest.mark.asyncio
-async def test_trip_sends_confirmation(bot):
+async def test_trip_sends_confirmation(bot, user_id):
     parsed = {
         "origin": None,
         "destination": "NRT",
@@ -110,7 +190,7 @@ async def test_trip_sends_confirmation(bot):
 
 
 @pytest.mark.asyncio
-async def test_trip_parse_failure(bot):
+async def test_trip_parse_failure(bot, user_id):
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
 
@@ -124,7 +204,7 @@ async def test_trip_parse_failure(bot):
 # --- /yes and /no ---
 
 @pytest.mark.asyncio
-async def test_yes_adds_route(bot, db):
+async def test_yes_adds_route(bot, db, user_id):
     bot._pending["42"] = {
         "action": "add",
         "origin": "AMS",
@@ -133,13 +213,14 @@ async def test_yes_adds_route(bot, db):
         "latest_return": "2026-11-08",
         "passengers": 2,
         "notes": "",
+        "user_id": user_id,
     }
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
 
     await bot._handle_update(_make_update("/yes"), client)
 
-    routes = db.get_active_routes()
+    routes = db.get_active_routes(user_id=user_id)
     assert len(routes) == 1
     assert routes[0].origin == "AMS"
     assert routes[0].destination == "NRT"
@@ -150,8 +231,8 @@ async def test_yes_adds_route(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_no_cancels(bot):
-    bot._pending["42"] = {"action": "add", "origin": "AMS", "destination": "NRT"}
+async def test_no_cancels(bot, user_id):
+    bot._pending["42"] = {"action": "add", "origin": "AMS", "destination": "NRT", "user_id": user_id}
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
 
@@ -163,7 +244,7 @@ async def test_no_cancels(bot):
 
 
 @pytest.mark.asyncio
-async def test_yes_nothing_pending(bot):
+async def test_yes_nothing_pending(bot, user_id):
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
 
@@ -176,7 +257,7 @@ async def test_yes_nothing_pending(bot):
 # --- /remove ---
 
 @pytest.mark.asyncio
-async def test_remove_not_found(bot):
+async def test_remove_not_found(bot, user_id):
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
 
@@ -187,14 +268,14 @@ async def test_remove_not_found(bot):
 
 
 @pytest.mark.asyncio
-async def test_remove_confirm_and_yes(bot, db):
+async def test_remove_confirm_and_yes(bot, db, user_id):
     route = Route(
         route_id="ams_nrt",
         origin="AMS",
         destination="NRT",
         active=True,
     )
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -207,7 +288,7 @@ async def test_remove_confirm_and_yes(bot, db):
 
     # Step 2: /yes deactivates
     await bot._handle_update(_make_update("/yes"), client)
-    routes = db.get_active_routes()
+    routes = db.get_active_routes(user_id=user_id)
     assert len(routes) == 0
 
 
@@ -215,14 +296,14 @@ async def test_remove_confirm_and_yes(bot, db):
 
 @pytest.mark.asyncio
 async def test_yes_calls_reload_callback(db):
+    uid = db.create_user("42", name="TestUser")
+    db.update_user(uid, home_airport="AMS", onboarded=1)
     callback = AsyncMock()
     bot = TripBot(
         bot_token="123:ABC",
-        chat_id="-100999",
         db=db,
         anthropic_api_key="sk-test",
         anthropic_model="claude-sonnet-4-20250514",
-        home_airport="AMS",
         reload_callback=callback,
     )
     bot._pending["42"] = {
@@ -233,6 +314,7 @@ async def test_yes_calls_reload_callback(db):
         "latest_return": "2026-11-08",
         "passengers": 2,
         "notes": "",
+        "user_id": uid,
     }
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -255,7 +337,7 @@ def test_deactivate_route(db):
 # --- Conversational message interpretation ---
 
 @pytest.mark.asyncio
-async def test_natural_language_routed_to_interpret(bot):
+async def test_natural_language_routed_to_interpret(bot, user_id):
     """Non-command messages go through _interpret_message."""
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -280,7 +362,7 @@ async def test_natural_language_routed_to_interpret(bot):
 
 
 @pytest.mark.asyncio
-async def test_natural_language_add_trip(bot):
+async def test_natural_language_add_trip(bot, user_id):
     """Natural language 'track flights to Tokyo' triggers add_trip intent."""
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -312,11 +394,11 @@ async def test_natural_language_add_trip(bot):
 
 
 @pytest.mark.asyncio
-async def test_natural_language_modify_trip(bot, db):
+async def test_natural_language_modify_trip(bot, db, user_id):
     """'Push Mexico to February' triggers modify_trip intent."""
     route = Route(route_id="ams_mex", origin="AMS", destination="MEX", active=True,
                   earliest_departure=date(2026, 1, 15), latest_return=date(2026, 1, 30))
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -350,11 +432,11 @@ async def test_natural_language_modify_trip(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_yes_modifies_route(bot, db):
+async def test_yes_modifies_route(bot, db, user_id):
     """Confirming a modify_trip pending action updates the route in DB."""
     route = Route(route_id="ams_mex", origin="AMS", destination="MEX", active=True,
                   earliest_departure=date(2026, 1, 15), latest_return=date(2026, 1, 30))
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     bot._pending["42"] = {
         "action": "modify",
@@ -363,6 +445,7 @@ async def test_yes_modifies_route(bot, db):
             "earliest_departure": "2026-02-15",
             "latest_return": "2026-02-28",
         },
+        "user_id": user_id,
     }
 
     client = AsyncMock()
@@ -370,7 +453,7 @@ async def test_yes_modifies_route(bot, db):
 
     await bot._handle_update(_make_update("/yes"), client)
 
-    routes = db.get_active_routes()
+    routes = db.get_active_routes(user_id=user_id)
     assert len(routes) == 1
     r = routes[0]
     assert str(r.earliest_departure) == "2026-02-15"
@@ -381,10 +464,10 @@ async def test_yes_modifies_route(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_natural_language_query_prices(bot, db):
+async def test_natural_language_query_prices(bot, db, user_id):
     """'How's Japan looking?' triggers query_prices intent."""
     route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -465,23 +548,24 @@ def test_update_route_nonexistent(db):
 
 @pytest.mark.asyncio
 async def test_yes_modify_calls_reload_callback(db):
+    uid = db.create_user("42", name="TestUser")
+    db.update_user(uid, home_airport="AMS", onboarded=1)
     callback = AsyncMock()
     bot = TripBot(
         bot_token="123:ABC",
-        chat_id="-100999",
         db=db,
         anthropic_api_key="sk-test",
         anthropic_model="claude-sonnet-4-20250514",
-        home_airport="AMS",
         reload_callback=callback,
     )
     route = Route(route_id="ams_mex", origin="AMS", destination="MEX", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=uid)
 
     bot._pending["42"] = {
         "action": "modify",
         "route_id": "ams_mex",
         "changes": {"passengers": 3},
+        "user_id": uid,
     }
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -489,14 +573,14 @@ async def test_yes_modify_calls_reload_callback(db):
     await bot._handle_update(_make_update("/yes"), client)
     callback.assert_awaited_once()
 
-    routes = db.get_active_routes()
+    routes = db.get_active_routes(user_id=uid)
     assert routes[0].passengers == 3
 
 
 # --- Conversation safety: prevent accidental modifications ---
 
 @pytest.mark.asyncio
-async def test_yes_after_info_does_not_modify(bot, db):
+async def test_yes_after_info_does_not_modify(bot, db, user_id):
     """After an informational response, a casual 'yes' should NOT modify any route."""
     route = Route(
         route_id="ams_alc",
@@ -507,7 +591,7 @@ async def test_yes_after_info_does_not_modify(bot, db):
         passengers=2,
         active=True,
     )
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -548,7 +632,7 @@ async def test_yes_after_info_does_not_modify(bot, db):
         await bot._handle_update(_make_update("yes"), client)
 
     # Route should be completely unchanged
-    routes = db.get_active_routes()
+    routes = db.get_active_routes(user_id=user_id)
     assert len(routes) == 1
     r = routes[0]
     assert r.route_id == "ams_alc"
@@ -558,7 +642,7 @@ async def test_yes_after_info_does_not_modify(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_explicit_modify_then_yes(bot, db):
+async def test_explicit_modify_then_yes(bot, db, user_id):
     """Explicit 'push Mexico to Feb' then /yes SHOULD modify the route."""
     route = Route(
         route_id="ams_mex",
@@ -569,7 +653,7 @@ async def test_explicit_modify_then_yes(bot, db):
         passengers=2,
         active=True,
     )
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -603,7 +687,7 @@ async def test_explicit_modify_then_yes(bot, db):
     # Step 2: Confirm with /yes — route SHOULD be modified
     await bot._handle_update(_make_update("/yes"), client)
 
-    routes = db.get_active_routes()
+    routes = db.get_active_routes(user_id=user_id)
     assert len(routes) == 1
     r = routes[0]
     assert str(r.earliest_departure) == "2026-02-15"
@@ -611,13 +695,14 @@ async def test_explicit_modify_then_yes(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_general_chat_clears_stale_pending(bot):
+async def test_general_chat_clears_stale_pending(bot, user_id):
     """A general_chat response should clear any stale pending state."""
     # Simulate stale pending from a previous interaction
     bot._pending["42"] = {
         "action": "modify",
         "route_id": "ams_mex",
         "changes": {"passengers": 5},
+        "user_id": user_id,
     }
 
     client = AsyncMock()
@@ -642,10 +727,10 @@ async def test_general_chat_clears_stale_pending(bot):
 
 
 @pytest.mark.asyncio
-async def test_casual_yes_after_query_prices_no_action(bot, db):
+async def test_casual_yes_after_query_prices_no_action(bot, db, user_id):
     """A casual 'ok' after query_prices should not trigger any data change."""
     route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
 
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
@@ -705,13 +790,13 @@ def _make_callback_update(action: str, deal_id: str, chat_id: str = "42", messag
 
 
 @pytest.mark.asyncio
-async def test_callback_book_updates_feedback(bot, db):
+async def test_callback_book_updates_feedback(bot, db, user_id):
     """Book Now callback stores 'booked' feedback in DB."""
     from src.storage.models import Deal, PriceSnapshot
     from datetime import UTC, datetime
 
     route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
     snap = PriceSnapshot(
         snapshot_id="snap1", route_id="ams_nrt", window_id=None,
         observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
@@ -739,13 +824,13 @@ async def test_callback_book_updates_feedback(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_callback_dismiss_updates_feedback(bot, db):
+async def test_callback_dismiss_updates_feedback(bot, db, user_id):
     """Not Interested callback stores 'dismissed' feedback in DB."""
     from src.storage.models import Deal, PriceSnapshot
     from datetime import UTC, datetime
 
     route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
     snap = PriceSnapshot(
         snapshot_id="snap2", route_id="ams_nrt", window_id=None,
         observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
@@ -816,13 +901,13 @@ async def test_callback_skips_message_handling(bot):
 
 
 @pytest.mark.asyncio
-async def test_callback_wait_updates_feedback(bot, db):
+async def test_callback_wait_updates_feedback(bot, db, user_id):
     """Wait callback stores 'waiting' feedback in DB."""
     from src.storage.models import Deal, PriceSnapshot
     from datetime import UTC, datetime
 
     route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
     snap = PriceSnapshot(
         snapshot_id="snap_w", route_id="ams_nrt", window_id=None,
         observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
@@ -847,13 +932,13 @@ async def test_callback_wait_updates_feedback(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_callback_booked_updates_feedback(bot, db):
+async def test_callback_booked_updates_feedback(bot, db, user_id):
     """Booked follow-up callback stores 'booked' feedback in DB."""
     from src.storage.models import Deal, PriceSnapshot
     from datetime import UTC, datetime
 
     route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
     snap = PriceSnapshot(
         snapshot_id="snap_b", route_id="ams_nrt", window_id=None,
         observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
@@ -873,13 +958,13 @@ async def test_callback_booked_updates_feedback(bot, db):
 
 
 @pytest.mark.asyncio
-async def test_callback_watching_updates_feedback(bot, db):
+async def test_callback_watching_updates_feedback(bot, db, user_id):
     """Watching follow-up callback stores 'watching' feedback in DB."""
     from src.storage.models import Deal, PriceSnapshot
     from datetime import UTC, datetime
 
     route = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
-    db.upsert_route(route)
+    db.upsert_route(route, user_id=user_id)
     snap = PriceSnapshot(
         snapshot_id="snap_wt", route_id="ams_nrt", window_id=None,
         observed_at=datetime.now(UTC), source="test", passengers=2, lowest_price=400,
@@ -901,3 +986,34 @@ async def test_callback_watching_updates_feedback(bot, db):
     assert len(edit_calls) == 1
     edit_payload = edit_calls[0].kwargs.get("json") or edit_calls[0][1]["json"]
     assert "👀 Still watching" in edit_payload["text"]
+
+
+# --- Multi-user isolation ---
+
+@pytest.mark.asyncio
+async def test_routes_scoped_to_user(bot, db, user_id):
+    """Each user only sees their own routes."""
+    # Create second user
+    uid2 = db.create_user("99", name="OtherUser")
+    db.update_user(uid2, home_airport="LHR", onboarded=1)
+
+    # Add routes for each user
+    r1 = Route(route_id="ams_nrt", origin="AMS", destination="NRT", active=True)
+    r2 = Route(route_id="lhr_jfk", origin="LHR", destination="JFK", active=True)
+    db.upsert_route(r1, user_id=user_id)
+    db.upsert_route(r2, user_id=uid2)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    # User 42 should only see their route
+    await bot._handle_update(_make_update("/trips", chat_id="42"), client)
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "Tokyo Narita" in payload["text"]
+    assert "New York" not in payload["text"]
+
+    # User 99 should only see their route
+    await bot._handle_update(_make_update("/trips", chat_id="99"), client)
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "New York" in payload["text"]
+    assert "Tokyo Narita" not in payload["text"]

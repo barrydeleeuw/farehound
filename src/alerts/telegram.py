@@ -40,16 +40,15 @@ def _deal_label(score: float | None, urgency: str | None = None) -> str:
 class TelegramNotifier:
     """Send flight deal alerts via Telegram Bot API."""
 
-    def __init__(self, bot_token: str, chat_id: str) -> None:
+    def __init__(self, bot_token: str) -> None:
         self._bot_token = bot_token
-        self._chat_id = chat_id
 
     async def _send_message(
-        self, text: str, parse_mode: str = "Markdown", reply_markup: dict | None = None
+        self, chat_id: str, text: str, parse_mode: str = "Markdown", reply_markup: dict | None = None
     ) -> None:
         url = f"{TELEGRAM_API}/bot{self._bot_token}/sendMessage"
         payload = {
-            "chat_id": self._chat_id,
+            "chat_id": chat_id,
             "text": text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
@@ -60,7 +59,7 @@ class TelegramNotifier:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
-                logger.info("Telegram message sent to chat %s", self._chat_id)
+                logger.info("Telegram message sent to chat %s", chat_id)
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "Telegram API error %s: %s", exc.response.status_code, exc.response.text
@@ -91,7 +90,7 @@ class TelegramNotifier:
             url += f"+{passengers}+passengers"
         return url
 
-    async def send_deal_alert(self, deal_info: dict) -> None:
+    async def send_deal_alert(self, deal_info: dict, chat_id: str | None = None) -> None:
         origin = deal_info.get("origin", "???")
         dest = deal_info.get("destination", "???")
         price = deal_info.get("price", "?")
@@ -169,9 +168,9 @@ class TelegramNotifier:
                 ]]
             }
 
-        await self._send_message("\n".join(lines), reply_markup=reply_markup)
+        await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
 
-    async def send_error_fare_alert(self, deal_info: dict) -> None:
+    async def send_error_fare_alert(self, deal_info: dict, chat_id: str | None = None) -> None:
         origin = deal_info.get("origin", "???")
         dest = deal_info.get("destination", "???")
         price = deal_info.get("price", "?")
@@ -205,9 +204,9 @@ class TelegramNotifier:
                 ]]
             }
 
-        await self._send_message("\n".join(lines), reply_markup=reply_markup)
+        await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
 
-    async def send_follow_up(self, deal_info: dict) -> None:
+    async def send_follow_up(self, deal_info: dict, chat_id: str | None = None) -> None:
         """Send a follow-up message for deals with no feedback after 3+ days."""
         route = route_name(deal_info.get("origin", "???"), deal_info.get("destination", "???"))
         price = deal_info.get("price", "?")
@@ -225,9 +224,9 @@ class TelegramNotifier:
                     {"text": "Still watching 👀", "callback_data": f"watching:{deal_id}"},
                 ]]
             }
-        await self._send_message(text, reply_markup=reply_markup)
+        await self._send_message(chat_id, text, reply_markup=reply_markup)
 
-    async def send_daily_digest(self, routes_summary: list[dict]) -> None:
+    async def send_daily_digest(self, routes_summary: list[dict], chat_id: str | None = None) -> None:
         if not routes_summary:
             return
 
@@ -235,7 +234,7 @@ class TelegramNotifier:
 
         # Send header
         await self._send_message(
-            f"📊 *FareHound Daily* — {len(routes_summary)} route(s)"
+            chat_id, f"📊 *FareHound Daily* — {len(routes_summary)} route(s)"
         )
 
         # Send one message per route with full details and Search button
@@ -298,4 +297,4 @@ class TelegramNotifier:
                 ]]
             }
 
-            await self._send_message("\n".join(lines), reply_markup=reply_markup)
+            await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)

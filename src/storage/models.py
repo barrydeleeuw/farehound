@@ -60,6 +60,7 @@ class Route:
     trip_duration_days: int | None = None
     preferred_departure_days: list[int] | None = None
     preferred_return_days: list[int] | None = None
+    user_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -80,6 +81,7 @@ class Route:
             "trip_duration_days": self.trip_duration_days,
             "preferred_departure_days": self.preferred_departure_days,
             "preferred_return_days": self.preferred_return_days,
+            "user_id": self.user_id,
         }
 
     @classmethod
@@ -112,6 +114,7 @@ class Route:
             trip_duration_days=d.get("trip_duration_days"),
             preferred_departure_days=pdd,
             preferred_return_days=prd,
+            user_id=d.get("user_id"),
         )
 
 
@@ -173,6 +176,7 @@ class PriceSnapshot:
     price_history: list | None = None
     search_params: dict | None = None
     created_at: datetime | None = None
+    user_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -194,6 +198,7 @@ class PriceSnapshot:
             "price_history": self.price_history,
             "search_params": self.search_params,
             "created_at": self.created_at,
+            "user_id": self.user_id,
         }
 
     @classmethod
@@ -218,6 +223,7 @@ class PriceSnapshot:
             price_history=_parse_json(d.get("price_history")),
             search_params=_parse_json(d.get("search_params")),
             created_at=_parse_datetime(d.get("created_at")),
+            user_id=d.get("user_id"),
         )
 
 
@@ -235,6 +241,7 @@ class Deal:
     booked: bool = False
     feedback: str | None = None
     created_at: datetime | None = None
+    user_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -250,6 +257,7 @@ class Deal:
             "booked": self.booked,
             "feedback": self.feedback,
             "created_at": self.created_at,
+            "user_id": self.user_id,
         }
 
     @classmethod
@@ -268,6 +276,7 @@ class Deal:
             booked=_parse_bool(d.get("booked", False)),
             feedback=d.get("feedback"),
             created_at=_parse_datetime(d.get("created_at")),
+            user_id=d.get("user_id"),
         )
 
 

@@ -733,3 +733,105 @@ def test_get_deals_pending_feedback_excludes_with_feedback(db, sample_route):
 
     pending = db.get_deals_pending_feedback(older_than_days=3)
     assert len(pending) == 0
+
+
+# --- User CRUD ---
+
+def test_create_and_get_user(db):
+    user_id = db.create_user("12345", name="Alice")
+    assert user_id is not None
+    user = db.get_user(user_id)
+    assert user["name"] == "Alice"
+    assert user["telegram_chat_id"] == "12345"
+    assert user["active"] is True
+    assert user["onboarded"] is False
+
+
+def test_get_user_by_chat_id(db):
+    user_id = db.create_user("67890", name="Bob")
+    user = db.get_user_by_chat_id("67890")
+    assert user is not None
+    assert user["user_id"] == user_id
+    assert user["name"] == "Bob"
+
+
+def test_get_user_by_chat_id_not_found(db):
+    assert db.get_user_by_chat_id("nonexistent") is None
+
+
+def test_update_user(db):
+    user_id = db.create_user("111", name="Carol")
+    db.update_user(user_id, name="Caroline", home_airport="LHR", onboarded=1)
+    user = db.get_user(user_id)
+    assert user["name"] == "Caroline"
+    assert user["home_airport"] == "LHR"
+    assert user["onboarded"] is True
+
+
+def test_get_all_active_users(db):
+    db.create_user("u1", name="One")
+    uid2 = db.create_user("u2", name="Two")
+    db.create_user("u3", name="Three")
+    db.update_user(uid2, active=0)
+    users = db.get_all_active_users()
+    assert len(users) == 2
+    names = {u["name"] for u in users}
+    assert names == {"One", "Three"}
+
+
+# --- Multi-user scoping ---
+
+def test_routes_scoped_by_user(db):
+    uid1 = db.create_user("a1", name="User1")
+    uid2 = db.create_user("a2", name="User2")
+    r1 = Route(route_id="r1", origin="AMS", destination="NRT")
+    r2 = Route(route_id="r2", origin="LHR", destination="JFK")
+    db.upsert_route(r1, user_id=uid1)
+    db.upsert_route(r2, user_id=uid2)
+    # Without user_id, get both
+    assert len(db.get_active_routes()) == 2
+    # With user_id, get only own
+    assert len(db.get_active_routes(user_id=uid1)) == 1
+    assert db.get_active_routes(user_id=uid1)[0].route_id == "r1"
+    assert len(db.get_active_routes(user_id=uid2)) == 1
+    assert db.get_active_routes(user_id=uid2)[0].route_id == "r2"
+
+
+def test_default_user_migration(tmp_path):
+    """Existing data gets assigned to a default user on init."""
+    database = Database(db_path=tmp_path / "migrate.db")
+    # Create schema without users table first (simulate old DB)
+    database._conn.executescript("""
+        CREATE TABLE IF NOT EXISTS routes (
+            route_id TEXT PRIMARY KEY,
+            origin TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            trip_type TEXT DEFAULT 'round_trip',
+            earliest_departure TEXT,
+            latest_return TEXT,
+            date_flex_days INTEGER DEFAULT 3,
+            max_stops INTEGER DEFAULT 1,
+            passengers INTEGER DEFAULT 2,
+            preferred_airlines TEXT,
+            notes TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')),
+            trip_duration_type TEXT,
+            trip_duration_days INTEGER,
+            preferred_departure_days TEXT,
+            preferred_return_days TEXT
+        );
+    """)
+    database._conn.execute(
+        "INSERT INTO routes (route_id, origin, destination) VALUES ('r1', 'AMS', 'NRT')"
+    )
+    database._conn.commit()
+    # Now run init_schema which should create users + migrate
+    database.init_schema()
+    users = database.get_all_active_users()
+    assert len(users) == 1
+    assert users[0]["name"] == "barry"
+    # Route should now have user_id
+    routes = database.get_active_routes(user_id=users[0]["user_id"])
+    assert len(routes) == 1
+    database.close()

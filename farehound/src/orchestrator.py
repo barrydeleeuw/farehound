@@ -103,7 +103,7 @@ class Orchestrator:
             api_key=config.anthropic.api_key,
             model=config.anthropic.model,
         )
-        # Telegram alert channel (optional)
+        # Telegram notifier (default chat_id from config, per-call chat_id for multi-user)
         self.telegram_notifier: TelegramNotifier | None = None
         if config.telegram_alerts is not None and config.telegram_alerts.enabled:
             self.telegram_notifier = TelegramNotifier(
@@ -167,6 +167,68 @@ class Orchestrator:
         logger.info("Reloading routes from database")
         self._first_run = True
 
+    async def _ensure_default_user(self) -> None:
+        """Create Barry as default user if no users exist, seeding from config."""
+        loop = asyncio.get_running_loop()
+        users = await loop.run_in_executor(None, self.db.get_all_active_users)
+
+        if not users:
+            # Fresh DB — create default user from config
+            chat_id = self.config.telegram_alerts.chat_id if self.config.telegram_alerts else "default"
+            user_id = await loop.run_in_executor(
+                None, self.db.create_user, chat_id, self.config.traveller.name
+            )
+            await loop.run_in_executor(
+                None, lambda: self.db.update_user(
+                    user_id,
+                    home_airport=self.config.traveller.home_airport,
+                    onboarded=1,
+                )
+            )
+            # Seed airports
+            if self.config.airports:
+                await loop.run_in_executor(
+                    None, self.db.seed_airport_transport, self.config.airports, user_id
+                )
+            # Migrate config routes to this user
+            for route_cfg in self.config.routes:
+                db_route = _config_route_to_db(route_cfg)
+                await loop.run_in_executor(None, self.db.upsert_route, db_route, user_id)
+            logger.info(
+                "Created default user '%s' with %d routes",
+                self.config.traveller.name, len(self.config.routes),
+            )
+            return
+
+        # Fix migration-created user with placeholder chat_id="default"
+        default_user = await loop.run_in_executor(None, self.db.get_user_by_chat_id, "default")
+        if default_user and self.config.telegram_alerts:
+            user_id = default_user["user_id"]
+            await loop.run_in_executor(
+                None, lambda: self.db.update_user(
+                    user_id,
+                    name=self.config.traveller.name,
+                    home_airport=self.config.traveller.home_airport,
+                )
+            )
+            # Update chat_id directly (update_user doesn't allow chat_id changes)
+            real_chat_id = self.config.telegram_alerts.chat_id
+
+            def _fix_chat_id():
+                self.db._conn.execute(
+                    "UPDATE users SET telegram_chat_id = ? WHERE user_id = ?",
+                    [real_chat_id, user_id],
+                )
+                self.db._conn.commit()
+
+            await loop.run_in_executor(None, _fix_chat_id)
+            # Seed airports if config has them
+            if self.config.airports:
+                await loop.run_in_executor(
+                    None, self.db.seed_airport_transport, self.config.airports, user_id
+                )
+            logger.info("Updated default user '%s' with config data", self.config.traveller.name)
+
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
 
@@ -174,16 +236,8 @@ class Orchestrator:
         await loop.run_in_executor(None, self.db.init_schema)
         logger.info("Database schema initialized")
 
-        # Seed airport transport data
-        if self.config.airports:
-            await loop.run_in_executor(None, self.db.seed_airport_transport, self.config.airports)
-            logger.info("Seeded %d airports", len(self.config.airports))
-
-        # Sync routes from config into DB
-        for route_cfg in self.config.routes:
-            db_route = _config_route_to_db(route_cfg)
-            await loop.run_in_executor(None, self.db.upsert_route, db_route)
-            logger.info("Synced route: %s (%s -> %s)", route_cfg.id, route_cfg.origin, route_cfg.destination)
+        # Bootstrap default user from config (if no users exist)
+        await self._ensure_default_user()
 
         # Schedule polling job
         interval_hours = self.config.scoring.poll_interval_hours
@@ -192,7 +246,7 @@ class Orchestrator:
             "interval",
             hours=interval_hours,
             id="poll_routes",
-            misfire_grace_time=60,  # allow 60s grace for startup delays
+            misfire_grace_time=60,
         )
         logger.info("Scheduled polling every %d hours", interval_hours)
 
@@ -273,10 +327,21 @@ class Orchestrator:
         pending = await loop.run_in_executor(None, self.db.get_deals_pending_feedback)
         if not pending:
             return
+
+        # Build route_id -> user mapping for per-user follow-ups
+        users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        route_user_map: dict[str, dict] = {}
+        for user in users:
+            routes = await loop.run_in_executor(None, self.db.get_active_routes, user["user_id"])
+            for route in routes:
+                route_user_map[route.route_id] = user
+
         logger.info("Sending follow-up for %d deals with no feedback", len(pending))
         for deal in pending:
+            user = route_user_map.get(deal.get("route_id"))
+            chat_id = user["telegram_chat_id"] if user else None
             try:
-                await self.telegram_notifier.send_follow_up(deal)
+                await self.telegram_notifier.send_follow_up(deal, chat_id=chat_id)
             except Exception:
                 logger.exception("Failed to send follow-up for deal %s", deal.get("deal_id"))
 
@@ -303,31 +368,125 @@ class Orchestrator:
         for task in tasks:
             task.cancel()
 
+    # --- Window generation ---
+
+    def _generate_windows_for_route(self, route: DBRoute) -> list[tuple[date, date]]:
+        """Generate date windows for a route. Returns empty list on error."""
+        if not route.earliest_departure or not route.latest_return:
+            logger.warning("Route %s missing date range, skipping", route.route_id)
+            return []
+
+        trip_duration = route.trip_duration_days or DEFAULT_TRIP_DURATION_DAYS
+        try:
+            if route.trip_duration_type == "weekend":
+                return _generate_weekend_windows(
+                    earliest_departure=route.earliest_departure,
+                    latest_return=route.latest_return,
+                    trip_duration_days=trip_duration,
+                    preferred_departure_days=route.preferred_departure_days or [3, 4],
+                    preferred_return_days=route.preferred_return_days or [0, 6],
+                    max_windows=DEFAULT_MAX_WINDOWS,
+                )
+            else:
+                return generate_date_windows(
+                    earliest_departure=route.earliest_departure,
+                    latest_return=route.latest_return,
+                    trip_duration_days=trip_duration,
+                    max_windows=DEFAULT_MAX_WINDOWS,
+                )
+        except ValueError as e:
+            logger.error("Cannot generate windows for route %s: %s", route.route_id, e)
+            return []
+
+    # --- Polling ---
+
     async def poll_routes(self) -> None:
+        """Poll all active users' routes with shared SerpAPI calls."""
         logger.info("Starting poll cycle")
-        self._cycle_best_prices: dict[str, float] = {}  # reset per cycle
+        self._cycle_best_prices: dict[str, float] = {}
         loop = asyncio.get_running_loop()
 
-        routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
-        if not routes:
-            logger.warning("No active routes to poll")
+        users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        if not users:
+            logger.warning("No active users to poll")
             return
 
-        logger.info("Polling %d active routes", len(routes))
+        # Phase 1: Collect all search requests, dedup by search key
+        # Key: (origin, dest, outbound, return_dt, passengers, trip_type)
+        search_requests: dict[tuple, list[tuple[dict, DBRoute]]] = {}
+        user_route_windows: list[tuple[dict, DBRoute, list[tuple[date, date]]]] = []
 
-        # Process routes sequentially — SQLite can't handle concurrent access
-        for route in routes:
+        for user in users:
+            routes = await loop.run_in_executor(None, self.db.get_active_routes, user["user_id"])
+            for route in routes:
+                windows = self._generate_windows_for_route(route)
+                if not windows:
+                    continue
+                windows_to_poll = await self._select_windows(route, windows)
+                user_route_windows.append((user, route, windows_to_poll))
+                for outbound, return_dt in windows_to_poll:
+                    key = (route.origin, route.destination, outbound, return_dt,
+                           route.passengers, route.trip_type)
+                    search_requests.setdefault(key, []).append((user, route))
+
+        logger.info(
+            "Polling %d unique searches across %d users",
+            len(search_requests), len(users),
+        )
+
+        # Phase 2: Execute each unique search once, distribute results
+        for key, user_routes in search_requests.items():
+            origin, dest, outbound, return_dt, passengers, trip_type = key
             try:
-                await self._poll_single_route(route)
-            except Exception as exc:
-                logger.error("Route %s failed: %s", route.route_id, exc, exc_info=exc)
+                result = await self.serpapi.search_flights(
+                    origin=origin,
+                    destination=dest,
+                    outbound_date=outbound,
+                    return_date=return_dt,
+                    passengers=passengers,
+                    trip_type=trip_type,
+                )
+            except SerpAPIError as e:
+                logger.error(
+                    "SerpAPI error for %s→%s on %s: %s", origin, dest, outbound, e,
+                )
+                continue
+            except Exception as e:
+                logger.error(
+                    "Error polling %s→%s on %s: %s", origin, dest, outbound, e,
+                    exc_info=True,
+                )
+                continue
+
+            # Store result for each user watching this search
+            for user, route in user_routes:
+                try:
+                    await self._store_result_for_user(route, result, outbound, return_dt, user)
+                except Exception as e:
+                    logger.error(
+                        "Failed storing result for route %s: %s",
+                        route.route_id, e, exc_info=True,
+                    )
 
         self._first_run = False
         self._secondary_poll_counter += 1
         logger.info("Poll cycle complete (secondary counter: %d)", self._secondary_poll_counter)
 
-        # Update HA sensors with latest route data
-        await self._update_ha_sensors(routes)
+        # Phase 3: Secondary airports per user (every other cycle)
+        if self._secondary_poll_counter % 2 == 0:
+            for user, route, windows in user_route_windows:
+                try:
+                    await self._poll_secondary_airports(route, windows, user)
+                except Exception as e:
+                    logger.error(
+                        "Secondary polling failed for %s: %s",
+                        route.route_id, e, exc_info=True,
+                    )
+
+        # Update HA sensors
+        all_routes = [r for _, r, _ in user_route_windows]
+        if all_routes:
+            await self._update_ha_sensors(all_routes)
 
     async def _update_ha_sensors(self, routes: list[DBRoute]) -> None:
         """Build routes_summary from latest snapshots and push to HA sensors."""
@@ -372,135 +531,62 @@ class Orchestrator:
             except Exception:
                 logger.exception("Failed to update HA sensors")
 
-    async def send_daily_digest(self) -> None:
-        logger.info("Preparing daily digest")
+    async def _store_result_for_user(
+        self,
+        route: DBRoute,
+        result,
+        outbound: date,
+        return_dt: date,
+        user: dict,
+    ) -> None:
+        """Store a SerpAPI result as snapshot for a specific user's route and check alerts."""
         loop = asyncio.get_running_loop()
+        user_id = user["user_id"]
 
-        routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
-        if not routes:
-            logger.info("No active routes, skipping digest")
-            return
+        now = datetime.now(UTC)
+        insights = result.price_insights
+        lowest_price = insights.get("lowest_price")
+        typical_range = insights.get("typical_price_range", [])
+        best_flight = result.best_flights[0] if result.best_flights else None
 
-        since = datetime.now(UTC) - timedelta(days=1)
-        summaries: list[dict] = []
+        snapshot = PriceSnapshot(
+            snapshot_id=uuid4().hex,
+            route_id=route.route_id,
+            observed_at=now,
+            source="serpapi_poll",
+            passengers=route.passengers,
+            outbound_date=outbound,
+            return_date=return_dt,
+            lowest_price=Decimal(str(lowest_price)) if lowest_price is not None else None,
+            currency=self.config.serpapi.currency,
+            best_flight=best_flight,
+            all_flights=result.best_flights + result.other_flights,
+            price_level=insights.get("price_level"),
+            typical_low=Decimal(str(typical_range[0])) if len(typical_range) > 0 else None,
+            typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
+            price_history=insights.get("price_history"),
+            search_params={
+                **(result.search_params or {}),
+                "google_flights_url": result.raw_response.get("search_metadata", {}).get("google_flights_url", ""),
+            },
+        )
 
-        for route in routes:
-            latest = await loop.run_in_executor(None, self.db.get_latest_snapshot, route.route_id)
-            if latest is None:
-                continue
+        await loop.run_in_executor(None, self.db.insert_snapshot, snapshot, user_id)
+        logger.info(
+            "Stored snapshot for %s: %s->%s on %s, price=%s",
+            route.route_id, route.origin, route.destination, outbound, lowest_price,
+        )
 
-            # 7-day trend
-            history_7d = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 7)
-            history_now = float(latest.lowest_price) if latest.lowest_price else None
-            avg_7d = float(history_7d["avg_price"]) if history_7d.get("avg_price") else None
+        # Update poll window tracking
+        await loop.run_in_executor(
+            None, self.db.update_poll_window,
+            route.route_id, outbound, return_dt,
+            float(lowest_price) if lowest_price is not None else None,
+        )
 
-            if history_now is not None and avg_7d is not None and avg_7d > 0:
-                diff = (history_now - avg_7d) / avg_7d
-                if diff < -0.03:
-                    trend = "down"
-                elif diff > 0.03:
-                    trend = "up"
-                else:
-                    trend = "stable"
-            else:
-                trend = ""
-
-            # Recent watch-level deals
-            recent_deals = await loop.run_in_executor(None, self.db.get_deals_since, route.route_id, since)
-            watch_deals = [d for d in recent_deals if d.urgency == "watch"]
-
-            # Use cheapest recent snapshot for dates
-            cheapest = await loop.run_in_executor(None, self.db.get_cheapest_recent_snapshot, route.route_id)
-            best = cheapest or latest
-
-            summary: dict = {
-                "origin": route.origin,
-                "destination": route.destination,
-                "lowest_price": float(best.lowest_price) if best and best.lowest_price else None,
-                "trend": trend,
-                "passengers": route.passengers,
-                "dates": f"{best.outbound_date} to {best.return_date}" if best and best.outbound_date else "",
-                "outbound_date": str(best.outbound_date) if best and best.outbound_date else "",
-                "return_date": str(best.return_date) if best and best.return_date else "",
-            }
-
-            if watch_deals:
-                summary["watch_deals"] = len(watch_deals)
-
-            # Add nearby airport comparison for digest
-            nearby = self._latest_nearby_comparison.get(route.route_id)
-            if nearby:
-                summary["nearby_prices"] = nearby
-
-            summaries.append(summary)
-
-        if not summaries:
-            logger.info("No route data for digest, skipping")
-            return
-
-        try:
-            if self.telegram_notifier:
-                await self.telegram_notifier.send_daily_digest(summaries)
-        except Exception:
-            logger.exception("Failed to send daily digest")
-
-    async def _poll_single_route(self, route: DBRoute) -> None:
-        loop = asyncio.get_running_loop()
-        logger.info("Polling route %s: %s -> %s", route.route_id, route.origin, route.destination)
-
-        if not route.earliest_departure or not route.latest_return:
-            logger.warning("Route %s missing date range, skipping", route.route_id)
-            return
-
-        # Generate date windows based on trip duration type
-        trip_duration = route.trip_duration_days or DEFAULT_TRIP_DURATION_DAYS
-        try:
-            if route.trip_duration_type == "weekend":
-                windows = _generate_weekend_windows(
-                    earliest_departure=route.earliest_departure,
-                    latest_return=route.latest_return,
-                    trip_duration_days=trip_duration,
-                    preferred_departure_days=route.preferred_departure_days or [3, 4],
-                    preferred_return_days=route.preferred_return_days or [0, 6],
-                    max_windows=DEFAULT_MAX_WINDOWS,
-                )
-            else:
-                windows = generate_date_windows(
-                    earliest_departure=route.earliest_departure,
-                    latest_return=route.latest_return,
-                    trip_duration_days=trip_duration,
-                    max_windows=DEFAULT_MAX_WINDOWS,
-                )
-        except ValueError as e:
-            logger.error("Cannot generate windows for route %s: %s", route.route_id, e)
-            return
-
-        # Decide which windows to poll
-        windows_to_poll = await self._select_windows(route, windows)
-
-        # Poll primary airport first — store snapshots (alerts fire here)
-        for outbound, return_dt in windows_to_poll:
-            try:
-                await self._search_and_store(route, outbound, return_dt)
-            except SerpAPIError as e:
-                logger.error(
-                    "SerpAPI error for %s (%s to %s): %s",
-                    route.route_id, outbound, return_dt, e,
-                )
-            except Exception as e:
-                logger.error(
-                    "Unexpected error polling %s (%s to %s): %s",
-                    route.route_id, outbound, return_dt, e,
-                    exc_info=True,
-                )
-
-        # Poll secondary airports AFTER primary (primary data now available)
-        # Nearby comparison is cached for the NEXT cycle's alerts
-        if self._secondary_poll_counter % 2 == 0:
-            try:
-                await self._poll_secondary_airports(route, windows_to_poll)
-            except Exception as e:
-                logger.error("Secondary airport polling failed for %s: %s", route.route_id, e, exc_info=True)
+        # Check alert rules
+        if lowest_price is not None:
+            await self._check_alerts(route, snapshot, float(lowest_price), best_flight, user)
 
     async def _select_windows(
         self, route: DBRoute, all_windows: list[tuple[date, date]]
@@ -549,15 +635,18 @@ class Orchestrator:
         return selected or [all_windows[0]]
 
     async def _poll_secondary_airports(
-        self, route: DBRoute, windows: list[tuple[date, date]]
+        self, route: DBRoute, windows: list[tuple[date, date]], user: dict
     ) -> None:
         loop = asyncio.get_running_loop()
-        secondary_airports = await loop.run_in_executor(None, self.db.get_secondary_airports)
+        user_id = user["user_id"]
+        secondary_airports = await loop.run_in_executor(
+            None, self.db.get_secondary_airports, user_id
+        )
         if not secondary_airports:
             return
 
         primary_transport = await loop.run_in_executor(
-            None, self.db.get_airport_transport, route.origin
+            None, self.db.get_airport_transport, route.origin, user_id
         )
         if not primary_transport:
             logger.warning("No transport data for primary airport %s", route.origin)
@@ -571,7 +660,7 @@ class Orchestrator:
         for outbound, return_dt in windows:
             # Get primary snapshot for this window (just stored above)
             primary_snapshot = await loop.run_in_executor(
-                None, self.db.get_latest_snapshot, route.route_id
+                None, self.db.get_latest_snapshot, route.route_id, user_id
             )
             if not primary_snapshot or primary_snapshot.lowest_price is None:
                 continue
@@ -628,7 +717,7 @@ class Orchestrator:
                             "origin": airport["airport_code"],
                         },
                     )
-                    await loop.run_in_executor(None, self.db.insert_snapshot, snapshot)
+                    await loop.run_in_executor(None, self.db.insert_snapshot, snapshot, user_id)
                     logger.info(
                         "Stored secondary snapshot %s→%s: €%s",
                         airport["airport_code"], route.destination, lowest,
@@ -667,81 +756,26 @@ class Orchestrator:
                         comparison[0]["airport_name"],
                     )
 
-    async def _search_and_store(self, route: DBRoute, outbound: date, return_dt: date) -> None:
-        loop = asyncio.get_running_loop()
-
-        result = await self.serpapi.search_flights(
-            origin=route.origin,
-            destination=route.destination,
-            outbound_date=outbound,
-            return_date=return_dt,
-            passengers=route.passengers,
-            trip_type=route.trip_type,
-        )
-
-        now = datetime.now(UTC)
-        insights = result.price_insights
-        lowest_price = insights.get("lowest_price")
-        typical_range = insights.get("typical_price_range", [])
-
-        # Extract best flight info
-        best_flight = result.best_flights[0] if result.best_flights else None
-
-        snapshot = PriceSnapshot(
-            snapshot_id=uuid4().hex,
-            route_id=route.route_id,
-            observed_at=now,
-            source="serpapi_poll",
-            passengers=route.passengers,
-            outbound_date=outbound,
-            return_date=return_dt,
-            lowest_price=Decimal(str(lowest_price)) if lowest_price is not None else None,
-            currency=self.config.serpapi.currency,
-            best_flight=best_flight,
-            all_flights=result.best_flights + result.other_flights,
-            price_level=insights.get("price_level"),
-            typical_low=Decimal(str(typical_range[0])) if len(typical_range) > 0 else None,
-            typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
-            price_history=insights.get("price_history"),
-            search_params={
-                **(result.search_params or {}),
-                "google_flights_url": result.raw_response.get("search_metadata", {}).get("google_flights_url", ""),
-            },
-        )
-
-        await loop.run_in_executor(None, self.db.insert_snapshot, snapshot)
-        logger.info(
-            "Stored snapshot for %s: %s->%s on %s, price=%s",
-            route.route_id, route.origin, route.destination, outbound, lowest_price,
-        )
-
-        # Update poll window tracking
-        await loop.run_in_executor(
-            None, self.db.update_poll_window,
-            route.route_id, outbound, return_dt,
-            float(lowest_price) if lowest_price is not None else None,
-        )
-
-        # Check alert rules
-        if lowest_price is not None:
-            await self._check_alerts(route, snapshot, float(lowest_price), best_flight)
-
     async def _check_alerts(
         self,
         route: DBRoute,
         snapshot: PriceSnapshot,
         price: float,
         best_flight: dict | None,
+        user: dict,
     ) -> None:
         loop = asyncio.get_running_loop()
+        user_id = user["user_id"]
+        chat_id = user["telegram_chat_id"]
 
         # Get price history for pre-filter and scoring context
-        history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
+        history = await loop.run_in_executor(
+            None, self.db.get_price_history, route.route_id, 90, user_id
+        )
         avg_price = history.get("avg_price")
         sample_count = history.get("count", 0)
 
         # Pre-filter: only score with Claude if price looks interesting
-        # (below 90-day avg, or cold start with < 5 snapshots)
         is_cold_start = sample_count < COLD_START_THRESHOLD
         is_below_avg = (
             avg_price is not None
@@ -759,16 +793,16 @@ class Orchestrator:
         # Fetch past feedback for scoring calibration
         feedback = await loop.run_in_executor(None, self.db.get_recent_feedback)
 
-        # Score with Claude, fall back to static threshold on error
+        # Score with Claude using per-user traveller info
         score_result = None
         try:
             score_result = await self.scorer.score_deal(
                 snapshot=snapshot,
                 route=route,
                 price_history=history,
-                traveller_name=self.config.traveller.name,
-                home_airport=self.config.traveller.home_airport,
-                traveller_preferences=self.config.traveller.preferences or None,
+                traveller_name=user.get("name") or self.config.traveller.name,
+                home_airport=user.get("home_airport") or self.config.traveller.home_airport,
+                traveller_preferences=user.get("preferences") or self.config.traveller.preferences or None,
                 past_feedback=feedback or None,
                 nearby_comparison=self._latest_nearby_comparison.get(route.route_id),
             )
@@ -801,30 +835,29 @@ class Orchestrator:
         if score_result.score >= alert_threshold:
             # Smart dedup: decide whether this alert is meaningful
             last_alerted = await loop.run_in_executor(
-                None, self.db.get_last_alerted_price, route.route_id
+                None, self.db.get_last_alerted_price, route.route_id, user_id
             )
 
-            # Also check in-cycle tracker (prevents alerting €268 after already alerting €252)
+            # Also check in-cycle tracker
             cycle_best = self._cycle_best_prices.get(route.route_id)
             effective_last = last_alerted
             if cycle_best is not None:
                 if effective_last is None or cycle_best < effective_last:
                     effective_last = cycle_best
 
-            # Rule 1: New low — price is lower than last alerted price (including this cycle)
+            # Rule 1: New low
             is_new_low = effective_last is None or price < effective_last
 
-            # Rule 2: Book now + low — Claude says book_now AND Google says price_level is low
-            # BUT only if we haven't already alerted at this price or lower
+            # Rule 2: Book now + low
             is_book_now_and_low = (
                 score_result.urgency == "book_now"
                 and snapshot.price_level == "low"
                 and (effective_last is None or price <= effective_last)
             )
 
-            # Rule 3: Inflection detection — price was dropping then ticked up
+            # Rule 3: Inflection detection
             inflection, bottom_price = await loop.run_in_executor(
-                None, self.db.detect_price_inflection, route.route_id
+                None, self.db.detect_price_inflection, route.route_id, user_id
             )
             if inflection and bottom_price is not None:
                 inflection_msg = (
@@ -854,7 +887,7 @@ class Orchestrator:
         else:
             logger.info("Route %s scored below watch threshold (%.2f), skipping", route.route_id, score_result.score)
 
-        await loop.run_in_executor(None, self.db.insert_deal, deal)
+        await loop.run_in_executor(None, self.db.insert_deal, deal, user_id)
 
         # Send alert for deals that passed dedup
         if deal.alert_sent:
@@ -876,9 +909,8 @@ class Orchestrator:
                 gf_url = snapshot.search_params.get("google_flights_url", "")
 
             # Get primary airport transport for cost breakdown
-            loop2 = asyncio.get_running_loop()
-            primary_transport = await loop2.run_in_executor(
-                None, self.db.get_airport_transport, route.origin
+            primary_transport = await loop.run_in_executor(
+                None, self.db.get_airport_transport, route.origin, user_id
             )
             primary_t_cost = primary_transport.get("transport_cost_eur", 0) if primary_transport else 0
             primary_parking = primary_transport.get("parking_cost_eur") if primary_transport else None
@@ -908,17 +940,107 @@ class Orchestrator:
 
             try:
                 if self.telegram_notifier:
-                    await self.telegram_notifier.send_deal_alert(deal_info)
+                    await self.telegram_notifier.send_deal_alert(deal_info, chat_id=chat_id)
             except Exception:
                 logger.exception("Failed to send alert for route %s", route.route_id)
+
+    async def send_daily_digest(self) -> None:
+        """Send daily digest per user with their routes."""
+        logger.info("Preparing daily digest")
+        loop = asyncio.get_running_loop()
+
+        users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        if not users:
+            logger.info("No active users, skipping digest")
+            return
+
+        for user in users:
+            user_id = user["user_id"]
+            chat_id = user["telegram_chat_id"]
+
+            routes: list[DBRoute] = await loop.run_in_executor(
+                None, self.db.get_active_routes, user_id
+            )
+            if not routes:
+                continue
+
+            since = datetime.now(UTC) - timedelta(days=1)
+            summaries: list[dict] = []
+
+            for route in routes:
+                latest = await loop.run_in_executor(
+                    None, self.db.get_latest_snapshot, route.route_id, user_id
+                )
+                if latest is None:
+                    continue
+
+                # 7-day trend
+                history_7d = await loop.run_in_executor(
+                    None, self.db.get_price_history, route.route_id, 7, user_id
+                )
+                history_now = float(latest.lowest_price) if latest.lowest_price else None
+                avg_7d = float(history_7d["avg_price"]) if history_7d.get("avg_price") else None
+
+                if history_now is not None and avg_7d is not None and avg_7d > 0:
+                    diff = (history_now - avg_7d) / avg_7d
+                    if diff < -0.03:
+                        trend = "down"
+                    elif diff > 0.03:
+                        trend = "up"
+                    else:
+                        trend = "stable"
+                else:
+                    trend = ""
+
+                # Recent watch-level deals
+                recent_deals = await loop.run_in_executor(
+                    None, self.db.get_deals_since, route.route_id, since, user_id
+                )
+                watch_deals = [d for d in recent_deals if d.urgency == "watch"]
+
+                # Use cheapest recent snapshot for dates
+                cheapest = await loop.run_in_executor(
+                    None, self.db.get_cheapest_recent_snapshot, route.route_id, 7, user_id
+                )
+                best = cheapest or latest
+
+                summary: dict = {
+                    "origin": route.origin,
+                    "destination": route.destination,
+                    "lowest_price": float(best.lowest_price) if best and best.lowest_price else None,
+                    "trend": trend,
+                    "passengers": route.passengers,
+                    "dates": f"{best.outbound_date} to {best.return_date}" if best and best.outbound_date else "",
+                    "outbound_date": str(best.outbound_date) if best and best.outbound_date else "",
+                    "return_date": str(best.return_date) if best and best.return_date else "",
+                }
+
+                if watch_deals:
+                    summary["watch_deals"] = len(watch_deals)
+
+                # Add nearby airport comparison for digest
+                nearby = self._latest_nearby_comparison.get(route.route_id)
+                if nearby:
+                    summary["nearby_prices"] = nearby
+
+                summaries.append(summary)
+
+            if not summaries:
+                continue
+
+            try:
+                if self.telegram_notifier:
+                    await self.telegram_notifier.send_daily_digest(summaries, chat_id=chat_id)
+            except Exception:
+                logger.exception("Failed to send daily digest to user %s", user_id)
 
     async def on_community_deal(self, deal_info: dict) -> None:
         """Handle a deal detected from community channels (Layer 2).
 
-        1. Match against active routes
-        2. Verify fare via SerpAPI
-        3. Score with Claude (community_flagged=True)
-        4. Send error fare alert if score meets threshold
+        1. Match against active routes across all users
+        2. Verify fare via SerpAPI (once)
+        3. Score with Claude per user (community_flagged=True)
+        4. Send error fare alert to each matching user
         """
         loop = asyncio.get_running_loop()
         origin = (deal_info.get("origin") or "").upper()
@@ -929,27 +1051,30 @@ class Orchestrator:
             logger.debug("Community deal missing origin/destination, skipping")
             return
 
-        # Match against active routes
-        routes: list[DBRoute] = await loop.run_in_executor(None, self.db.get_active_routes)
-        matched = [
-            r for r in routes
-            if r.origin.upper() == origin and r.destination.upper() == destination
-        ]
+        # Find matching user/route pairs across all users
+        users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        matches: list[tuple[dict, DBRoute]] = []
+        for user in users:
+            routes = await loop.run_in_executor(None, self.db.get_active_routes, user["user_id"])
+            for r in routes:
+                if r.origin.upper() == origin and r.destination.upper() == destination:
+                    matches.append((user, r))
+                    break  # One route per user per origin/dest
 
-        if not matched:
+        if not matches:
             logger.debug(
                 "Community deal %s → %s does not match any active route", origin, destination,
             )
             return
 
-        route = matched[0]
+        # Use first match as reference for verification
+        _, ref_route = matches[0]
         logger.info(
-            "Community deal matches route %s: %s → %s (community price: %s)",
-            route.route_id, origin, destination, community_price,
+            "Community deal matches %d user(s) for %s → %s (community price: %s)",
+            len(matches), origin, destination, community_price,
         )
 
         # --- Pre-filter 1: Date window check ---
-        # If the deal specifies dates, check they fall within the route's travel window
         dates = deal_info.get("dates", [])
         outbound_date: date | None = None
         return_date: date | None = None
@@ -961,36 +1086,37 @@ class Orchestrator:
             except (ValueError, TypeError):
                 pass
 
-        if outbound_date is not None and route.earliest_departure and route.latest_return:
-            if outbound_date < route.earliest_departure or outbound_date > route.latest_return:
+        if outbound_date is not None and ref_route.earliest_departure and ref_route.latest_return:
+            if outbound_date < ref_route.earliest_departure or outbound_date > ref_route.latest_return:
                 logger.debug(
                     "Community deal date %s outside route window %s–%s, skipping",
-                    outbound_date, route.earliest_departure, route.latest_return,
+                    outbound_date, ref_route.earliest_departure, ref_route.latest_return,
                 )
                 return
 
         # Fall back to route dates if community deal didn't specify
-        if outbound_date is None and route.earliest_departure:
-            outbound_date = route.earliest_departure
-            return_date = route.latest_return
+        if outbound_date is None and ref_route.earliest_departure:
+            outbound_date = ref_route.earliest_departure
+            return_date = ref_route.latest_return
 
         if outbound_date is None:
             logger.warning("No dates available for verification of community deal, skipping")
             return
 
         # --- Pre-filter 2: Price sanity check ---
-        # Skip if community price is higher than our historical average (not a deal)
         if community_price is not None:
-            history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
+            history = await loop.run_in_executor(
+                None, self.db.get_price_history, ref_route.route_id, 90
+            )
             avg_price_precheck = history.get("avg_price")
             if avg_price_precheck is not None and community_price > float(avg_price_precheck):
                 logger.debug(
                     "Community price €%.0f above 90-day avg €%.0f for %s, skipping",
-                    community_price, float(avg_price_precheck), route.route_id,
+                    community_price, float(avg_price_precheck), ref_route.route_id,
                 )
                 return
 
-        # Verify fare via SerpAPI
+        # Verify fare via SerpAPI (once for all users)
         try:
             verification = await self.serpapi.verify_fare(
                 origin=origin,
@@ -998,7 +1124,7 @@ class Orchestrator:
                 outbound_date=outbound_date,
                 return_date=return_date,
                 expected_price=community_price or 0,
-                passengers=route.passengers,
+                passengers=ref_route.passengers,
             )
         except SerpAPIError as e:
             logger.error("SerpAPI verification failed for community deal: %s", e)
@@ -1015,6 +1141,28 @@ class Orchestrator:
         if actual_price is None:
             logger.warning("Verification returned no price for %s → %s", origin, destination)
             return
+
+        # Process for each matching user
+        for user, route in matches:
+            await self._process_community_deal_for_user(
+                user, route, verification, actual_price,
+                outbound_date, return_date, community_price,
+            )
+
+    async def _process_community_deal_for_user(
+        self,
+        user: dict,
+        route: DBRoute,
+        verification: VerificationResult,
+        actual_price: float,
+        outbound_date: date,
+        return_date: date | None,
+        community_price: float | None,
+    ) -> None:
+        """Store and score a verified community deal for a specific user."""
+        loop = asyncio.get_running_loop()
+        user_id = user["user_id"]
+        chat_id = user["telegram_chat_id"]
 
         # Store snapshot from verification
         now = datetime.now(UTC)
@@ -1040,18 +1188,19 @@ class Orchestrator:
             price_history=insights.get("price_history"),
         )
 
-        await loop.run_in_executor(None, self.db.insert_snapshot, snapshot)
+        await loop.run_in_executor(None, self.db.insert_snapshot, snapshot, user_id)
         logger.info(
-            "Stored verification snapshot for %s: €%s", route.route_id, actual_price,
+            "Stored verification snapshot for %s (user %s): €%s",
+            route.route_id, user_id, actual_price,
         )
 
-        # --- Pre-filter 3: Only score with Claude if price looks genuinely good ---
-        history = await loop.run_in_executor(None, self.db.get_price_history, route.route_id, 90)
+        # --- Pre-filter 3: Only score if price looks genuinely good ---
+        history = await loop.run_in_executor(
+            None, self.db.get_price_history, route.route_id, 90, user_id
+        )
         avg_price = history.get("avg_price")
-        min_price = history.get("min_price")
         snapshot_count = history.get("count", 0)
 
-        # If we have enough history, skip Claude if price isn't at least 10% below average
         if snapshot_count >= COLD_START_THRESHOLD and avg_price is not None:
             if actual_price > float(avg_price) * 0.90:
                 logger.info(
@@ -1070,9 +1219,9 @@ class Orchestrator:
                 route=route,
                 price_history=history,
                 community_flagged=True,
-                traveller_name=self.config.traveller.name,
-                home_airport=self.config.traveller.home_airport,
-                traveller_preferences=self.config.traveller.preferences or None,
+                traveller_name=user.get("name") or self.config.traveller.name,
+                home_airport=user.get("home_airport") or self.config.traveller.home_airport,
+                traveller_preferences=user.get("preferences") or self.config.traveller.preferences or None,
                 past_feedback=community_feedback or None,
             )
             logger.info(
@@ -1081,7 +1230,7 @@ class Orchestrator:
             )
         except Exception:
             logger.exception("Claude scoring failed for community deal, sending price-only alert")
-            # Fallback: send price-only alert without scoring
+            # Fallback: send price-only alert
             fallback_deal_id = uuid4().hex
             fallback_airline_code = ""
             if verification.flights:
@@ -1090,8 +1239,8 @@ class Orchestrator:
                     fallback_airline_code = fb_legs[0].get("airline", "")
             fallback_info = {
                 "deal_id": fallback_deal_id,
-                "origin": origin,
-                "destination": destination,
+                "origin": route.origin,
+                "destination": route.destination,
                 "price": actual_price,
                 "airline": airline_name(fallback_airline_code) if fallback_airline_code else "Unknown",
                 "dates": f"{outbound_date} to {return_date}" if return_date else str(outbound_date),
@@ -1103,10 +1252,9 @@ class Orchestrator:
             }
             try:
                 if self.telegram_notifier:
-                    await self.telegram_notifier.send_error_fare_alert(fallback_info)
+                    await self.telegram_notifier.send_error_fare_alert(fallback_info, chat_id=chat_id)
             except Exception:
                 logger.exception("Failed to send fallback error fare alert")
-            # Still store the deal
             deal = Deal(
                 deal_id=fallback_deal_id,
                 snapshot_id=snapshot.snapshot_id,
@@ -1118,7 +1266,7 @@ class Orchestrator:
                 alert_sent=True,
                 alert_sent_at=now,
             )
-            await loop.run_in_executor(None, self.db.insert_deal, deal)
+            await loop.run_in_executor(None, self.db.insert_deal, deal, user_id)
             return
 
         # Store deal record
@@ -1151,8 +1299,8 @@ class Orchestrator:
 
             alert_info = {
                 "deal_id": deal.deal_id,
-                "origin": origin,
-                "destination": destination,
+                "origin": route.origin,
+                "destination": route.destination,
                 "price": actual_price,
                 "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
                 "airline": airline,
@@ -1169,7 +1317,7 @@ class Orchestrator:
 
             try:
                 if self.telegram_notifier:
-                    await self.telegram_notifier.send_error_fare_alert(alert_info)
+                    await self.telegram_notifier.send_error_fare_alert(alert_info, chat_id=chat_id)
             except Exception:
                 logger.exception("Failed to send error fare alert for %s", route.route_id)
         else:
@@ -1178,7 +1326,7 @@ class Orchestrator:
                 score_result.score, alert_threshold,
             )
 
-        await loop.run_in_executor(None, self.db.insert_deal, deal)
+        await loop.run_in_executor(None, self.db.insert_deal, deal, user_id)
 
     @staticmethod
     def _static_fallback(price: float, avg_price: Decimal | None):
