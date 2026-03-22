@@ -230,74 +230,79 @@ class TestPriceDropAlerting:
 # =============================================================================
 
 class TestNearbyAirportsInAlerts:
-    """Secondary airports should be polled when an alert triggers."""
+    """Secondary airports should be polled when a deferred alert is sent."""
 
     @pytest.mark.asyncio
-    async def test_secondary_airports_polled_on_alert(self):
-        """When should_alert=True, secondary airports are polled for the triggering window."""
+    async def test_alert_deferred_to_pending(self):
+        """When should_alert=True, alert is deferred to _pending_alerts (not sent immediately)."""
         orch, mock_db = _make_orchestrator_with_mocks()
         _setup_check_alerts(orch, mock_db, last_alerted_price=None, count=2)
 
         route = _make_route()
         snapshot = _make_snapshot(lowest_price=400)
 
-        # Mock _poll_secondary_airports to track the call
-        orch._poll_secondary_airports = AsyncMock()
-
         await orch._check_alerts(route, snapshot, 400.0, None, _make_user())
 
-        orch._poll_secondary_airports.assert_called_once()
-        call_args = orch._poll_secondary_airports.call_args
-        # Should be called with exactly the triggering date window
-        windows = call_args[0][1]
-        assert windows == [(date(2026, 10, 5), date(2026, 10, 19))]
+        assert route.route_id in orch._pending_alerts
+        assert orch._pending_alerts[route.route_id]["price"] == 400.0
 
     @pytest.mark.asyncio
-    async def test_only_triggering_window_polled(self):
-        """Only the triggering date window is passed to secondary airport poll, not all windows."""
+    async def test_deferred_keeps_cheapest_per_route(self):
+        """When multiple windows trigger for same route, only the cheapest is kept."""
         orch, mock_db = _make_orchestrator_with_mocks()
         _setup_check_alerts(orch, mock_db, last_alerted_price=None, count=2)
 
         route = _make_route()
-        # Specific dates for this snapshot
-        snapshot = _make_snapshot(
-            lowest_price=400,
-            outbound=date(2026, 10, 10),
-            return_dt=date(2026, 10, 24),
-        )
 
-        orch._poll_secondary_airports = AsyncMock()
+        # First window: €500
+        snap1 = _make_snapshot(lowest_price=500, outbound=date(2026, 10, 5))
+        await orch._check_alerts(route, snap1, 500.0, None, _make_user())
 
-        await orch._check_alerts(route, snapshot, 400.0, None, _make_user())
+        # Second window: €400 (cheaper — should replace)
+        snap2 = _make_snapshot(lowest_price=400, outbound=date(2026, 10, 10))
+        await orch._check_alerts(route, snap2, 400.0, None, _make_user())
 
-        call_args = orch._poll_secondary_airports.call_args
-        windows = call_args[0][1]
-        # Exactly ONE window — the triggering one
-        assert len(windows) == 1
-        assert windows[0] == (date(2026, 10, 10), date(2026, 10, 24))
+        assert orch._pending_alerts[route.route_id]["price"] == 400.0
+
+        # Third window: €450 (more expensive — should NOT replace)
+        snap3 = _make_snapshot(lowest_price=450, outbound=date(2026, 10, 15))
+        await orch._check_alerts(route, snap3, 450.0, None, _make_user())
+
+        assert orch._pending_alerts[route.route_id]["price"] == 400.0
 
     @pytest.mark.asyncio
-    async def test_nearby_comparison_populated_before_alert(self):
-        """_latest_nearby_comparison is populated by _poll_secondary_airports before alert is sent."""
+    async def test_secondary_polled_in_deferred_send(self):
+        """_send_deferred_alert polls secondary airports using the snapshot as primary baseline."""
         orch, mock_db = _make_orchestrator_with_mocks()
         _setup_check_alerts(orch, mock_db, last_alerted_price=None, count=2)
 
         route = _make_route()
         snapshot = _make_snapshot(lowest_price=400)
 
-        # Set up real _poll_secondary_airports that populates comparison
-        async def fake_poll_secondary(rt, windows, user):
-            orch._latest_nearby_comparison[rt.route_id] = [
-                {"airport_code": "BRU", "airport_name": "Brussels", "savings": 200},
-            ]
+        await orch._check_alerts(route, snapshot, 400.0, None, _make_user())
 
-        orch._poll_secondary_airports = AsyncMock(side_effect=fake_poll_secondary)
+        # Mock the secondary poll method
+        orch._poll_secondary_airports_for_snapshot = AsyncMock()
+        orch.telegram_notifier = AsyncMock()
+
+        await orch._send_deferred_alert(orch._pending_alerts[route.route_id])
+
+        orch._poll_secondary_airports_for_snapshot.assert_called_once()
+        call_args = orch._poll_secondary_airports_for_snapshot.call_args[0]
+        assert call_args[1] is snapshot  # snapshot passed directly as primary baseline
+
+    @pytest.mark.asyncio
+    async def test_no_deferred_alert_when_deduped(self):
+        """Deduped deals are NOT added to _pending_alerts."""
+        orch, mock_db = _make_orchestrator_with_mocks()
+        _setup_check_alerts(orch, mock_db, last_alerted_price=350)
+
+        route = _make_route()
+        snapshot = _make_snapshot(lowest_price=400)  # 400 > 350, not a new low
 
         await orch._check_alerts(route, snapshot, 400.0, None, _make_user())
 
-        # Comparison should be populated
-        assert route.route_id in orch._latest_nearby_comparison
-        assert orch._latest_nearby_comparison[route.route_id][0]["airport_code"] == "BRU"
+        assert route.route_id not in orch._pending_alerts
 
     @pytest.mark.asyncio
     async def test_secondary_airports_not_polled_when_no_alert(self):

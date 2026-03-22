@@ -306,7 +306,15 @@ async def test_check_alerts_sends_to_user_chat_id():
     # Set up notifier
     orch.telegram_notifier = AsyncMock()
 
+    mock_db.get_secondary_airports.return_value = []
+
     await orch._check_alerts(route, snapshot, 400.0, None, user)
+
+    # Alert is deferred, not sent immediately
+    assert "r1" in orch._pending_alerts
+
+    # Send the deferred alert
+    await orch._send_deferred_alert(orch._pending_alerts["r1"])
 
     # Alert sent to Alice's chat_id
     orch.telegram_notifier.send_deal_alert.assert_called_once()

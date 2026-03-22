@@ -58,10 +58,13 @@ CURRENT FARE:
 {best_flight_json}
 
 PRICE CONTEXT:
-- Current lowest: €{lowest_price}
+- Current lowest: €{lowest_price}/pp
 - Source: {source}
 {price_history_section}
 {serpapi_section}
+
+PRE-COMPUTED ANALYSIS (use these facts — do not contradict them):
+{pre_analysis}
 
 DATA CONFIDENCE: {sample_count} observations over {days_observed} days
 
@@ -261,6 +264,34 @@ class DealScorer:
         else:
             days_observed = 0
 
+        # Pre-computed analysis — deterministic facts Claude must use
+        price_pp = float(snapshot.lowest_price or 0) / passengers
+        analysis_lines = []
+        if price_history.get("count", 0) > 0:
+            avg_pp = float(price_history["avg_price"]) / passengers
+            min_pp = float(price_history["min_price"]) / passengers
+            diff_from_avg = price_pp - avg_pp
+            pct_from_avg = (diff_from_avg / avg_pp * 100) if avg_pp > 0 else 0
+            if diff_from_avg < 0:
+                analysis_lines.append(f"- Price is €{abs(diff_from_avg):,.0f} BELOW your 90-day average ({abs(pct_from_avg):.0f}% cheaper)")
+            else:
+                analysis_lines.append(f"- Price is €{diff_from_avg:,.0f} ABOVE your 90-day average ({pct_from_avg:.0f}% more expensive)")
+            if price_pp <= min_pp:
+                analysis_lines.append("- This is a NEW 90-day LOW")
+            else:
+                analysis_lines.append(f"- Your 90-day minimum is €{min_pp:,.0f}/pp (current is €{price_pp - min_pp:,.0f} above it)")
+        if snapshot.typical_low and snapshot.typical_high:
+            typ_low_pp = float(snapshot.typical_low) / passengers
+            typ_high_pp = float(snapshot.typical_high) / passengers
+            if price_pp <= typ_low_pp:
+                analysis_lines.append("- Price is AT or BELOW Google's typical low — this is cheap")
+            elif price_pp >= typ_high_pp:
+                analysis_lines.append("- Price is AT or ABOVE Google's typical high — this is expensive")
+            else:
+                position = (price_pp - typ_low_pp) / (typ_high_pp - typ_low_pp) * 100
+                analysis_lines.append(f"- Price sits at the {position:.0f}th percentile of Google's typical range")
+        pre_analysis = "\n".join(analysis_lines) if analysis_lines else "- Insufficient data for analysis"
+
         return _SCORE_PROMPT.format(
             today=today.strftime("%Y-%m-%d"),
             origin=origin,
@@ -271,10 +302,11 @@ class DealScorer:
             date_flex=date_flex,
             passengers=passengers,
             best_flight_json=best_flight_json,
-            lowest_price=(snapshot.lowest_price or 0) / passengers,
+            lowest_price=price_pp,
             source=snapshot.source,
             price_history_section=price_history_section,
             serpapi_section=serpapi_section,
+            pre_analysis=pre_analysis,
             days_until_departure=days_until_departure,
             sample_count=sample_count,
             days_observed=days_observed,

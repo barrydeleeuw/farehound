@@ -118,6 +118,8 @@ class Orchestrator:
         self._last_full_rescan: datetime | None = None
         self._secondary_poll_counter: int = 0
         self._latest_nearby_comparison: dict[str, list[dict]] = {}
+        self._pending_alerts: dict[str, dict] = {}
+        self._cycle_best_prices: dict[str, float] = {}
 
         # Community listeners (Layer 2)
         self.community_listener: CommunityListener | None = None
@@ -405,6 +407,7 @@ class Orchestrator:
         """Poll all active users' routes with shared SerpAPI calls."""
         logger.info("Starting poll cycle")
         self._cycle_best_prices: dict[str, float] = {}
+        self._pending_alerts: dict[str, dict] = {}  # route_id -> best alert candidate
         loop = asyncio.get_running_loop()
 
         users = await loop.run_in_executor(None, self.db.get_all_active_users)
@@ -468,6 +471,14 @@ class Orchestrator:
                         "Failed storing result for route %s: %s",
                         route.route_id, e, exc_info=True,
                     )
+
+        # Phase 2.5: Send deferred alerts (one per route, best price only)
+        for route_id, alert in self._pending_alerts.items():
+            try:
+                await self._send_deferred_alert(alert)
+            except Exception:
+                logger.exception("Failed to send deferred alert for route %s", route_id)
+        self._pending_alerts.clear()
 
         self._first_run = False
         self._secondary_poll_counter += 1
@@ -757,6 +768,99 @@ class Orchestrator:
                         comparison[0]["airport_name"],
                     )
 
+    async def _poll_secondary_airports_for_snapshot(
+        self, route: DBRoute, snapshot: PriceSnapshot, user: dict
+    ) -> None:
+        """Poll secondary airports using a specific snapshot as the primary baseline."""
+        loop = asyncio.get_running_loop()
+        user_id = user["user_id"]
+        secondary_airports = await loop.run_in_executor(
+            None, self.db.get_secondary_airports, user_id
+        )
+        if not secondary_airports or snapshot.lowest_price is None:
+            return
+
+        primary_transport = await loop.run_in_executor(
+            None, self.db.get_airport_transport, route.origin, user_id
+        )
+        if not primary_transport:
+            return
+
+        primary_result = {
+            "airport_code": route.origin,
+            "fare_pp": float(snapshot.lowest_price) / route.passengers,
+            "transport_cost": primary_transport["transport_cost_eur"] or 0,
+            "parking_cost": primary_transport.get("parking_cost_eur"),
+            "transport_mode": primary_transport.get("transport_mode", ""),
+            "transport_time_min": primary_transport.get("transport_time_min", 0),
+        }
+
+        logger.info(
+            "On-demand secondary poll for route %s (€%.0f, %s to %s)",
+            route.route_id, float(snapshot.lowest_price),
+            snapshot.outbound_date, snapshot.return_date,
+        )
+
+        secondary_results = []
+        for airport in secondary_airports:
+            try:
+                result = await self.serpapi.search_flights(
+                    origin=airport["airport_code"],
+                    destination=route.destination,
+                    outbound_date=snapshot.outbound_date,
+                    return_date=snapshot.return_date,
+                    passengers=route.passengers,
+                    trip_type=route.trip_type,
+                )
+                lowest = result.price_insights.get("lowest_price")
+                if lowest is None:
+                    continue
+
+                now = datetime.now(UTC)
+                best_flight = result.best_flights[0] if result.best_flights else None
+                typical_range = result.price_insights.get("typical_price_range", [])
+                sec_snapshot = PriceSnapshot(
+                    snapshot_id=uuid4().hex,
+                    route_id=route.route_id,
+                    observed_at=now,
+                    source="serpapi_poll",
+                    passengers=route.passengers,
+                    outbound_date=snapshot.outbound_date,
+                    return_date=snapshot.return_date,
+                    lowest_price=Decimal(str(lowest)),
+                    currency=self.config.serpapi.currency,
+                    best_flight=best_flight,
+                    all_flights=result.best_flights + result.other_flights,
+                    price_level=result.price_insights.get("price_level"),
+                    typical_low=Decimal(str(typical_range[0])) if len(typical_range) > 0 else None,
+                    typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
+                    price_history=result.price_insights.get("price_history"),
+                    search_params={**(result.search_params or {}), "origin": airport["airport_code"]},
+                )
+                await loop.run_in_executor(None, self.db.insert_snapshot, sec_snapshot, user_id)
+
+                secondary_results.append({
+                    "airport_code": airport["airport_code"],
+                    "fare_pp": float(lowest) / route.passengers,
+                    "transport_cost": airport.get("transport_cost_eur") or 0,
+                    "parking_cost": airport.get("parking_cost_eur"),
+                    "transport_mode": airport.get("transport_mode", ""),
+                    "transport_time_min": airport.get("transport_time_min", 0),
+                })
+            except SerpAPIError as e:
+                logger.error("SerpAPI error for secondary %s→%s: %s", airport["airport_code"], route.destination, e)
+            except Exception as e:
+                logger.error("Error polling secondary %s→%s: %s", airport["airport_code"], route.destination, e, exc_info=True)
+
+        if secondary_results:
+            comparison = compare_airports(primary_result, secondary_results, route.passengers)
+            if comparison:
+                self._latest_nearby_comparison[route.route_id] = comparison
+            else:
+                self._latest_nearby_comparison.pop(route.route_id, None)
+        else:
+            self._latest_nearby_comparison.pop(route.route_id, None)
+
     async def _check_alerts(
         self,
         route: DBRoute,
@@ -873,71 +977,96 @@ class Orchestrator:
 
         await loop.run_in_executor(None, self.db.insert_deal, deal, user_id)
 
-        # Send alert for deals that passed dedup
+        # Defer alert — only keep the best (cheapest) candidate per route
         if deal.alert_sent:
-            # Poll secondary airports for the triggering date window
-            if snapshot.outbound_date and snapshot.return_date:
-                try:
-                    await self._poll_secondary_airports(
-                        route,
-                        [(snapshot.outbound_date, snapshot.return_date)],
-                        user,
-                    )
-                except Exception:
-                    logger.exception("Secondary airport poll failed for alert on route %s", route.route_id)
+            existing = self._pending_alerts.get(route.route_id)
+            if existing is None or price < existing["price"]:
+                self._pending_alerts[route.route_id] = {
+                    "deal": deal,
+                    "route": route,
+                    "snapshot": snapshot,
+                    "price": price,
+                    "best_flight": best_flight,
+                    "user": user,
+                    "avg_price": avg_price,
+                    "score_result": score_result,
+                    "inflection_msg": inflection_msg,
+                }
 
-            airline_code = ""
-            stops = 0
-            flight_data = best_flight or (snapshot.all_flights[0] if snapshot.all_flights else None)
-            if flight_data:
-                legs = flight_data.get("flights", [])
-                if legs:
-                    airline_code = legs[0].get("airline", "")
-                    stops = max(0, len(legs) - 1)
-                elif flight_data.get("airline"):
-                    airline_code = flight_data["airline"]
-            airline = airline_name(airline_code) if airline_code else "Unknown"
+    async def _send_deferred_alert(self, alert: dict) -> None:
+        """Send a single deal alert after all windows have been processed."""
+        loop = asyncio.get_running_loop()
+        deal = alert["deal"]
+        route = alert["route"]
+        snapshot = alert["snapshot"]
+        price = alert["price"]
+        best_flight = alert["best_flight"]
+        user = alert["user"]
+        avg_price = alert["avg_price"]
+        score_result = alert["score_result"]
+        inflection_msg = alert["inflection_msg"]
+        user_id = user["user_id"]
+        chat_id = user["telegram_chat_id"]
 
-            # Extract Google Flights URL from snapshot search_params
-            gf_url = ""
-            if snapshot.search_params and isinstance(snapshot.search_params, dict):
-                gf_url = snapshot.search_params.get("google_flights_url", "")
-
-            # Get primary airport transport for cost breakdown
-            primary_transport = await loop.run_in_executor(
-                None, self.db.get_airport_transport, route.origin, user_id
-            )
-            primary_t_cost = primary_transport.get("transport_cost_eur", 0) if primary_transport else 0
-            primary_parking = primary_transport.get("parking_cost_eur") if primary_transport else None
-            primary_mode = primary_transport.get("transport_mode", "") if primary_transport else ""
-
-            deal_info = {
-                "deal_id": deal.deal_id,
-                "origin": route.origin,
-                "destination": route.destination,
-                "price": price,
-                "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
-                "airline": airline,
-                "stops": stops,
-                "dates": f"{snapshot.outbound_date} to {snapshot.return_date}",
-                "outbound_date": str(snapshot.outbound_date),
-                "return_date": str(snapshot.return_date),
-                "passengers": route.passengers,
-                "score": score_result.score,
-                "urgency": score_result.urgency,
-                "reasoning": inflection_msg or score_result.reasoning,
-                "nearby_comparison": self._latest_nearby_comparison.get(route.route_id, []),
-                "google_flights_url": gf_url,
-                "primary_transport_cost": primary_t_cost,
-                "primary_parking_cost": primary_parking or 0,
-                "primary_transport_mode": primary_mode,
-            }
-
+        # Poll secondary airports for the triggering date window
+        if snapshot.outbound_date and snapshot.return_date:
             try:
-                if self.telegram_notifier:
-                    await self.telegram_notifier.send_deal_alert(deal_info, chat_id=chat_id)
+                await self._poll_secondary_airports_for_snapshot(
+                    route, snapshot, user,
+                )
             except Exception:
-                logger.exception("Failed to send alert for route %s", route.route_id)
+                logger.exception("Secondary airport poll failed for alert on route %s", route.route_id)
+
+        airline_code = ""
+        stops = 0
+        flight_data = best_flight or (snapshot.all_flights[0] if snapshot.all_flights else None)
+        if flight_data:
+            legs = flight_data.get("flights", [])
+            if legs:
+                airline_code = legs[0].get("airline", "")
+                stops = max(0, len(legs) - 1)
+            elif flight_data.get("airline"):
+                airline_code = flight_data["airline"]
+        airline = airline_name(airline_code) if airline_code else "Unknown"
+
+        gf_url = ""
+        if snapshot.search_params and isinstance(snapshot.search_params, dict):
+            gf_url = snapshot.search_params.get("google_flights_url", "")
+
+        primary_transport = await loop.run_in_executor(
+            None, self.db.get_airport_transport, route.origin, user_id
+        )
+        primary_t_cost = primary_transport.get("transport_cost_eur", 0) if primary_transport else 0
+        primary_parking = primary_transport.get("parking_cost_eur") if primary_transport else None
+        primary_mode = primary_transport.get("transport_mode", "") if primary_transport else ""
+
+        deal_info = {
+            "deal_id": deal.deal_id,
+            "origin": route.origin,
+            "destination": route.destination,
+            "price": price,
+            "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
+            "airline": airline,
+            "stops": stops,
+            "dates": f"{snapshot.outbound_date} to {snapshot.return_date}",
+            "outbound_date": str(snapshot.outbound_date),
+            "return_date": str(snapshot.return_date),
+            "passengers": route.passengers,
+            "score": score_result.score,
+            "urgency": score_result.urgency,
+            "reasoning": inflection_msg or score_result.reasoning,
+            "nearby_comparison": self._latest_nearby_comparison.get(route.route_id, []),
+            "google_flights_url": gf_url,
+            "primary_transport_cost": primary_t_cost,
+            "primary_parking_cost": primary_parking or 0,
+            "primary_transport_mode": primary_mode,
+        }
+
+        try:
+            if self.telegram_notifier:
+                await self.telegram_notifier.send_deal_alert(deal_info, chat_id=chat_id)
+        except Exception:
+            logger.exception("Failed to send alert for route %s", route.route_id)
 
     async def send_daily_digest(self) -> None:
         """Send daily digest per user with their routes."""
