@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -95,9 +96,11 @@ class Orchestrator:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.db = Database()
+        cache_dir = os.environ.get("SERPAPI_CACHE_DIR")  # set for local dev only
         self.serpapi = SerpAPIClient(
             api_key=config.serpapi.api_key,
             currency=config.serpapi.currency,
+            cache_dir=cache_dir,
         )
         self.scorer = DealScorer(
             api_key=config.anthropic.api_key,
