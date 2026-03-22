@@ -1,144 +1,126 @@
-# FareHound — v2 Gap Analysis & Roadmap
+# FareHound Roadmap
 
-**Date:** March 21, 2026
-**Current version:** v0.3.6 (running on HAOS)
-**Target:** v2 spec (farehound-v2-spec.md)
+> Last updated: 2026-03-22
 
----
+## Mission
 
-## Executive Assessment
+**Making travel accessible for everyone by finding the lowest real cost to fly.**
 
-The v2 spec represents a significant vision shift: from "flight price monitor" to "personal trip operations assistant." The current codebase (v0.3.6) has strong foundations that align well with v2's architecture, but there are three major gaps and several medium ones. Here's what we have, what we need, and the recommended path.
+Most flight search tools show you the ticket price. FareHound shows you the true cost — including how you get to the airport, what parking costs, and whether a "cheaper" flight from a farther airport actually saves you money. Everyone deserves to know when a genuinely great deal exists, not just people who spend hours checking multiple airports and deal sites.
 
----
+Every feature we build serves this mission: reduce the gap between what people pay and what they could pay, with zero effort on their part.
 
-## What We Have (v0.3.6) vs What v2 Needs
+## In Progress
 
-### Already Aligned with v2
+### [ITEM-001] Multi-user stabilization
+- **Status:** In Progress
+- **Priority:** P0 (Critical)
+- **Effort:** M
+- **Dependencies:** None
+- **Summary:** Fix remaining bugs from v2.0 multi-user launch — onboarding flow, cache consistency, SerpAPI budget management.
+- **Acceptance Criteria:**
+  - [ ] Onboarding flow works end-to-end (name → location → airports → first trip)
+  - [ ] Cached SerpAPI responses used for local testing
+  - [ ] Poll interval at 24h keeps within Starter plan budget
+  - [ ] Barry's routes work correctly after fresh DB migration
+  - [ ] Second user can onboard and see separate trips
 
-| v2 Requirement | Current Status | Gap |
-|---------------|---------------|-----|
-| Telegram as primary interface | **Done** — bot with /trip, /trips, /remove, /help | Need richer conversational flow |
-| Claude-powered trip parsing | **Done** — /trip parses natural language | Need clarification follow-ups (partially done), multi-destination |
-| Claude-powered deal scoring | **Done** — advisory scoring with pattern knowledge | Need nearby airport data in prompt |
-| Smart alerting (dedup) | **Done** — new low, book_now+low, inflection detection | Aligned |
-| Deal quality indicators | **Done** — 🔥💰👀😴 based on score | Aligned |
-| Airport name lookup | **Done** — 110+ airports, route_name() helper | Aligned |
-| Nearby airport filter origins | **Done** — AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN | Need transport cost modeling |
-| RSS community feeds | **Done** — SecretFlying, TheFlightDeal, Reddit | v2 replaces with Gmail+WhatsApp (see below) |
-| SerpAPI verification | **Done** — verify community deals | Aligned |
-| SQLite storage | **Done** — migrated from DuckDB | v2 says DuckDB but SQLite is better for HAOS |
-| HA add-on packaging | **Done** — s6-overlay, auto-deploy via SSH | Aligned |
-| Daily digest | **Done** — scheduled at 08:00 | Need nearby airport comparison in digest |
-| Feedback loop | **Done** — booked/dismissed tracking | Aligned |
-| Adaptive date windowing | **Done** — focus polling on cheapest windows | Aligned |
+## Ready
 
-### Major Gaps (v2 core differentiators we don't have)
+### [ITEM-002] Savings tracker
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** Track cumulative savings per user. Every time FareHound finds a cheaper alternative, log it. This is the proof that our mission works — "FareHound has found €12,400 in savings for our users."
+- **Acceptance Criteria:**
+  - [ ] New `savings_log` table: user_id, deal_id, route_id, primary_cost, alternative_cost, savings_amount, airport_code, timestamp
+  - [ ] Logged every time a nearby alternative with savings > €75 is found
+  - [ ] `/savings` command shows total: "FareHound has found €2,400 in potential savings across your trips"
+  - [ ] Data available for future contribution/billing features
 
-#### Gap 1: Nearby Airport Intelligence with Door-to-Door Cost
-**v2 says:** "This is the primary unique differentiator. No existing tool does this."
-**We have:** Nearby airports in RSS filter list, but zero transport cost modeling.
-**What's needed:**
-- `airport_transport` table (transport mode, cost, time, parking)
-- `nearby_airports.py` — net cost engine: fare × pax + transport × 2 + parking
-- Multi-airport polling per trip (AMS, BRU, DUS, EIN, CGN all queried)
-- Scoring prompt enriched with nearby airport comparison
-- Alert format: "Save €340 by departing from Brussels" with net cost breakdown
-**Effort:** Medium — mostly new code, but schema/models exist to extend
-**Priority:** **P0** — this is what makes FareHound worth existing
+### [ITEM-003] Smart daily digest — only nudge undecided trips
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** Replace daily dump with a purposeful follow-up. Only send digest for deals the user saw but didn't act on.
+- **Acceptance Criteria:**
+  - [ ] Digest only includes routes with pending (unacted) deal alerts
+  - [ ] Message explains why: "You haven't decided on these yet"
+  - [ ] Shows if price changed since the alert was sent
+  - [ ] No digest sent if user has acted on all deals
 
-#### Gap 2: Deal Service Ingestion (JFC + Secret Flying via Gmail)
-**v2 says:** Replace RSS feeds with Gmail API (JFC emails) + WhatsApp bridge (Secret Flying).
-**We have:** RSS feeds (partially working — some Reddit 403s), no Gmail integration.
-**What's needed:**
-- `apis/gmail.py` — Gmail API client, OAuth, label polling
-- `analysis/email_parser.py` — Claude-powered JFC/SF email parsing
-- Gmail OAuth setup script
-- Deduplication (same deal from multiple sources)
-- watgbridge for WhatsApp→Telegram (Secret Flying fast path)
-**Effort:** High — Gmail OAuth is fiddly, watgbridge adds operational complexity
-**Priority:** **P1** — but RSS feeds work as a bridge until this is built
+## Proposed
 
-#### Gap 3: Amadeus API (Replace SerpAPI for Layer 1)
-**v2 says:** Use Amadeus Self-Service API for scheduled polling (free tier: 2,000 calls/mo).
-**We have:** SerpAPI for everything (polling + verification).
-**Assessment:** This is a "nice to have" optimization, not a blocker. SerpAPI works fine and gives us Google Flights data (price_insights, typical ranges) that Amadeus doesn't provide. The v2 spec's cost analysis for Amadeus (3,000-6,500 calls/month for 1-2 trips) actually exceeds the free tier.
-**Recommendation:** **Keep SerpAPI.** Add Amadeus only if SerpAPI costs become a problem. The Google price_insights data is more valuable than Amadeus's raw fares for scoring.
-**Priority:** **P3** — defer unless SerpAPI budget becomes tight
+### [ITEM-004] Google Maps one-time transport lookup per city
+- **Status:** Proposed
+- **Priority:** P2 (Medium)
+- **Effort:** S
+- **Dependencies:** [ITEM-001]
+- **Summary:** Cache Google Maps transport data by city. If two users live in Amsterdam, reuse the same lookup.
 
-### Medium Gaps
+### [ITEM-005] Preferred airline comparison
+- **Status:** Proposed
+- **Priority:** P2 (Medium)
+- **Effort:** M
+- **Dependencies:** None
+- **Summary:** Show both cheapest and preferred airline: "Cheapest: €240 (Transavia) | KLM: €289 (+€49)". Helps users make informed choices.
 
-| Gap | v2 Requirement | Effort | Priority |
-|-----|---------------|--------|----------|
-| **Multi-destination per trip** | Trip to "Japan" = NRT + KIX | Small — extend trip model, multiple search calls | P1 |
-| **Adaptive polling frequency** | Primary 4h, secondary 8h, escalate near departure | Medium — scheduler logic | P1 |
-| **Trip model (replaces routes)** | Richer model: duration_days, preferred_connections, constraints | Small — extend existing Route model | P1 |
-| **Conversational flow** | Multi-turn trip setup with clarification | Medium — extend /trip bot (partially done) | P2 |
-| **Trip modification** | "Push Japan to November" via Telegram | Small — Claude parses, update route | P2 |
-| **Cost gate** | Parse cheaply, verify sparingly pipeline | Small — mostly exists in orchestrator | P2 |
-| **Shared Telegram group** | Add Paola to alerts | Trivial — send to group_id instead of chat_id | P3 |
-| **Trip completeness checks** | Passport, calendar, 1Password | Medium — HA calendar API, 1Password CLI | P3 |
-| **Data retention** | Archive old JSON, keep aggregates | Small — periodic cleanup job | P3 |
+### [ITEM-006] Gmail deal pipeline (JFC + Secret Flying)
+- **Status:** Proposed
+- **Priority:** P2 (Medium)
+- **Effort:** L
+- **Dependencies:** [ITEM-001]
+- **Summary:** Ingest JFC/SF deal emails via Google Apps Script webhook. Error fares are where the biggest savings happen — directly serving our mission.
 
-### Things to Drop from v2 Spec
+### [ITEM-007] Voluntary contribution model ("Pay what it saved you")
+- **Status:** Proposed
+- **Priority:** P3 (Low)
+- **Effort:** L
+- **Dependencies:** [ITEM-002], validated user base
+- **Summary:** After booking with savings, suggest a voluntary contribution. Aligns with accessibility mission: those who save more contribute more.
+- **Review notes:** Low conversion (~2-3%). Needs proven savings data first.
 
-| v2 Spec Item | Recommendation | Why |
-|-------------|----------------|-----|
-| **DuckDB** | Keep SQLite | DuckDB doesn't have ARM musllinux wheels. SQLite works perfectly. |
-| **HA notifications** | Already dropped | Telegram is the sole channel. HA sensors still useful for dashboard. |
-| **watgbridge (WhatsApp bridge)** | Defer to Phase 2 | Adds significant operational complexity. RSS feeds cover the fast path for now. |
-| **1Password integration** | Defer indefinitely | Nice idea but overkill. A manual reminder suffices. |
-| **Amadeus as primary API** | Keep SerpAPI | Google price_insights are more valuable than raw Amadeus fares for scoring. |
-| **python-telegram-bot dependency** | Keep httpx approach | We already have a working bot with httpx. No need to add a dependency. |
+### [ITEM-008] Subscription + pay-per-trip tiers
+- **Status:** Proposed
+- **Priority:** P3 (Low)
+- **Effort:** XL
+- **Dependencies:** Validated demand
+- **Summary:** Free tier (1 route) vs subscription for continuous monitoring. Free tier keeps travel accessible; subscription funds infrastructure.
+- **Review notes:** Premature until Phase A validates demand.
 
----
+### [ITEM-009] Deploy to Railway (cloud)
+- **Status:** Proposed
+- **Priority:** P3 (Low)
+- **Effort:** M
+- **Dependencies:** Phase A validation
+- **Summary:** Move from HA to cloud. Only if Phase A proves demand.
 
-## Recommended Build Phases
+## Done
 
-### Phase 1: Nearby Airport Engine (the killer feature)
-**Goal:** Multi-airport monitoring with door-to-door cost comparison in alerts.
+### [ITEM-D01] Core monitoring loop (v0.1-v0.3)
+- **Status:** Done — SerpAPI polling, SQLite, Claude scoring, smart alerting, RSS feeds.
 
-1. Create `airport_transport` table + seed with Barry's airports (AMS, BRU, DUS, EIN, CGN)
-2. Build `nearby_airports.py` — net cost calculation engine
-3. Extend orchestrator to poll secondary airports per trip
-4. Add nearby airport comparison to Claude scoring prompt
-5. Update Telegram alert format to show comparison (v2 spec format)
-6. Update daily digest with per-airport breakdown
+### [ITEM-D02] Nearby airport engine (v1.0)
+- **Status:** Done — Multi-airport polling with door-to-door cost comparison. The core differentiator.
 
-**This is the feature that justifies FareHound's existence.**
+### [ITEM-D03] Conversational Telegram bot (v1.1)
+- **Status:** Done — Claude-powered natural language trip management.
 
-### Phase 2: Deal Pipeline Upgrade (Gmail + better parsing)
-**Goal:** JFC + Secret Flying emails → parsed, matched, verified, alerted.
+### [ITEM-D04] Scoring honesty + UX polish (v1.2-v1.3)
+- **Status:** Done — Fact-based scoring, Book Now/Wait, transparent cost breakdown.
 
-1. Gmail API client + OAuth setup
-2. Claude-powered email parser (JFC format, SF format)
-3. Deduplication by route+price+airline hash
-4. Replace RSS feeds with Gmail polling (keep RSS as fallback)
-5. WhatsApp bridge (if RSS fallback proves insufficient)
+### [ITEM-D05] Multi-user support (v2.0)
+- **Status:** Done — Users table, shared polling, Telegram onboarding, SerpAPI cache.
 
-### Phase 3: Richer Trip Management
-**Goal:** Full conversational trip management via Telegram.
+## Parked
 
-1. Multi-destination support ("Japan" = NRT + KIX)
-2. Trip modification ("push to November")
-3. Preferred airline comparison in alerts
-4. Adaptive polling (escalate near departure, de-escalate far out)
-5. Shared Telegram group for Paola
+### [ITEM-P01] Creative routing (virtual interlining)
+- **Parked:** No affordable API. Revisit if budget increases.
 
-### Phase 4: Intelligence & Polish
-**Goal:** Trip readiness and refinements.
+### [ITEM-P02] HA Lovelace dashboard
+- **Parked:** Telegram is the sole interface.
 
-1. Trip completeness checks (passport expiry, calendar conflicts)
-2. HA calendar integration
-3. Data archival (90-day rolling window for raw JSON)
-4. Optional HA Lovelace dashboard via REST API
-
----
-
-## Key Architectural Decisions
-
-1. **Keep SQLite over DuckDB** — ARM compatibility, zero compile time, built into Python
-2. **Keep SerpAPI over Amadeus** — Google price_insights are uniquely valuable for scoring
-3. **Keep httpx over python-telegram-bot** — already working, one less dependency
-4. **RSS feeds as bridge** — keep until Gmail integration is proven
-5. **Telegram as sole interface** — drop HA notifications (already done), keep HA sensors for dashboard
+### [ITEM-P03] 1Password / passport checks
+- **Parked:** Over-engineered for current stage.
