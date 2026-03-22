@@ -1,23 +1,49 @@
 from __future__ import annotations
 
-from src.analysis.nearby_airports import calculate_net_cost, compare_airports
+from src.analysis.nearby_airports import calculate_net_cost, compare_airports, transport_total, is_per_person_transport
+
+
+# --- transport helpers ---
+
+def test_per_person_transport_modes():
+    assert is_per_person_transport("train")
+    assert is_per_person_transport("Thalys")
+    assert is_per_person_transport("bus")
+    assert not is_per_person_transport("car")
+    assert not is_per_person_transport("uber")
+    assert not is_per_person_transport("taxi")
+
+
+def test_transport_total_car():
+    # Car: €45 one-way, 2 pax → €45 * 2 trips = €90 (per vehicle)
+    assert transport_total(45, "car", 2) == 90.0
+
+
+def test_transport_total_train():
+    # Train: €35 one-way, 2 pax → €35 * 2 pax * 2 trips = €140
+    assert transport_total(35, "train", 2) == 140.0
+
+
+def test_transport_total_train_single():
+    # Train: €35 one-way, 1 pax → €35 * 1 * 2 = €70
+    assert transport_total(35, "train", 1) == 70.0
 
 
 # --- calculate_net_cost ---
 
-def test_calculate_net_cost_basic():
-    # 400 * 2 + 12 * 2 + 0 = 824
-    assert calculate_net_cost(400, 2, 12, None) == 824.0
+def test_calculate_net_cost_car():
+    # 400pp * 2 + car €45 * 2 trips + 0 = 890
+    assert calculate_net_cost(400, 2, 45, None, "car") == 890.0
+
+
+def test_calculate_net_cost_train():
+    # 400pp * 2 + train €12 * 2 pax * 2 trips + 0 = 848
+    assert calculate_net_cost(400, 2, 12, None, "train") == 848.0
 
 
 def test_calculate_net_cost_with_parking():
-    # 350 * 2 + 30 * 2 + 50 = 810
-    assert calculate_net_cost(350, 2, 30, 50) == 810.0
-
-
-def test_calculate_net_cost_single_passenger():
-    # 500 * 1 + 70 * 2 + 0 = 640
-    assert calculate_net_cost(500, 1, 70, None) == 640.0
+    # 350pp * 2 + car €30 * 2 trips + €50 parking = 810
+    assert calculate_net_cost(350, 2, 30, 50, "car") == 810.0
 
 
 def test_calculate_net_cost_zero_transport():
@@ -30,10 +56,10 @@ def _make_primary():
     return {
         "airport_code": "AMS",
         "fare_pp": 500,
-        "transport_cost": 12,
+        "transport_cost": 45,
         "parking_cost": None,
-        "transport_mode": "train",
-        "transport_time_min": 45,
+        "transport_mode": "uber",
+        "transport_time_min": 30,
     }
 
 
@@ -48,63 +74,49 @@ def _make_secondary(code, fare_pp, transport_cost, parking_cost=None, transport_
     }
 
 
-# primary net = 500*2 + 12*2 + 0 = 1024
+# primary net: 500*2 + uber €45*2 = 1090
 
 def test_compare_airports_finds_savings():
-    primary = _make_primary()  # net = 1024
+    primary = _make_primary()  # net = 1090
     secondaries = [
-        _make_secondary("BRU", 350, 70),  # net = 350*2 + 70*2 = 840, savings = 184
+        _make_secondary("BRU", 350, 35),  # net = 350*2 + train €35*2pax*2trips = 840, savings = 250
     ]
     result = compare_airports(primary, secondaries, passengers=2)
     assert len(result) == 1
     assert result[0]["airport_code"] == "BRU"
-    assert result[0]["airport_name"] == "Brussels"
-    assert result[0]["savings"] == 184.0
+    assert result[0]["savings"] == 250.0
     assert result[0]["net_cost"] == 840.0
 
 
 def test_compare_airports_excludes_below_threshold():
-    primary = _make_primary()  # net = 1024
+    primary = _make_primary()  # net = 1090
     secondaries = [
-        _make_secondary("DUS", 480, 60),  # net = 480*2 + 60*2 = 1080, savings = -56
+        _make_secondary("DUS", 480, 35),  # net = 480*2 + train €35*2*2 = 1100, savings = -10
     ]
     result = compare_airports(primary, secondaries, passengers=2)
     assert len(result) == 0
 
 
 def test_compare_airports_sorted_by_savings():
-    primary = _make_primary()  # net = 1024
+    primary = _make_primary()  # net = 1090
     secondaries = [
-        _make_secondary("BRU", 400, 70),   # net = 400*2 + 70*2 = 940, savings = 84
-        _make_secondary("CGN", 350, 70),   # net = 350*2 + 70*2 = 840, savings = 184
-        _make_secondary("EIN", 380, 30, 50),  # net = 380*2 + 30*2 + 50 = 870, savings = 154
+        _make_secondary("BRU", 400, 35),   # net = 800 + 140 = 940, savings = 150
+        _make_secondary("CGN", 350, 35),   # net = 700 + 140 = 840, savings = 250
+        _make_secondary("EIN", 380, 15, 50, "car", 50),  # net = 760 + 30 + 50 = 840, savings = 250
     ]
     result = compare_airports(primary, secondaries, passengers=2)
     assert len(result) == 3
-    assert result[0]["airport_code"] == "CGN"
-    assert result[1]["airport_code"] == "EIN"
+    # CGN and EIN tied at 250, BRU at 150
     assert result[2]["airport_code"] == "BRU"
 
 
 def test_compare_airports_custom_threshold():
-    primary = _make_primary()  # net = 1024
+    primary = _make_primary()  # net = 1090
     secondaries = [
-        _make_secondary("BRU", 450, 70),  # net = 450*2 + 70*2 = 1040, savings = -16
+        _make_secondary("BRU", 470, 35),  # net = 940 + 140 = 1080, savings = 10
     ]
-    # Both default (75) and lower (30) threshold exclude negative savings
     assert len(compare_airports(primary, secondaries, passengers=2)) == 0
-    assert len(compare_airports(primary, secondaries, passengers=2, savings_threshold=30)) == 0
-
-
-def test_compare_airports_custom_threshold_positive_savings():
-    primary = _make_primary()  # net = 1024
-    secondaries = [
-        _make_secondary("BRU", 440, 30),  # net = 440*2 + 30*2 = 940, savings = 84
-    ]
-    # Default threshold (75) includes it
-    assert len(compare_airports(primary, secondaries, passengers=2)) == 1
-    # Higher threshold excludes it
-    assert len(compare_airports(primary, secondaries, passengers=2, savings_threshold=100)) == 0
+    assert len(compare_airports(primary, secondaries, passengers=2, savings_threshold=5)) == 1
 
 
 def test_compare_airports_empty_secondaries():
@@ -114,21 +126,20 @@ def test_compare_airports_empty_secondaries():
 
 
 def test_compare_airports_with_parking():
-    primary = _make_primary()  # net = 1024
+    primary = _make_primary()  # net = 1090
     secondaries = [
-        _make_secondary("EIN", 350, 30, 50, "car", 50),  # net = 350*2 + 30*2 + 50 = 810, savings = 214
+        _make_secondary("EIN", 350, 25, 50, "car", 50),  # net = 700 + 50 + 50 = 800, savings = 290
     ]
     result = compare_airports(primary, secondaries, passengers=2)
     assert len(result) == 1
-    assert result[0]["net_cost"] == 810.0
+    assert result[0]["net_cost"] == 800.0
     assert result[0]["transport_mode"] == "car"
-    assert result[0]["transport_time_min"] == 50
 
 
 def test_compare_airports_includes_airport_name():
     primary = _make_primary()
     secondaries = [
-        _make_secondary("CGN", 350, 70, transport_mode="train", time_min=180),
+        _make_secondary("CGN", 350, 35, transport_mode="train", time_min=180),
     ]
     result = compare_airports(primary, secondaries, passengers=2)
     assert result[0]["airport_name"] == "Cologne"

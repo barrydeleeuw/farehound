@@ -2,15 +2,29 @@ from __future__ import annotations
 
 from src.utils.airports import airport_name
 
+# Transport modes where cost is per person (each passenger needs a ticket)
+_PER_PERSON_MODES = {"train", "thalys", "bus", "metro", "public transport", "ferry", "tram"}
+
+
+def is_per_person_transport(mode: str) -> bool:
+    return mode.lower().strip() in _PER_PERSON_MODES
+
+
+def transport_total(transport_cost: float, mode: str, passengers: int) -> float:
+    """Total round-trip transport cost accounting for per-person vs per-vehicle modes."""
+    one_way = transport_cost * passengers if is_per_person_transport(mode) else transport_cost
+    return one_way * 2  # round trip
+
 
 def calculate_net_cost(
     fare_pp: float,
     passengers: int,
     transport_cost: float,
     parking_cost: float | None,
+    transport_mode: str = "",
 ) -> float:
-    """Total trip cost: fare x passengers + transport round-trip + parking."""
-    return (fare_pp * passengers) + (transport_cost * 2) + (parking_cost or 0)
+    """Total trip cost: fare x passengers + transport (round-trip, per-person if applicable) + parking."""
+    return (fare_pp * passengers) + transport_total(transport_cost, transport_mode, passengers) + (parking_cost or 0)
 
 
 def compare_airports(
@@ -32,6 +46,7 @@ def compare_airports(
         passengers=passengers,
         transport_cost=primary_result["transport_cost"],
         parking_cost=primary_result.get("parking_cost"),
+        transport_mode=primary_result.get("transport_mode", ""),
     )
 
     comparisons = []
@@ -41,6 +56,7 @@ def compare_airports(
             passengers=passengers,
             transport_cost=sec["transport_cost"],
             parking_cost=sec.get("parking_cost"),
+            transport_mode=sec.get("transport_mode", ""),
         )
         savings = primary_net - sec_net
         if savings > savings_threshold:

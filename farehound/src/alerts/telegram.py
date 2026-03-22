@@ -4,6 +4,7 @@ import logging
 
 import httpx
 
+from src.analysis.nearby_airports import transport_total
 from src.utils.airports import route_name
 
 logger = logging.getLogger(__name__)
@@ -111,15 +112,15 @@ class TelegramNotifier:
             f"{emoji} *{label}* — {route}",
             f"*€{price_pp:,.0f}/pp* | {airline} | {dates}",
         ]
-        # Always show full cost breakdown for primary airport (round-trip transport)
+        # Always show full cost breakdown for primary airport
         primary_t = deal_info.get("primary_transport_cost", 0)
         primary_p = deal_info.get("primary_parking_cost", 0)
         primary_mode = deal_info.get("primary_transport_mode", "transport")
-        primary_t_return = primary_t * 2
-        primary_total = float(price) + primary_t_return + primary_p
+        primary_t_total = transport_total(primary_t, primary_mode, passengers)
+        primary_total = float(price) + primary_t_total + primary_p
         cost_parts = [f"€{float(price):,.0f} flights"]
-        if primary_t_return:
-            cost_parts.append(f"€{primary_t_return:,.0f} {primary_mode.lower()}")
+        if primary_t_total:
+            cost_parts.append(f"€{primary_t_total:,.0f} {primary_mode.lower()}")
         if primary_p:
             cost_parts.append(f"€{primary_p:,.0f} parking")
         lines.append(f"{' + '.join(cost_parts)} = *€{primary_total:,.0f} total*")
@@ -142,10 +143,10 @@ class TelegramNotifier:
                 hours = t_min / 60
                 alt_passengers = deal_info.get("passengers", 2)
                 fare_total = fare * alt_passengers
-                t_return = t_cost * 2
+                t_total = transport_total(t_cost, mode, alt_passengers)
                 alt_parts = [f"€{fare_total:,.0f} flights"]
-                if t_return:
-                    alt_parts.append(f"€{t_return:,.0f} {mode.lower()}")
+                if t_total:
+                    alt_parts.append(f"€{t_total:,.0f} {mode.lower()}")
                 if parking:
                     alt_parts.append(f"€{parking:,.0f} parking")
                 lines.append(
@@ -263,11 +264,11 @@ class TelegramNotifier:
                 d_transport = route_data.get("primary_transport_cost", 0)
                 d_parking = route_data.get("primary_parking_cost", 0)
                 d_mode = route_data.get("primary_transport_mode", "transport")
-                d_transport_return = d_transport * 2
-                d_total = float(lowest) + d_transport_return + d_parking
+                d_t_total = transport_total(d_transport, d_mode, passengers)
+                d_total = float(lowest) + d_t_total + d_parking
                 d_parts = [f"€{float(lowest):,.0f} flights"]
-                if d_transport_return:
-                    d_parts.append(f"€{d_transport_return:,.0f} {d_mode.lower()}")
+                if d_t_total:
+                    d_parts.append(f"€{d_t_total:,.0f} {d_mode.lower()}")
                 if d_parking:
                     d_parts.append(f"€{d_parking:,.0f} parking")
                 lines.append(f"{' + '.join(d_parts)} = *€{d_total:,.0f} total*")
@@ -299,10 +300,11 @@ class TelegramNotifier:
                     hours = t_min / 60
                     alt_pax = route_data.get("passengers", 2)
                     alt_fare_total = fare * alt_pax
-                    t_return = t_cost * 2
+                    alt_pax_count = route_data.get("passengers", 2)
+                    t_total_alt = transport_total(t_cost, mode, alt_pax_count)
                     alt_parts = [f"€{alt_fare_total:,.0f} flights"]
-                    if t_return:
-                        alt_parts.append(f"€{t_return:,.0f} {mode.lower()}")
+                    if t_total_alt:
+                        alt_parts.append(f"€{t_total_alt:,.0f} {mode.lower()}")
                     if parking:
                         alt_parts.append(f"€{parking:,.0f} parking")
                     lines.append(
