@@ -77,11 +77,18 @@ class TelegramNotifier:
         dest = deal.get("destination", "")
         outbound = deal.get("outbound_date", "")
         return_date = deal.get("return_date", "")
-        url = f"https://www.google.com/travel/flights?q=Flights+from+{origin}+to+{dest}"
+        passengers = deal.get("passengers", 2)
+        # Use Google Flights direct URL format
+        url = (
+            f"https://www.google.com/travel/flights"
+            f"?q=Flights+from+{origin}+to+{dest}"
+        )
         if outbound:
             url += f"+on+{outbound}"
         if return_date:
             url += f"+return+{return_date}"
+        if passengers and passengers > 1:
+            url += f"+{passengers}+passengers"
         return url
 
     async def send_deal_alert(self, deal_info: dict) -> None:
@@ -124,8 +131,6 @@ class TelegramNotifier:
                 lines.append(
                     f"    {mode} €{t_cost:,.0f} return | {hours:.1f}h to airport"
                 )
-
-        lines.append(f"[Search Flights]({search_url})")
 
         deal_id = deal_info.get("deal_id")
         reply_markup = None

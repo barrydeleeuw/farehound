@@ -56,7 +56,6 @@ async def test_send_deal_alert_format(notifier):
         assert "Tokyo Narita" in payload["text"]
         assert "€485" in payload["text"]
         assert "Good Deal" in payload["text"]
-        assert "Search Flights" in payload["text"]
         assert payload["parse_mode"] == "Markdown"
         assert payload["disable_web_page_preview"] is True
 

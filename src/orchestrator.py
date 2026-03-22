@@ -138,11 +138,14 @@ class Orchestrator:
                 CommunityFeed(channel=f.channel, filter_origins=f.filter_origins)
                 for f in telegram_feeds
             ]
-            self.community_listener = CommunityListener(
-                api_id=config.telegram.api_id,
-                api_hash=config.telegram.api_hash,
-                feeds=feeds,
-            )
+            try:
+                self.community_listener = CommunityListener(
+                    api_id=config.telegram.api_id,
+                    api_hash=config.telegram.api_hash,
+                    feeds=feeds,
+                )
+            except Exception as e:
+                logger.warning("Could not init Telegram community listener: %s", e)
 
         if rss_feeds:
             feeds = [
@@ -476,15 +479,7 @@ class Orchestrator:
         # Decide which windows to poll
         windows_to_poll = await self._select_windows(route, windows)
 
-        # Poll secondary airports FIRST (using previous cycle's primary data)
-        # so nearby comparison is available when primary alerts fire
-        if self._secondary_poll_counter % 2 == 0:
-            try:
-                await self._poll_secondary_airports(route, windows_to_poll)
-            except Exception as e:
-                logger.error("Secondary airport polling failed for %s: %s", route.route_id, e, exc_info=True)
-
-        # Then poll primary airport — alerts fire here with nearby data available
+        # Poll primary airport first — store snapshots (alerts fire here)
         for outbound, return_dt in windows_to_poll:
             try:
                 await self._search_and_store(route, outbound, return_dt)
@@ -499,6 +494,14 @@ class Orchestrator:
                     route.route_id, outbound, return_dt, e,
                     exc_info=True,
                 )
+
+        # Poll secondary airports AFTER primary (primary data now available)
+        # Nearby comparison is cached for the NEXT cycle's alerts
+        if self._secondary_poll_counter % 2 == 0:
+            try:
+                await self._poll_secondary_airports(route, windows_to_poll)
+            except Exception as e:
+                logger.error("Secondary airport polling failed for %s: %s", route.route_id, e, exc_info=True)
 
     async def _select_windows(
         self, route: DBRoute, all_windows: list[tuple[date, date]]
@@ -701,7 +704,10 @@ class Orchestrator:
             typical_low=Decimal(str(typical_range[0])) if len(typical_range) > 0 else None,
             typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
             price_history=insights.get("price_history"),
-            search_params=result.search_params,
+            search_params={
+                **(result.search_params or {}),
+                "google_flights_url": result.raw_response.get("search_metadata", {}).get("google_flights_url", ""),
+            },
         )
 
         await loop.run_in_executor(None, self.db.insert_snapshot, snapshot)
@@ -865,6 +871,11 @@ class Orchestrator:
                     airline_code = flight_data["airline"]
             airline = airline_name(airline_code) if airline_code else "Unknown"
 
+            # Extract Google Flights URL from snapshot search_params
+            gf_url = ""
+            if snapshot.search_params and isinstance(snapshot.search_params, dict):
+                gf_url = snapshot.search_params.get("google_flights_url", "")
+
             deal_info = {
                 "deal_id": deal.deal_id,
                 "origin": route.origin,
@@ -881,6 +892,7 @@ class Orchestrator:
                 "urgency": score_result.urgency,
                 "reasoning": inflection_msg or score_result.reasoning,
                 "nearby_comparison": self._latest_nearby_comparison.get(route.route_id, []),
+                "google_flights_url": gf_url,
             }
 
             try:
