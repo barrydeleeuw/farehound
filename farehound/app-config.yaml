@@ -98,7 +98,7 @@ community_feeds:
 telegram_alerts:
   bot_token_env: TELEGRAM_BOT_TOKEN
   chat_id_env: TELEGRAM_CHAT_ID
-  enabled: false
+  enabled: true
 
 telegram:
   api_id_env: TELEGRAM_API_ID

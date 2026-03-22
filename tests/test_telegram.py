@@ -284,7 +284,7 @@ async def test_send_deal_alert_buttons(notifier):
         keyboard = payload["reply_markup"]["inline_keyboard"]
         assert len(keyboard) == 1
         row = keyboard[0]
-        assert row[0]["text"] == "Search Flights ✈️"
+        assert row[0]["text"] == "Book Now ✈️"
         assert "url" in row[0]
         assert row[0]["url"].startswith("https://www.google.com/travel/flights")
         assert row[1]["text"] == "Wait 🕐"
@@ -320,7 +320,7 @@ async def test_send_error_fare_alert_buttons(notifier):
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         keyboard = payload["reply_markup"]["inline_keyboard"]
         row = keyboard[0]
-        assert row[0]["text"] == "Search Flights ✈️"
+        assert row[0]["text"] == "Book Now ✈️"
         assert "url" in row[0]
         assert row[1]["text"] == "Wait 🕐"
         assert row[1]["callback_data"] == "wait:deal_456"

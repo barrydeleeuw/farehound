@@ -137,7 +137,7 @@ class TelegramNotifier:
         if deal_id:
             reply_markup = {
                 "inline_keyboard": [[
-                    {"text": "Search Flights ✈️", "url": search_url},
+                    {"text": "Book Now ✈️", "url": search_url},
                     {"text": "Wait 🕐", "callback_data": f"wait:{deal_id}"},
                 ]]
             }
@@ -173,7 +173,7 @@ class TelegramNotifier:
         if deal_id:
             reply_markup = {
                 "inline_keyboard": [[
-                    {"text": "Search Flights ✈️", "url": booking_url},
+                    {"text": "Book Now ✈️", "url": booking_url},
                     {"text": "Wait 🕐", "callback_data": f"wait:{deal_id}"},
                 ]]
             }
@@ -263,7 +263,7 @@ class TelegramNotifier:
             })
             reply_markup = {
                 "inline_keyboard": [[
-                    {"text": "Search Flights ✈️", "url": search_url},
+                    {"text": "Book Now ✈️", "url": search_url},
                 ]]
             }
 

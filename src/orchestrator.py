@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from src.alerts.homeassistant import HomeAssistantNotifier
 from src.alerts.telegram import TelegramNotifier
 from src.analysis.nearby_airports import compare_airports
 from src.analysis.scorer import DealScorer
@@ -99,11 +98,6 @@ class Orchestrator:
         self.serpapi = SerpAPIClient(
             api_key=config.serpapi.api_key,
             currency=config.serpapi.currency,
-        )
-        self.notifier = HomeAssistantNotifier(
-            notify_service=config.alerts.notify_service,
-            base_url=config.alerts.base_url,
-            token=config.alerts.token,
         )
         self.scorer = DealScorer(
             api_key=config.anthropic.api_key,
@@ -374,7 +368,6 @@ class Orchestrator:
 
         if summaries:
             try:
-                await self.notifier.update_sensors(summaries)
                 logger.info("Updated %d HA sensors", len(summaries))
             except Exception:
                 logger.exception("Failed to update HA sensors")
@@ -446,7 +439,6 @@ class Orchestrator:
             return
 
         try:
-            await self.notifier.send_daily_digest(summaries)
             if self.telegram_notifier:
                 await self.telegram_notifier.send_daily_digest(summaries)
         except Exception:
@@ -903,7 +895,6 @@ class Orchestrator:
             }
 
             try:
-                await self.notifier.send_deal_alert(deal_info)
                 if self.telegram_notifier:
                     await self.telegram_notifier.send_deal_alert(deal_info)
             except Exception:
@@ -1099,7 +1090,6 @@ class Orchestrator:
                 "reasoning": f"Community error fare (scoring unavailable). Verified at €{float(actual_price):,.0f}.",
             }
             try:
-                await self.notifier.send_error_fare_alert(fallback_info)
                 if self.telegram_notifier:
                     await self.telegram_notifier.send_error_fare_alert(fallback_info)
             except Exception:
@@ -1166,7 +1156,6 @@ class Orchestrator:
             }
 
             try:
-                await self.notifier.send_error_fare_alert(alert_info)
                 if self.telegram_notifier:
                     await self.telegram_notifier.send_error_fare_alert(alert_info)
             except Exception:
