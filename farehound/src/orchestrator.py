@@ -476,7 +476,15 @@ class Orchestrator:
         # Decide which windows to poll
         windows_to_poll = await self._select_windows(route, windows)
 
-        # Poll primary airport first for all windows
+        # Poll secondary airports FIRST (using previous cycle's primary data)
+        # so nearby comparison is available when primary alerts fire
+        if self._secondary_poll_counter % 2 == 0:
+            try:
+                await self._poll_secondary_airports(route, windows_to_poll)
+            except Exception as e:
+                logger.error("Secondary airport polling failed for %s: %s", route.route_id, e, exc_info=True)
+
+        # Then poll primary airport — alerts fire here with nearby data available
         for outbound, return_dt in windows_to_poll:
             try:
                 await self._search_and_store(route, outbound, return_dt)
@@ -491,13 +499,6 @@ class Orchestrator:
                     route.route_id, outbound, return_dt, e,
                     exc_info=True,
                 )
-
-        # Now poll secondary airports (primary data is available for comparison)
-        if self._secondary_poll_counter % 2 == 0:
-            try:
-                await self._poll_secondary_airports(route, windows_to_poll)
-            except Exception as e:
-                logger.error("Secondary airport polling failed for %s: %s", route.route_id, e, exc_info=True)
 
     async def _select_windows(
         self, route: DBRoute, all_windows: list[tuple[date, date]]
@@ -809,9 +810,11 @@ class Orchestrator:
             is_new_low = effective_last is None or price < effective_last
 
             # Rule 2: Book now + low — Claude says book_now AND Google says price_level is low
+            # BUT only if we haven't already alerted at this price or lower
             is_book_now_and_low = (
                 score_result.urgency == "book_now"
                 and snapshot.price_level == "low"
+                and (effective_last is None or price <= effective_last)
             )
 
             # Rule 3: Inflection detection — price was dropping then ticked up
