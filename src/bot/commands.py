@@ -448,6 +448,15 @@ class TripBot:
 
     # --- Callbacks ---
 
+    async def _answer_callback(
+        self, client: httpx.AsyncClient, callback_id: str, text: str,
+    ) -> None:
+        url = f"{TELEGRAM_API}/bot{self._bot_token}/answerCallbackQuery"
+        try:
+            await client.post(url, json={"callback_query_id": callback_id, "text": text})
+        except Exception:
+            logger.exception("Failed to answer callback query")
+
     async def _handle_callback(self, callback: dict, client: httpx.AsyncClient) -> None:
         callback_id = callback.get("id")
         data = callback.get("data", "")
@@ -456,7 +465,33 @@ class TripBot:
         parts = data.split(":", 1)
         if len(parts) != 2:
             return
-        action, deal_id = parts
+        action, payload = parts
+
+        chat_id = str(message.get("chat", {}).get("id", ""))
+
+        # Route confirmation callbacks
+        if action in ("confirm_route", "confirm_modify", "confirm_remove"):
+            await self._answer_callback(client, callback_id, "Confirmed!")
+            if chat_id:
+                user = self._get_user(chat_id)
+                if user:
+                    await self._handle_yes(
+                        chat_id, user["user_id"],
+                        user.get("home_airport", "AMS"), client,
+                    )
+            return
+        if action == "edit_route":
+            await self._answer_callback(client, callback_id, "Tell me what to change")
+            if chat_id:
+                await self._send(client, chat_id, "What would you like to change? Just describe the edit naturally.")
+            return
+        if action in ("cancel_route", "cancel_modify", "cancel_remove"):
+            await self._answer_callback(client, callback_id, "Cancelled")
+            if chat_id:
+                await self._handle_no(chat_id, client)
+            return
+
+        deal_id = payload
 
         if action == "book":
             self._db.update_deal_feedback(deal_id, "booked")
@@ -481,15 +516,7 @@ class TripBot:
         else:
             return
 
-        # Answer the callback to dismiss the loading spinner
-        answer_url = f"{TELEGRAM_API}/bot{self._bot_token}/answerCallbackQuery"
-        try:
-            await client.post(answer_url, json={
-                "callback_query_id": callback_id,
-                "text": answer_text,
-            })
-        except Exception:
-            logger.exception("Failed to answer callback query")
+        await self._answer_callback(client, callback_id, answer_text)
 
         # Edit original message to append feedback confirmation
         original_text = message.get("text", "")
@@ -541,6 +568,27 @@ class TripBot:
             routes_summary=routes_summary,
             history=self._get_history_text(chat_id),
         )
+
+        # Inject pending proposal context so the user can modify it naturally
+        pending = self._pending.get(chat_id)
+        if pending and pending.get("action") == "add":
+            from src.utils.airports import route_name as _rn
+            pending_desc = (
+                f"\n\nPENDING ROUTE PROPOSAL (awaiting confirmation):\n"
+                f"- Route: {_rn(pending['origin'], pending['destination'])}\n"
+                f"- Dates: {pending.get('earliest_departure', '?')} to {pending.get('latest_return', '?')}\n"
+                f"- Passengers: {pending.get('passengers', 2)}\n"
+                f"- Max stops: {pending.get('max_stops', 1)}\n"
+                f"- Duration type: {pending.get('trip_duration_type', 'N/A')}\n"
+                f"- Duration days: {pending.get('trip_duration_days', 'N/A')}\n"
+                f"\nIf the user wants to change something about this pending proposal "
+                f"(dates, passengers, destination, stops, etc.), return intent \"modify_pending\" with "
+                f"parameters containing the FULL updated proposal fields (origin, destination, "
+                f"earliest_departure, latest_return, passengers, max_stops, notes, "
+                f"trip_duration_type, trip_duration_days, preferred_departure_days, preferred_return_days). "
+                f"Merge the user's changes with the existing values above."
+            )
+            system_prompt += pending_desc
 
         try:
             ai_client = anthropic.AsyncAnthropic(api_key=self._anthropic_key)
@@ -617,9 +665,13 @@ class TripBot:
             )
             if notes:
                 msg += f"\n📝 {notes}"
-            msg += "\n\nReply /yes or /no"
+            reply_markup = {"inline_keyboard": [[
+                {"text": "Confirm ✅", "callback_data": "confirm_route:_"},
+                {"text": "Edit ✏️", "callback_data": "edit_route:_"},
+                {"text": "Cancel ❌", "callback_data": "cancel_route:_"},
+            ]]}
             self._add_history(chat_id, "assistant", msg)
-            await self._send(client, chat_id, msg)
+            await self._send(client, chat_id, msg, reply_markup=reply_markup)
 
         elif intent == "modify_trip":
             route_id = params.get("route_id")
@@ -650,10 +702,13 @@ class TripBot:
             msg = (
                 f"Modify *{route_name(r.origin, r.destination)}*:\n"
                 + "\n".join(change_lines)
-                + "\n\nReply /yes or /no"
             )
+            reply_markup = {"inline_keyboard": [[
+                {"text": "Confirm ✅", "callback_data": "confirm_modify:_"},
+                {"text": "Cancel ❌", "callback_data": "cancel_modify:_"},
+            ]]}
             self._add_history(chat_id, "assistant", msg)
-            await self._send(client, chat_id, msg)
+            await self._send(client, chat_id, msg, reply_markup=reply_markup)
 
         elif intent == "remove_trip":
             route_id = params.get("route_id")
@@ -669,9 +724,13 @@ class TripBot:
                 return
             r = matching[0]
             self._pending[chat_id] = {"action": "remove", "route_id": r.route_id, "user_id": user_id}
-            msg = f"Remove *{route_name(r.origin, r.destination)}*? Reply /yes or /no"
+            msg = f"Remove *{route_name(r.origin, r.destination)}*?"
+            reply_markup = {"inline_keyboard": [[
+                {"text": "Confirm ✅", "callback_data": "confirm_remove:_"},
+                {"text": "Cancel ❌", "callback_data": "cancel_remove:_"},
+            ]]}
             self._add_history(chat_id, "assistant", msg)
-            await self._send(client, chat_id, msg)
+            await self._send(client, chat_id, msg, reply_markup=reply_markup)
 
         elif intent == "query_trips":
             await self._handle_trips(chat_id, user_id, client)
@@ -680,12 +739,45 @@ class TripBot:
             route_id = params.get("route_id")
             await self._handle_price_query(route_id, routes, chat_id, client)
 
+        elif intent == "modify_pending":
+            old_pending = self._pending.get(chat_id)
+            if not old_pending or old_pending.get("action") != "add":
+                self._add_history(chat_id, "assistant", response_text or "No pending proposal to modify.")
+                await self._send(client, chat_id, response_text or "No pending proposal to modify.")
+                return
+            # Update pending with new parameters
+            for key in ("origin", "destination", "earliest_departure", "latest_return",
+                        "passengers", "max_stops", "notes", "trip_duration_type",
+                        "trip_duration_days", "preferred_departure_days", "preferred_return_days"):
+                if key in params:
+                    old_pending[key] = params[key]
+            # Re-present proposal with inline buttons
+            stops_str = "direct only" if old_pending.get("max_stops", 1) == 0 else f"max {old_pending.get('max_stops', 1)} stop{'s' if old_pending.get('max_stops', 1) != 1 else ''}"
+            date_display = _format_date_display(old_pending)
+            msg = (
+                f"Updated proposal: *{route_name(old_pending['origin'], old_pending['destination'])}*\n"
+                f"📅 {date_display}\n"
+                f"👥 {old_pending.get('passengers', 2)} pax | {stops_str}"
+            )
+            notes = old_pending.get("notes")
+            if notes:
+                msg += f"\n📝 {notes}"
+            reply_markup = {"inline_keyboard": [[
+                {"text": "Confirm ✅", "callback_data": "confirm_route:_"},
+                {"text": "Edit ✏️", "callback_data": "edit_route:_"},
+                {"text": "Cancel ❌", "callback_data": "cancel_route:_"},
+            ]]}
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg, reply_markup=reply_markup)
+
     async def _handle_price_query(
         self, route_id: str | None, routes: list[Route], chat_id: str, client: httpx.AsyncClient
     ) -> None:
-        from src.utils.airports import route_name
+        from src.utils.airports import route_name, airport_name
 
         loop = asyncio.get_running_loop()
+        user = self._get_user(chat_id)
+        user_id = user["user_id"] if user else None
 
         if route_id:
             target_routes = [r for r in routes if r.route_id == route_id]
@@ -698,29 +790,113 @@ class TripBot:
             await self._send(client, chat_id, msg)
             return
 
-        lines = []
         for r in target_routes:
             name = route_name(r.origin, r.destination)
             cheapest = await loop.run_in_executor(None, self._db.get_cheapest_recent_snapshot, r.route_id)
             history = await loop.run_in_executor(None, self._db.get_price_history, r.route_id)
 
-            if cheapest and cheapest.lowest_price:
-                price = f"€{float(cheapest.lowest_price):,.0f}"
-                line = f"*{name}*: {price}/pp"
-                if history and history.get("avg_price"):
-                    avg = history["avg_price"]
-                    diff = float(cheapest.lowest_price) - avg
-                    if diff < 0:
-                        line += f" (€{abs(diff):,.0f} below avg)"
-                    else:
-                        line += f" (€{diff:,.0f} above avg)"
-            else:
-                line = f"*{name}*: no prices yet"
-            lines.append(line)
+            if not cheapest or not cheapest.lowest_price:
+                msg = f"*{name}*: no prices yet"
+                self._add_history(chat_id, "assistant", msg)
+                await self._send(client, chat_id, msg)
+                continue
 
-        msg = "\n".join(lines)
-        self._add_history(chat_id, "assistant", msg)
-        await self._send(client, chat_id, msg)
+            # Fix /pp bug: divide total price by passengers
+            total_price = float(cheapest.lowest_price)
+            price_pp = total_price / r.passengers if r.passengers > 1 else total_price
+
+            lines = [f"💰 *{name}*"]
+            lines.append(f"*€{price_pp:,.0f}/pp* ({r.passengers} pax)")
+
+            # Cost breakdown with transport
+            transport = await loop.run_in_executor(
+                None, self._db.get_airport_transport, r.origin, user_id,
+            )
+            t_cost = transport["transport_cost_eur"] if transport else 0
+            p_cost = (transport or {}).get("parking_cost_eur") or 0
+            t_mode = (transport or {}).get("transport_mode", "transport")
+            trip_total = total_price + t_cost + p_cost
+            cost_parts = [f"€{total_price:,.0f} flights"]
+            if t_cost:
+                cost_parts.append(f"€{t_cost:,.0f} {t_mode.lower()}")
+            if p_cost:
+                cost_parts.append(f"€{p_cost:,.0f} parking")
+            lines.append(f"{' + '.join(cost_parts)} = *€{trip_total:,.0f} total*")
+
+            # Dates and airline
+            if cheapest.outbound_date and cheapest.return_date:
+                out = cheapest.outbound_date
+                ret = cheapest.return_date
+                if hasattr(out, "strftime"):
+                    out = out.strftime("%b %d")
+                if hasattr(ret, "strftime"):
+                    ret = ret.strftime("%b %d")
+                lines.append(f"📅 {out} → {ret}")
+
+            if cheapest.best_flight:
+                flights = cheapest.best_flight.get("flights", [])
+                if flights:
+                    airline = flights[0].get("airline", "")
+                    if airline:
+                        lines.append(f"✈️ {airline}")
+
+            # Trend vs average
+            if history and history.get("avg_price"):
+                avg = float(history["avg_price"])
+                diff = total_price - avg
+                if diff < 0:
+                    lines.append(f"📉 €{abs(diff):,.0f} below average (avg €{avg:,.0f})")
+                elif diff > 0:
+                    lines.append(f"📈 €{diff:,.0f} above average (avg €{avg:,.0f})")
+                else:
+                    lines.append(f"➡️ At average (€{avg:,.0f})")
+
+            if cheapest.price_level:
+                level_icon = {"low": "📉", "typical": "➡️", "high": "📈"}.get(cheapest.price_level, "")
+                lines.append(f"{level_icon} Price level: {cheapest.price_level}")
+
+            # Nearby alternatives from DB (no new API calls)
+            if hasattr(self._db, "get_nearby_snapshots"):
+                nearby_snaps = await loop.run_in_executor(
+                    None, self._db.get_nearby_snapshots, r.route_id, r.origin,
+                )
+                alts_shown = 0
+                for alt in nearby_snaps:
+                    alt_price = float(alt["lowest_price"])
+                    alt_pp = alt_price / r.passengers if r.passengers > 1 else alt_price
+                    if alt_pp < price_pp:
+                        if alts_shown == 0:
+                            lines.append("")
+                            lines.append("*Nearby alternatives:*")
+                        alt_code = alt["airport_code"].upper()
+                        alt_transport = await loop.run_in_executor(
+                            None, self._db.get_airport_transport, alt_code, user_id,
+                        )
+                        at_cost = alt_transport["transport_cost_eur"] if alt_transport else 0
+                        ap_cost = (alt_transport or {}).get("parking_cost_eur") or 0
+                        at_mode = (alt_transport or {}).get("transport_mode", "transport")
+                        alt_total = alt_price + at_cost + ap_cost
+                        savings = trip_total - alt_total
+                        if savings > 0:
+                            icon = "🟢" if alts_shown == 0 else "🟡"
+                            alt_parts = [f"€{alt_price:,.0f} flights"]
+                            if at_cost:
+                                alt_parts.append(f"€{at_cost:,.0f} {at_mode.lower()}")
+                            if ap_cost:
+                                alt_parts.append(f"€{ap_cost:,.0f} parking")
+                            lines.append(
+                                f"{icon} *{airport_name(alt_code)}*: €{alt_pp:,.0f}/pp (save €{savings:,.0f})"
+                            )
+                            lines.append(
+                                f"    {' + '.join(alt_parts)} = *€{alt_total:,.0f} total*"
+                            )
+                            alts_shown += 1
+                            if alts_shown >= 3:
+                                break
+
+            msg = "\n".join(lines)
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg)
 
     async def _handle_help(self, chat_id: str, client: httpx.AsyncClient) -> None:
         await self._send(client, chat_id, (
@@ -731,11 +907,13 @@ class TripBot:
             "  \"Push Mexico to February\"\n"
             "  \"How's Japan looking?\"\n"
             "  \"When's the best time to fly to Bali?\"\n\n"
+            "When I propose a route, use the inline buttons to confirm, "
+            "edit, or cancel. You can also reply with changes in plain text.\n\n"
             "*Shortcuts:*\n"
             "`/trip Tokyo, Oct 18 - Nov 8, 2 people` — add a route\n"
             "`/trips` — list your routes with prices\n"
             "`/remove Tokyo` — stop monitoring a route\n"
-            "`/yes` `/no` — confirm or cancel pending actions"
+            "`/yes` `/no` — confirm or cancel (also works as fallback)"
         ), parse_mode="Markdown")
 
     async def _handle_trip(
@@ -815,8 +993,12 @@ class TripBot:
         )
         if notes:
             msg += f"\n📝 {notes}"
-        msg += "\n\nReply /yes or /no"
-        await self._send(client, chat_id, msg)
+        reply_markup = {"inline_keyboard": [[
+            {"text": "Confirm ✅", "callback_data": "confirm_route:_"},
+            {"text": "Edit ✏️", "callback_data": "edit_route:_"},
+            {"text": "Cancel ❌", "callback_data": "cancel_route:_"},
+        ]]}
+        await self._send(client, chat_id, msg, reply_markup=reply_markup)
 
     async def _handle_clarification_reply(self, reply: str, chat_id: str, client: httpx.AsyncClient) -> None:
         """User replied to a clarification question — re-parse with the specific city."""
@@ -939,7 +1121,11 @@ class TripBot:
 
         r = match[0]
         self._pending[chat_id] = {"action": "remove", "route_id": r.route_id, "user_id": user_id}
-        await self._send(client, chat_id, f"Remove *{route_name(r.origin, r.destination)}*? Reply /yes or /no")
+        reply_markup = {"inline_keyboard": [[
+            {"text": "Confirm ✅", "callback_data": "confirm_remove:_"},
+            {"text": "Cancel ❌", "callback_data": "cancel_remove:_"},
+        ]]}
+        await self._send(client, chat_id, f"Remove *{route_name(r.origin, r.destination)}*?", reply_markup=reply_markup)
 
     async def _handle_yes(
         self, chat_id: str, user_id: str, home_airport: str, client: httpx.AsyncClient
@@ -977,6 +1163,9 @@ class TripBot:
                 await self._reload_callback()
 
             await self._send(client, chat_id, f"Route added: {route_name(route.origin, route.destination)}")
+
+            # Immediate price check
+            await self._immediate_price_check(route, uid, chat_id, client)
 
         elif pending["action"] == "remove":
             await loop.run_in_executor(None, self._db.deactivate_route, pending["route_id"])
@@ -1037,7 +1226,10 @@ class TripBot:
             logger.exception("Failed to parse route text")
             return None
 
-    async def _send(self, client: httpx.AsyncClient, chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
+    async def _send(
+        self, client: httpx.AsyncClient, chat_id: str, text: str,
+        parse_mode: str = "Markdown", reply_markup: dict | None = None,
+    ) -> None:
         url = f"{TELEGRAM_API}/bot{self._bot_token}/sendMessage"
         payload = {
             "chat_id": chat_id,
@@ -1045,8 +1237,195 @@ class TripBot:
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         try:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
         except Exception:
             logger.exception("Failed to send Telegram message")
+
+    async def _send_typing(self, client: httpx.AsyncClient, chat_id: str) -> None:
+        url = f"{TELEGRAM_API}/bot{self._bot_token}/sendChatAction"
+        try:
+            await client.post(url, json={"chat_id": chat_id, "action": "typing"})
+        except Exception:
+            pass
+
+    async def _immediate_price_check(
+        self, route: Route, user_id: str, chat_id: str, client: httpx.AsyncClient,
+    ) -> None:
+        if not self._serpapi_key:
+            return
+
+        from datetime import date as date_type
+        from src.apis.serpapi import SerpAPIClient, generate_date_windows
+        from src.analysis.nearby_airports import compare_airports
+        from src.utils.airports import route_name, airport_name
+
+        loop = asyncio.get_running_loop()
+
+        try:
+            await self._send_typing(client, chat_id)
+
+            # Determine date windows
+            earliest = route.earliest_departure
+            latest = route.latest_return
+            if isinstance(earliest, str) and earliest:
+                earliest = date_type.fromisoformat(earliest)
+            if isinstance(latest, str) and latest:
+                latest = date_type.fromisoformat(latest)
+            if not earliest or not latest:
+                return
+
+            duration = route.trip_duration_days or 14
+            windows = generate_date_windows(earliest, latest, duration, max_windows=2)
+            if not windows:
+                return
+
+            serp = SerpAPIClient(api_key=self._serpapi_key, currency="EUR")
+            try:
+                # Poll primary airport
+                out_date, ret_date = windows[0]
+                await self._send_typing(client, chat_id)
+                primary_result = await serp.search_flights(
+                    origin=route.origin,
+                    destination=route.destination,
+                    outbound_date=out_date,
+                    return_date=ret_date,
+                    passengers=route.passengers,
+                )
+
+                primary_price = primary_result.price_insights.get("lowest_price")
+                if not primary_price:
+                    all_flights = primary_result.best_flights + primary_result.other_flights
+                    prices = [f["price"] for f in all_flights if "price" in f]
+                    primary_price = min(prices) if prices else None
+
+                if not primary_price:
+                    await self._send(client, chat_id,
+                        "I'll check prices on the next poll cycle.")
+                    return
+
+                # Get transport info
+                primary_transport = await loop.run_in_executor(
+                    None, self._db.get_airport_transport, route.origin, user_id,
+                )
+                p_transport_cost = primary_transport["transport_cost_eur"] if primary_transport else 0
+                p_parking_cost = (primary_transport or {}).get("parking_cost_eur") or 0
+                p_mode = (primary_transport or {}).get("transport_mode", "transport")
+
+                price_pp = float(primary_price) / route.passengers if route.passengers > 1 else float(primary_price)
+                price_level = primary_result.price_insights.get("price_level", "")
+                typical_range = primary_result.price_insights.get("typical_price_range", [])
+
+                # Build primary cost breakdown
+                total = float(primary_price) + p_transport_cost + p_parking_cost
+                cost_parts = [f"€{float(primary_price):,.0f} flights"]
+                if p_transport_cost:
+                    cost_parts.append(f"€{p_transport_cost:,.0f} {p_mode.lower()}")
+                if p_parking_cost:
+                    cost_parts.append(f"€{p_parking_cost:,.0f} parking")
+
+                lines = [
+                    f"💰 *First price check — {route_name(route.origin, route.destination)}*",
+                    f"*€{price_pp:,.0f}/pp* from {airport_name(route.origin)}",
+                    f"{' + '.join(cost_parts)} = *€{total:,.0f} total*",
+                    f"📅 {out_date} → {ret_date}",
+                ]
+
+                if price_level:
+                    level_icon = {"low": "📉", "typical": "➡️", "high": "📈"}.get(price_level, "")
+                    lines.append(f"{level_icon} Price level: {price_level}")
+                if typical_range and len(typical_range) == 2:
+                    lines.append(f"Typical range: €{typical_range[0]:,.0f} – €{typical_range[1]:,.0f}")
+
+                # Best flight details
+                if primary_result.best_flights:
+                    bf = primary_result.best_flights[0]
+                    airline = ""
+                    legs = bf.get("flights", [])
+                    if legs:
+                        airline = legs[0].get("airline", "")
+                    if airline:
+                        lines.append(f"✈️ {airline}")
+
+                # Poll secondary airports
+                await self._send_typing(client, chat_id)
+                secondary_airports = await loop.run_in_executor(
+                    None, self._db.get_secondary_airports, user_id,
+                )
+
+                primary_for_compare = {
+                    "airport_code": route.origin,
+                    "fare_pp": price_pp,
+                    "transport_cost": p_transport_cost,
+                    "parking_cost": p_parking_cost,
+                    "transport_mode": p_mode,
+                }
+
+                secondary_results = []
+                for apt in secondary_airports[:4]:
+                    await self._send_typing(client, chat_id)
+                    try:
+                        sec_result = await serp.search_flights(
+                            origin=apt["airport_code"],
+                            destination=route.destination,
+                            outbound_date=out_date,
+                            return_date=ret_date,
+                            passengers=route.passengers,
+                        )
+                        sec_price = sec_result.price_insights.get("lowest_price")
+                        if not sec_price:
+                            sec_flights = sec_result.best_flights + sec_result.other_flights
+                            sec_prices = [f["price"] for f in sec_flights if "price" in f]
+                            sec_price = min(sec_prices) if sec_prices else None
+                        if sec_price:
+                            sec_pp = float(sec_price) / route.passengers if route.passengers > 1 else float(sec_price)
+                            secondary_results.append({
+                                "airport_code": apt["airport_code"],
+                                "fare_pp": sec_pp,
+                                "transport_cost": apt.get("transport_cost_eur", 0),
+                                "parking_cost": apt.get("parking_cost_eur"),
+                                "transport_mode": apt.get("transport_mode", ""),
+                                "transport_time_min": apt.get("transport_time_min", 0),
+                            })
+                    except Exception:
+                        logger.debug("Secondary airport %s check failed", apt["airport_code"])
+
+                alternatives = compare_airports(
+                    primary_for_compare, secondary_results, route.passengers,
+                )
+
+                if alternatives:
+                    lines.append("")
+                    lines.append("*Nearby alternatives:*")
+                    for i, alt in enumerate(alternatives[:3]):
+                        icon = "🟢" if i == 0 else "🟡"
+                        t_min = alt.get("transport_time_min", 0)
+                        hours = t_min / 60
+                        alt_fare_total = alt["fare_pp"] * route.passengers
+                        alt_parts = [f"€{alt_fare_total:,.0f} flights"]
+                        if alt["transport_cost"]:
+                            alt_parts.append(f"€{alt['transport_cost']:,.0f} {alt['transport_mode'].lower()}")
+                        if alt.get("parking_cost"):
+                            alt_parts.append(f"€{alt['parking_cost']:,.0f} parking")
+                        lines.append(
+                            f"{icon} *{alt['airport_name']}*: €{alt['fare_pp']:,.0f}/pp (save €{alt['savings']:,.0f})"
+                        )
+                        lines.append(
+                            f"    {' + '.join(alt_parts)} = *€{alt['net_cost']:,.0f} total*"
+                        )
+                        lines.append(
+                            f"    {alt['transport_mode']} {hours:.1f}h to airport"
+                        )
+
+                await self._send(client, chat_id, "\n".join(lines))
+
+            finally:
+                await serp.close()
+
+        except Exception:
+            logger.exception("Immediate price check failed")
+            await self._send(client, chat_id,
+                "I'll check prices on the next poll cycle.")
