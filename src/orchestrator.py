@@ -965,6 +965,17 @@ class Orchestrator:
             if not routes:
                 continue
 
+            # Only include routes with pending (undecided) deals
+            pending_routes = await loop.run_in_executor(
+                None, self.db.get_routes_with_pending_deals, user_id
+            )
+            if not pending_routes:
+                logger.info("No pending deals for user %s, skipping digest", user_id)
+                continue
+            routes = [r for r in routes if r.route_id in pending_routes]
+            if not routes:
+                continue
+
             since = datetime.now(UTC) - timedelta(days=1)
             summaries: list[dict] = []
 
@@ -1005,6 +1016,9 @@ class Orchestrator:
                 )
                 best = cheapest or latest
 
+                # Include alert price for price-change display
+                alert_price = pending_routes.get(route.route_id)
+
                 summary: dict = {
                     "origin": route.origin,
                     "destination": route.destination,
@@ -1014,6 +1028,7 @@ class Orchestrator:
                     "dates": f"{best.outbound_date} to {best.return_date}" if best and best.outbound_date else "",
                     "outbound_date": str(best.outbound_date) if best and best.outbound_date else "",
                     "return_date": str(best.return_date) if best and best.return_date else "",
+                    "alert_price": alert_price,
                 }
 
                 if watch_deals:

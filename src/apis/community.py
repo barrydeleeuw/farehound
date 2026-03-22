@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -234,6 +235,25 @@ class CommunityListener:
         await self._client.run_until_disconnected()
 
 
+def _parse_reddit_json(raw: str) -> list[dict]:
+    """Parse Reddit's JSON listing format into a list of entry dicts."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    children = data.get("data", {}).get("children", [])
+    entries = []
+    for child in children:
+        post = child.get("data", {})
+        entries.append({
+            "id": post.get("id", ""),
+            "title": post.get("title", ""),
+            "summary": post.get("selftext", ""),
+            "link": f"https://www.reddit.com{post['permalink']}" if post.get("permalink") else "",
+        })
+    return entries
+
+
 class RSSListener:
     """Polls RSS feeds for flight deals at a configurable interval."""
 
@@ -281,16 +301,27 @@ class RSSListener:
         now = monotonic()
         self._seen_ids = {k: v for k, v in self._seen_ids.items() if now - v < _MAX_AGE}
 
-        async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": "FareHound/1.0 (flight deal monitor)"}) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"}) as client:
             for feed_config in self.feeds:
                 if not feed_config.url:
                     continue
                 try:
                     resp = await client.get(feed_config.url)
                     resp.raise_for_status()
-                    parsed = feedparser.parse(resp.text)
 
-                    for entry in parsed.entries:
+                    # Reddit .json endpoints return their own format
+                    if feed_config.url and feed_config.url.endswith(".json"):
+                        entries = _parse_reddit_json(resp.text)
+                    else:
+                        parsed = feedparser.parse(resp.text)
+                        entries = [
+                            {"id": e.get("id") or e.get("link") or e.get("title", ""),
+                             "title": e.get("title", ""), "summary": e.get("summary", ""),
+                             "link": e.get("link")}
+                            for e in parsed.entries
+                        ]
+
+                    for entry in entries:
                         entry_id = entry.get("id") or entry.get("link") or entry.get("title", "")
                         if entry_id in self._seen_ids:
                             continue

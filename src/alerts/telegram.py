@@ -111,20 +111,17 @@ class TelegramNotifier:
             f"{emoji} *{label}* — {route}",
             f"*€{price_pp:,.0f}/pp* | {airline} | {dates}",
         ]
-        # Show primary airport total cost
+        # Always show full cost breakdown for primary airport
         primary_t = deal_info.get("primary_transport_cost", 0)
         primary_p = deal_info.get("primary_parking_cost", 0)
-        primary_mode = deal_info.get("primary_transport_mode", "")
+        primary_mode = deal_info.get("primary_transport_mode", "transport")
         primary_total = float(price) + primary_t + primary_p
-        if primary_t or primary_p:
-            cost_parts = [f"€{float(price):,.0f} flights"]
-            if primary_t:
-                cost_parts.append(f"€{primary_t:,.0f} {primary_mode.lower()}")
-            if primary_p:
-                cost_parts.append(f"€{primary_p:,.0f} parking")
-            lines.append(f"{' + '.join(cost_parts)} = *€{primary_total:,.0f} total*")
-        elif passengers > 1:
-            lines.append(f"Total: €{float(price):,.0f} for {passengers} passengers")
+        cost_parts = [f"€{float(price):,.0f} flights"]
+        if primary_t:
+            cost_parts.append(f"€{primary_t:,.0f} {primary_mode.lower()}")
+        if primary_p:
+            cost_parts.append(f"€{primary_p:,.0f} parking")
+        lines.append(f"{' + '.join(cost_parts)} = *€{primary_total:,.0f} total*")
         if reasoning:
             lines.append(f"_{reasoning}_")
 
@@ -142,17 +139,18 @@ class TelegramNotifier:
                 parking = alt.get("parking_cost") or 0
                 t_min = alt.get("transport_time_min", 0)
                 hours = t_min / 60
-                passengers = deal_info.get("passengers", 2) if hasattr(deal_info, 'get') else 2
-                fare_total = fare * passengers
-                transport_parts = [f"€{t_cost:,.0f} transport"]
+                alt_passengers = deal_info.get("passengers", 2)
+                fare_total = fare * alt_passengers
+                alt_parts = [f"€{fare_total:,.0f} flights"]
+                if t_cost:
+                    alt_parts.append(f"€{t_cost:,.0f} {mode.lower()}")
                 if parking:
-                    transport_parts.append(f"€{parking:,.0f} parking")
-                transport_total = t_cost + parking
+                    alt_parts.append(f"€{parking:,.0f} parking")
                 lines.append(
                     f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f})"
                 )
                 lines.append(
-                    f"    Flights: €{fare_total:,.0f} + {' + '.join(transport_parts)} = *€{net:,.0f} total*"
+                    f"    {' + '.join(alt_parts)} = *€{net:,.0f} total*"
                 )
                 lines.append(
                     f"    {mode} {hours:.1f}h to airport"
@@ -234,7 +232,9 @@ class TelegramNotifier:
 
         # Send header
         await self._send_message(
-            chat_id, f"📊 *FareHound Daily* — {len(routes_summary)} route(s)"
+            chat_id,
+            f"📊 *FareHound Daily* — {len(routes_summary)} route(s)\n"
+            "You haven't decided on these yet:",
         )
 
         # Send one message per route with full details and Search button
@@ -256,7 +256,25 @@ class TelegramNotifier:
                 lines.append(f"📅 {dates}")
             if lowest is not None:
                 price_pp = float(lowest) / passengers if passengers > 1 else float(lowest)
-                lines.append(f"💰 *€{price_pp:,.0f}/pp* (€{float(lowest):,.0f} total for {passengers} pax)")
+                lines.append(f"💰 *€{price_pp:,.0f}/pp*")
+                # Always show full cost breakdown
+                d_transport = route_data.get("primary_transport_cost", 0)
+                d_parking = route_data.get("primary_parking_cost", 0)
+                d_mode = route_data.get("primary_transport_mode", "transport")
+                d_total = float(lowest) + d_transport + d_parking
+                d_parts = [f"€{float(lowest):,.0f} flights"]
+                if d_transport:
+                    d_parts.append(f"€{d_transport:,.0f} {d_mode.lower()}")
+                if d_parking:
+                    d_parts.append(f"€{d_parking:,.0f} parking")
+                lines.append(f"{' + '.join(d_parts)} = *€{d_total:,.0f} total*")
+                # Show price change since alert
+                alert_price = route_data.get("alert_price")
+                if alert_price is not None:
+                    diff = float(lowest) - float(alert_price)
+                    if abs(diff) >= 1:
+                        direction = "📉" if diff < 0 else "📈"
+                        lines.append(f"{direction} {'Dropped' if diff < 0 else 'Rose'} €{abs(diff):,.0f} since alert")
             else:
                 lines.append("⏳ No price data yet")
 
@@ -276,14 +294,21 @@ class TelegramNotifier:
                     parking = alt.get("parking_cost") or 0
                     t_min = alt.get("transport_time_min", 0)
                     hours = t_min / 60
-                    lines.append(
-                        f"{icon} {name}: €{fare:,.0f}/pp → €{net:,.0f} net (save €{savings:,.0f})"
-                    )
-                    cost_parts = [f"€{t_cost:,.0f} fuel/transport"]
+                    alt_pax = route_data.get("passengers", 2)
+                    alt_fare_total = fare * alt_pax
+                    alt_parts = [f"€{alt_fare_total:,.0f} flights"]
+                    if t_cost:
+                        alt_parts.append(f"€{t_cost:,.0f} {mode.lower()}")
                     if parking:
-                        cost_parts.append(f"€{parking:,.0f} parking")
+                        alt_parts.append(f"€{parking:,.0f} parking")
                     lines.append(
-                        f"    {mode} {hours:.1f}h | {' + '.join(cost_parts)}"
+                        f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f})"
+                    )
+                    lines.append(
+                        f"    {' + '.join(alt_parts)} = *€{net:,.0f} total*"
+                    )
+                    lines.append(
+                        f"    {mode} {hours:.1f}h to airport"
                     )
 
             search_url = self._google_flights_url({

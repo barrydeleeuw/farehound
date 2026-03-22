@@ -39,17 +39,6 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] `/savings` command shows total: "FareHound has found €2,400 in potential savings across your trips"
   - [ ] Data available for future contribution/billing features
 
-### [ITEM-003] Smart daily digest — only nudge undecided trips
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** Replace daily dump with a purposeful follow-up. Only send digest for deals the user saw but didn't act on.
-- **Acceptance Criteria:**
-  - [ ] Digest only includes routes with pending (unacted) deal alerts
-  - [ ] Message explains why: "You haven't decided on these yet"
-  - [ ] Shows if price changed since the alert was sent
-  - [ ] No digest sent if user has acted on all deals
 
 ## Proposed
 
@@ -67,12 +56,57 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** None
 - **Summary:** Show both cheapest and preferred airline: "Cheapest: €240 (Transavia) | KLM: €289 (+€49)". Helps users make informed choices.
 
-### [ITEM-006] Gmail deal pipeline (JFC + Secret Flying)
+### [ITEM-006] Gmail deal pipeline (Secret Flying + Jack's Flight Club)
 - **Status:** Proposed
 - **Priority:** P2 (Medium)
 - **Effort:** L
 - **Dependencies:** [ITEM-001]
-- **Summary:** Ingest JFC/SF deal emails via Google Apps Script webhook. Error fares are where the biggest savings happen — directly serving our mission.
+- **Summary:** Ingest deal emails from Secret Flying (and later Jack's Flight Club) via Google Apps Script → webhook. Parse structured deal data, match against user-configured trips, and notify on relevant cheap fares. Error fares and flash sales are where the biggest savings happen — directly serving our mission.
+- **Email analysis (Secret Flying):**
+  - Sender: `my@deals.secretflying.com` — filter by this address
+  - Two deal formats observed:
+    1. **Single-origin** — e.g. "Non-stop from Amsterdam to Curacao for €191 one-way". One departure city, one destination, list of available dates.
+    2. **Multi-origin** — e.g. "Business Class from European cities to Johannesburg from €1419 roundtrip". Multiple departure cities, each with its own price range and date pairs.
+  - Structured fields in every email: DEPART (city/country), ARRIVE (city/country), DATES (month + ordinal day lists), STOPS (non-stop or layover city), AIRLINES (carrier name)
+  - Price embedded in subject line and body; can be one-way or roundtrip with ranges per origin
+  - Cabin class sometimes present (Business Class, lie-flat seats)
+  - Dates are human-readable ordinals ("3rd, 5th, 6th May") — need parsing to actual dates
+- **Pipeline design:**
+  1. Google Apps Script filters inbox for sender `deals.secretflying.com`, extracts HTML body
+  2. POST to FareHound webhook endpoint with raw email content
+  3. Parser extracts: origins (city + country → IATA code), destination (→ IATA code), price (amount + currency + one-way/roundtrip), dates, airline, stops, cabin class
+  4. Matcher checks parsed origins/destinations against all users' configured trips (including nearby airports)
+  5. On match: send Telegram alert with deal details and "GO TO DEAL" link
+- **Acceptance Criteria:**
+  - [ ] Google Apps Script deployed that forwards Secret Flying emails to FareHound webhook
+  - [ ] Parser handles both single-origin and multi-origin email formats
+  - [ ] City names resolved to IATA airport codes (Amsterdam → AMS, Brussels → BRU, etc.)
+  - [ ] Deals matched against user trips — origin airport (or nearby) + destination match
+  - [ ] Telegram notification sent with: route, price, dates, airline, cabin class, deal link
+  - [ ] Duplicate deals not re-notified (dedup by route + price + date range)
+  - [ ] Architecture extensible for Jack's Flight Club emails (different format, same pipeline)
+
+### [ITEM-019] Airline promo email ingestion
+- **Status:** Proposed
+- **Priority:** P2 (Medium)
+- **Effort:** L
+- **Dependencies:** [ITEM-006]
+- **Summary:** Create a dedicated FareHound email address and subscribe it to promotional mailing lists from airlines worldwide. This inbox becomes a continuous source of fare sales, flash deals, and route launches — directly from the airlines themselves. Reuses the email parsing + matching pipeline from ITEM-006 (Secret Flying / JFC), but with per-airline parsers since each airline's email format differs.
+- **Design considerations:**
+  - Dedicated address (e.g. `deals@farehound.app`) subscribed to airline promo lists globally
+  - Each airline has its own email template — need a parser-per-airline or a generic LLM-based extractor that pulls origin, destination, price, dates, cabin class, and booking link from any promo email
+  - Volume will be high (dozens of airlines × multiple emails/week) — needs dedup, rate limiting, and relevance filtering before hitting the matcher
+  - Matcher reuses the same logic as ITEM-006: check parsed routes against user-configured trips (including nearby airports), notify via Telegram on match
+  - Some airline promos are region-targeted (e.g. "from Amsterdam" or "from Europe") — parser must handle both specific-origin and regional deals
+  - Consider a managed email service (e.g. Mailgun inbound routing, Google Workspace) to programmatically process incoming mail rather than polling IMAP
+- **Acceptance Criteria:**
+  - [ ] Dedicated email address created and subscribed to major airline promo lists
+  - [ ] Inbound email pipeline processes incoming promos automatically
+  - [ ] Parser extracts structured deal data (routes, prices, dates, airline, cabin class) from airline emails
+  - [ ] Deals matched against user trips and Telegram notifications sent on match
+  - [ ] Deduplication prevents re-notifying the same promo deal
+  - [ ] At least 10 major airlines subscribed at launch (KLM, Transavia, Ryanair, easyJet, Vueling, Turkish, Etihad, Emirates, Lufthansa, TAP)
+- **Review notes:** High volume source — this could generate a lot of noise. The LLM-based parser approach (vs. regex per airline) is probably the only scalable option given the variety of email formats. Depends on ITEM-006's pipeline being in place first.
 
 ### [ITEM-007] Voluntary contribution model ("Pay what it saved you")
 - **Status:** Proposed
@@ -97,12 +131,13 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** Phase A validation
 - **Summary:** Move from HA to cloud. Only if Phase A proves demand.
 
-### [ITEM-010] Fix Reddit RSS 403s
-- **Status:** Ready
+### [ITEM-018] E2E Telegram bot test harness
+- **Status:** Proposed
 - **Priority:** P2 (Medium)
-- **Effort:** S
+- **Effort:** M
 - **Dependencies:** None
-- **Summary:** 3 of 7 Reddit RSS feeds return 403. Fix headers or replace with working alternatives.
+- **Summary:** Telethon-based integration tests that connect as a test user and walk through bot flows (onboarding, trip creation, deal alerts, booking follow-up). Verifies message content and conversation state against expectations. Requires a test Telegram account and running bot instance.
+
 
 ### [ITEM-011] Weekend/short trip date windowing
 - **Status:** Ready
@@ -118,19 +153,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** [ITEM-001]
 - **Summary:** "Japan" monitors NRT + KIX + NGO as separate routes under one trip. User says "all of them" → creates routes for each.
 
-### [ITEM-013] Booking follow-up confirmation
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** 3 days after "Book Now", ask "Did you actually book?" Built but needs verification on HA.
 
-### [ITEM-014] Clean up HA add-on packaging
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** farehound/src/ is an exact copy of src/ causing sync issues. Dockerfile should COPY from root src/ directly. Also remove HA notification code (homeassistant.py), HA sensor updates, and Lovelace card. Telegram is the sole interface.
 
 ### [ITEM-015] Adaptive polling frequency
 - **Status:** Proposed
@@ -139,12 +162,6 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** [ITEM-001]
 - **Summary:** Poll more when departure < 6 weeks (4h), less when > 4 months (48h). Currently fixed at 24h.
 
-### [ITEM-016] Transparent cost breakdown in alerts
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** All prices pp first. Nearby alternatives show: "Flights €1,400 + €50 transport + €120 parking = €1,570 total". Primary airport costs also shown.
 
 ### [ITEM-017] SerpAPI response cache for local testing
 - **Status:** Done
@@ -166,6 +183,9 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-D05] Multi-user support (v2.0)
 - **Status:** Done — Users table, shared polling, Telegram onboarding, SerpAPI cache.
+
+### [ITEM-D06] Alert quality & cleanup (v2.1)
+- **Status:** Done — Smart daily digest (only undecided trips), transparent cost breakdown in alerts, booking follow-up verified, Reddit RSS 403s fixed (JSON API), HA dead code removed (homeassistant.py, farehound/src/, Lovelace card).
 
 ## Parked
 

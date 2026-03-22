@@ -498,6 +498,29 @@ class Database:
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+    def get_routes_with_pending_deals(self, user_id: str | None = None) -> dict[str, float | None]:
+        """Return route_ids where deals exist with alert_sent=1 and feedback IS NULL.
+
+        Returns dict of route_id -> snapshot price at time of alert (for price change display).
+        """
+        params: list = []
+        sql = """
+            SELECT d.route_id, ps.lowest_price
+            FROM deals d
+            LEFT JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
+            WHERE d.alert_sent = 1
+              AND d.feedback IS NULL
+        """
+        sql += _user_filter(user_id, params)
+        sql += " ORDER BY d.created_at DESC"
+        cursor = self._conn.execute(sql, params)
+        result: dict[str, float | None] = {}
+        for row in cursor.fetchall():
+            route_id = row[0]
+            if route_id not in result:
+                result[route_id] = float(row[1]) if row[1] is not None else None
+        return result
+
     def get_recent_feedback(self, limit: int = 20) -> list[dict]:
         cursor = self._conn.execute(
             """

@@ -15,7 +15,6 @@ from src.config import (
     AnthropicConfig,
     TravellerConfig,
     Route,
-    AlertConfig,
     ScoringConfig,
     CommunityFeedConfig,
     TelegramConfig,
@@ -111,26 +110,6 @@ def test_route_from_dict_full():
     assert r.preferred_airlines == ["KLM", "TK"]
 
 
-# --- AlertConfig ---
-
-def test_alert_config_from_dict():
-    cfg = AlertConfig.from_dict({
-        "homeassistant": {
-            "notify_service": "notify.phone",
-            "base_url_env": "HA_URL",
-            "token_env": "HA_TOKEN",
-        }
-    })
-    assert cfg.notify_service == "notify.phone"
-    assert cfg.base_url_env == "HA_URL"
-
-
-def test_alert_config_base_url_none():
-    cfg = AlertConfig(notify_service="ns")
-    assert cfg.base_url is None
-    assert cfg.token is None
-
-
 # --- ScoringConfig ---
 
 def test_scoring_config_defaults():
@@ -204,7 +183,6 @@ def test_validate_no_routes_raises():
         anthropic=AnthropicConfig(api_key_env="K"),
         traveller=TravellerConfig(name="T"),
         routes=[],
-        alerts=AlertConfig(notify_service="ns"),
         scoring=ScoringConfig(),
         community_feeds=[],
     )
@@ -218,7 +196,6 @@ def test_validate_missing_origin_raises():
         anthropic=AnthropicConfig(api_key_env="K"),
         traveller=TravellerConfig(name="T"),
         routes=[Route(id="r1", origin="", destination="NRT")],
-        alerts=AlertConfig(notify_service="ns"),
         scoring=ScoringConfig(),
         community_feeds=[],
     )
@@ -232,7 +209,6 @@ def test_validate_zero_passengers_raises():
         anthropic=AnthropicConfig(api_key_env="K"),
         traveller=TravellerConfig(name="T"),
         routes=[Route(id="r1", origin="AMS", destination="NRT", passengers=0)],
-        alerts=AlertConfig(notify_service="ns"),
         scoring=ScoringConfig(),
         community_feeds=[],
     )
@@ -252,7 +228,6 @@ def test_translate_ha_options_basic():
     result = _translate_ha_options(opts)
     assert result["traveller"]["name"] == "Bob"
     assert result["traveller"]["home_airport"] == "LHR"
-    assert result["alerts"]["homeassistant"]["notify_service"] == "notify.bob"
     assert len(result["routes"]) == 1
 
 

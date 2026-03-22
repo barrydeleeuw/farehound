@@ -40,12 +40,6 @@ routes:
     passengers: 2
     notes: "Istanbul — flexible timing"
 
-alerts:
-  homeassistant:
-    notify_service: notify.mobile_app_barry_phone
-    base_url_env: HA_BASE_URL
-    token_env: HA_LONG_LIVED_TOKEN
-
 scoring:
   alert_threshold: 0.75
   watch_threshold: 0.50
@@ -68,19 +62,19 @@ community_feeds:
     filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
   - type: rss
     channel: "r/cheapflights"
-    url: "https://www.reddit.com/r/cheapflights/new/.rss"
+    url: "https://www.reddit.com/r/cheapflights/new.json"
     filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
   - type: rss
     channel: "r/flights"
-    url: "https://www.reddit.com/r/flights/new/.rss"
+    url: "https://www.reddit.com/r/flights/new.json"
     filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
   - type: rss
     channel: "r/TravelHacking"
-    url: "https://www.reddit.com/r/TravelHacking/new/.rss"
+    url: "https://www.reddit.com/r/TravelHacking/new.json"
     filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
   - type: rss
     channel: "r/Shoestring"
-    url: "https://www.reddit.com/r/Shoestring/new/.rss"
+    url: "https://www.reddit.com/r/Shoestring/new.json"
     filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
   # Telegram channels — real-time via Telethon
   - type: telegram_channel

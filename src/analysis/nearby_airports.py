@@ -9,8 +9,8 @@ def calculate_net_cost(
     transport_cost: float,
     parking_cost: float | None,
 ) -> float:
-    """Total trip cost: fare x passengers + transport return + parking."""
-    return (fare_pp * passengers) + transport_cost + (parking_cost or 0)
+    """Total trip cost: fare x passengers + transport round-trip + parking."""
+    return (fare_pp * passengers) + (transport_cost * 2) + (parking_cost or 0)
 
 
 def compare_airports(

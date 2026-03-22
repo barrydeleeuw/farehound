@@ -98,30 +98,6 @@ class Route:
 
 
 @dataclass
-class AlertConfig:
-    notify_service: str
-    base_url_env: str | None = None
-    token_env: str | None = None
-
-    @classmethod
-    def from_dict(cls, d: dict) -> AlertConfig:
-        ha = d.get("homeassistant", {})
-        return cls(
-            notify_service=ha["notify_service"],
-            base_url_env=ha.get("base_url_env"),
-            token_env=ha.get("token_env"),
-        )
-
-    @property
-    def base_url(self) -> str | None:
-        return _resolve_env(self.base_url_env) if self.base_url_env else None
-
-    @property
-    def token(self) -> str | None:
-        return _resolve_env(self.token_env) if self.token_env else None
-
-
-@dataclass
 class ScoringConfig:
     alert_threshold: float = 0.75
     watch_threshold: float = 0.50
@@ -208,7 +184,6 @@ class AppConfig:
     anthropic: AnthropicConfig
     traveller: TravellerConfig
     routes: list[Route]
-    alerts: AlertConfig
     scoring: ScoringConfig
     community_feeds: list[CommunityFeedConfig]
     telegram: TelegramConfig | None = None
@@ -222,7 +197,6 @@ class AppConfig:
             anthropic=AnthropicConfig.from_dict(d["anthropic"]),
             traveller=TravellerConfig.from_dict(d["traveller"]),
             routes=[Route.from_dict(r) for r in d.get("routes", [])],
-            alerts=AlertConfig.from_dict(d["alerts"]),
             scoring=ScoringConfig.from_dict(d.get("scoring", {})),
             community_feeds=[
                 CommunityFeedConfig.from_dict(f)
@@ -271,11 +245,6 @@ def _translate_ha_options(opts: dict) -> dict:
         "traveller": {
             "name": opts.get("traveller_name", "Traveller"),
             "home_airport": opts.get("home_airport", "AMS"),
-        },
-        "alerts": {
-            "homeassistant": {
-                "notify_service": opts.get("ha_notify_service", "notify.mobile_app_phone"),
-            },
         },
         "scoring": {
             "alert_threshold": opts.get("alert_threshold", 0.75),
