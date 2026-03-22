@@ -281,8 +281,8 @@ class TestCostBreakdown:
             payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
             text = payload["text"]
             assert "€970 flights" in text
-            assert "€24 train" in text
-            assert "€994 total" in text
+            assert "€48 train" in text
+            assert "€1,018 total" in text
 
     @pytest.mark.asyncio
     async def test_nearby_alternative_breakdown_format(self, notifier):
@@ -297,7 +297,7 @@ class TestCostBreakdown:
                     "airport_code": "BRU",
                     "airport_name": "Brussels",
                     "fare_pp": 1600.0,
-                    "net_cost": 3270.0,
+                    "net_cost": 3340.0,
                     "savings": 610.0,
                     "transport_mode": "Thalys",
                     "transport_cost": 70.0,
@@ -317,8 +317,8 @@ class TestCostBreakdown:
             assert "save €610" in text
             # Full breakdown line
             assert "€3,200 flights" in text
-            assert "€70 thalys" in text
-            assert "€3,270 total" in text
+            assert "€140 thalys" in text
+            assert "€3,340 total" in text
 
 
 # ────────────────────────────────────────────────────────

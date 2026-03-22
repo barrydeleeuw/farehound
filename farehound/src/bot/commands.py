@@ -448,6 +448,22 @@ class TripBot:
 
     # --- Callbacks ---
 
+    async def _edit_remove_buttons(
+        self, client: httpx.AsyncClient, chat_id: str, message_id: int, message: dict, status: str,
+    ) -> None:
+        original_text = message.get("text", "")
+        edit_url = f"{TELEGRAM_API}/bot{self._bot_token}/editMessageText"
+        try:
+            await client.post(edit_url, json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": original_text + f"\n\n{status}",
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+            })
+        except Exception:
+            logger.exception("Failed to edit message to remove buttons")
+
     async def _answer_callback(
         self, client: httpx.AsyncClient, callback_id: str, text: str,
     ) -> None:
@@ -469,9 +485,13 @@ class TripBot:
 
         chat_id = str(message.get("chat", {}).get("id", ""))
 
+        message_id = message.get("message_id")
+
         # Route confirmation callbacks
         if action in ("confirm_route", "confirm_modify", "confirm_remove"):
             await self._answer_callback(client, callback_id, "Confirmed!")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Confirmed")
             if chat_id:
                 user = self._get_user(chat_id)
                 if user:
@@ -482,11 +502,15 @@ class TripBot:
             return
         if action == "edit_route":
             await self._answer_callback(client, callback_id, "Tell me what to change")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "✏️ Editing")
             if chat_id:
                 await self._send(client, chat_id, "What would you like to change? Just describe the edit naturally.")
             return
         if action in ("cancel_route", "cancel_modify", "cancel_remove"):
             await self._answer_callback(client, callback_id, "Cancelled")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "❌ Cancelled")
             if chat_id:
                 await self._handle_no(chat_id, client)
             return
@@ -815,10 +839,11 @@ class TripBot:
             t_cost = transport["transport_cost_eur"] if transport else 0
             p_cost = (transport or {}).get("parking_cost_eur") or 0
             t_mode = (transport or {}).get("transport_mode", "transport")
-            trip_total = total_price + t_cost + p_cost
+            t_return = t_cost * 2
+            trip_total = total_price + t_return + p_cost
             cost_parts = [f"€{total_price:,.0f} flights"]
-            if t_cost:
-                cost_parts.append(f"€{t_cost:,.0f} {t_mode.lower()}")
+            if t_return:
+                cost_parts.append(f"€{t_return:,.0f} {t_mode.lower()}")
             if p_cost:
                 cost_parts.append(f"€{p_cost:,.0f} parking")
             lines.append(f"{' + '.join(cost_parts)} = *€{trip_total:,.0f} total*")
@@ -875,13 +900,14 @@ class TripBot:
                         at_cost = alt_transport["transport_cost_eur"] if alt_transport else 0
                         ap_cost = (alt_transport or {}).get("parking_cost_eur") or 0
                         at_mode = (alt_transport or {}).get("transport_mode", "transport")
-                        alt_total = alt_price + at_cost + ap_cost
+                        at_return = at_cost * 2
+                        alt_total = alt_price + at_return + ap_cost
                         savings = trip_total - alt_total
                         if savings > 0:
                             icon = "🟢" if alts_shown == 0 else "🟡"
                             alt_parts = [f"€{alt_price:,.0f} flights"]
-                            if at_cost:
-                                alt_parts.append(f"€{at_cost:,.0f} {at_mode.lower()}")
+                            if at_return:
+                                alt_parts.append(f"€{at_return:,.0f} {at_mode.lower()}")
                             if ap_cost:
                                 alt_parts.append(f"€{ap_cost:,.0f} parking")
                             lines.append(
@@ -1319,11 +1345,12 @@ class TripBot:
                 price_level = primary_result.price_insights.get("price_level", "")
                 typical_range = primary_result.price_insights.get("typical_price_range", [])
 
-                # Build primary cost breakdown
-                total = float(primary_price) + p_transport_cost + p_parking_cost
+                # Build primary cost breakdown (round-trip transport)
+                p_transport_return = p_transport_cost * 2
+                total = float(primary_price) + p_transport_return + p_parking_cost
                 cost_parts = [f"€{float(primary_price):,.0f} flights"]
-                if p_transport_cost:
-                    cost_parts.append(f"€{p_transport_cost:,.0f} {p_mode.lower()}")
+                if p_transport_return:
+                    cost_parts.append(f"€{p_transport_return:,.0f} {p_mode.lower()}")
                 if p_parking_cost:
                     cost_parts.append(f"€{p_parking_cost:,.0f} parking")
 
@@ -1405,9 +1432,10 @@ class TripBot:
                         t_min = alt.get("transport_time_min", 0)
                         hours = t_min / 60
                         alt_fare_total = alt["fare_pp"] * route.passengers
+                        alt_t_return = alt["transport_cost"] * 2
                         alt_parts = [f"€{alt_fare_total:,.0f} flights"]
-                        if alt["transport_cost"]:
-                            alt_parts.append(f"€{alt['transport_cost']:,.0f} {alt['transport_mode'].lower()}")
+                        if alt_t_return:
+                            alt_parts.append(f"€{alt_t_return:,.0f} {alt['transport_mode'].lower()}")
                         if alt.get("parking_cost"):
                             alt_parts.append(f"€{alt['parking_cost']:,.0f} parking")
                         lines.append(
