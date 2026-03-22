@@ -109,11 +109,12 @@ async def test_send_deal_alert_with_nearby(notifier):
 
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         text = payload["text"]
-        assert "🟢 Brussels" in text
+        assert "Brussels" in text
         assert "save €610" in text
         assert "Thalys" in text
-        assert "🟡 Dusseldorf" in text
+        assert "Dusseldorf" in text
         assert "save €320" in text
+        assert "total" in text
 
 
 # --- send_error_fare_alert ---

@@ -112,7 +112,19 @@ class TelegramNotifier:
             f"{emoji} *{label}* — {route}",
             f"*€{price_pp:,.0f}/pp* | {airline} | {dates}",
         ]
-        if passengers > 1:
+        # Show primary airport total cost
+        primary_t = deal_info.get("primary_transport_cost", 0)
+        primary_p = deal_info.get("primary_parking_cost", 0)
+        primary_mode = deal_info.get("primary_transport_mode", "")
+        primary_total = float(price) + primary_t + primary_p
+        if primary_t or primary_p:
+            cost_parts = [f"€{float(price):,.0f} flights"]
+            if primary_t:
+                cost_parts.append(f"€{primary_t:,.0f} {primary_mode.lower()}")
+            if primary_p:
+                cost_parts.append(f"€{primary_p:,.0f} parking")
+            lines.append(f"{' + '.join(cost_parts)} = *€{primary_total:,.0f} total*")
+        elif passengers > 1:
             lines.append(f"Total: €{float(price):,.0f} for {passengers} passengers")
         if reasoning:
             lines.append(f"_{reasoning}_")
@@ -128,13 +140,23 @@ class TelegramNotifier:
                 savings = alt.get("savings", 0)
                 mode = alt.get("transport_mode", "transport")
                 t_cost = alt.get("transport_cost", 0)
+                parking = alt.get("parking_cost") or 0
                 t_min = alt.get("transport_time_min", 0)
                 hours = t_min / 60
+                passengers = deal_info.get("passengers", 2) if hasattr(deal_info, 'get') else 2
+                fare_total = fare * passengers
+                transport_parts = [f"€{t_cost:,.0f} transport"]
+                if parking:
+                    transport_parts.append(f"€{parking:,.0f} parking")
+                transport_total = t_cost + parking
                 lines.append(
-                    f"{icon} {name}: €{fare:,.0f}/pp → €{net:,.0f} net (save €{savings:,.0f})"
+                    f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f})"
                 )
                 lines.append(
-                    f"    {mode} €{t_cost:,.0f} return | {hours:.1f}h to airport"
+                    f"    Flights: €{fare_total:,.0f} + {' + '.join(transport_parts)} = *€{net:,.0f} total*"
+                )
+                lines.append(
+                    f"    {mode} {hours:.1f}h to airport"
                 )
 
         deal_id = deal_info.get("deal_id")
@@ -252,13 +274,17 @@ class TelegramNotifier:
                     savings = alt.get("savings", 0)
                     mode = alt.get("transport_mode", "transport")
                     t_cost = alt.get("transport_cost", 0)
+                    parking = alt.get("parking_cost") or 0
                     t_min = alt.get("transport_time_min", 0)
                     hours = t_min / 60
                     lines.append(
                         f"{icon} {name}: €{fare:,.0f}/pp → €{net:,.0f} net (save €{savings:,.0f})"
                     )
+                    cost_parts = [f"€{t_cost:,.0f} fuel/transport"]
+                    if parking:
+                        cost_parts.append(f"€{parking:,.0f} parking")
                     lines.append(
-                        f"    {mode} €{t_cost:,.0f} return | {hours:.1f}h to airport"
+                        f"    {mode} {hours:.1f}h | {' + '.join(cost_parts)}"
                     )
 
             search_url = self._google_flights_url({

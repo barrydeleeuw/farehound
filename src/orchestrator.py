@@ -875,6 +875,15 @@ class Orchestrator:
             if snapshot.search_params and isinstance(snapshot.search_params, dict):
                 gf_url = snapshot.search_params.get("google_flights_url", "")
 
+            # Get primary airport transport for cost breakdown
+            loop2 = asyncio.get_running_loop()
+            primary_transport = await loop2.run_in_executor(
+                None, self.db.get_airport_transport, route.origin
+            )
+            primary_t_cost = primary_transport.get("transport_cost_eur", 0) if primary_transport else 0
+            primary_parking = primary_transport.get("parking_cost_eur") if primary_transport else None
+            primary_mode = primary_transport.get("transport_mode", "") if primary_transport else ""
+
             deal_info = {
                 "deal_id": deal.deal_id,
                 "origin": route.origin,
@@ -892,6 +901,9 @@ class Orchestrator:
                 "reasoning": inflection_msg or score_result.reasoning,
                 "nearby_comparison": self._latest_nearby_comparison.get(route.route_id, []),
                 "google_flights_url": gf_url,
+                "primary_transport_cost": primary_t_cost,
+                "primary_parking_cost": primary_parking or 0,
+                "primary_transport_mode": primary_mode,
             }
 
             try:

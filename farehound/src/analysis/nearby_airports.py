@@ -52,6 +52,7 @@ def compare_airports(
                 "savings": savings,
                 "transport_mode": sec.get("transport_mode", ""),
                 "transport_cost": sec["transport_cost"],
+                "parking_cost": sec.get("parking_cost") or 0,
                 "transport_time_min": sec.get("transport_time_min", 0),
             })
 
