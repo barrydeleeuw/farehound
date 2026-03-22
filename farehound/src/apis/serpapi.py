@@ -36,11 +36,15 @@ class FlightSearchResult:
 
 
 class SerpAPIClient:
-    def __init__(self, api_key: str, currency: str = "EUR") -> None:
+    def __init__(self, api_key: str, currency: str = "EUR", cache_dir: str | None = None) -> None:
         self.api_key = api_key
         self.currency = currency
         self._calls_this_month: int = 0
         self._client = httpx.AsyncClient(timeout=60.0)
+        self._cache = None
+        if cache_dir:
+            from src.apis.serpapi_cache import ResponseCache
+            self._cache = ResponseCache(cache_dir)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -90,6 +94,30 @@ class SerpAPIClient:
             origin, destination, outbound_date, return_date, passengers,
         )
 
+        # Check cache first
+        if self._cache:
+            cached = self._cache.get(params)
+            if cached:
+                logger.info("Using cached response for %s → %s", origin, destination)
+                data = cached
+                # Skip to result building (below)
+                if "error" in data:
+                    raise SerpAPIError(f"SerpAPI error: {data['error']}")
+                safe_params = {k: v for k, v in params.items() if k != "api_key"}
+                result = FlightSearchResult(
+                    best_flights=data.get("best_flights", []),
+                    other_flights=data.get("other_flights", []),
+                    price_insights=data.get("price_insights", {}),
+                    booking_options=data.get("booking_options", []),
+                    search_params=safe_params,
+                    raw_response=data,
+                )
+                lowest = result.price_insights.get("lowest_price")
+                level = result.price_insights.get("price_level")
+                logger.info("Results: %d best + %d other flights, lowest=€%s, level=%s",
+                    len(result.best_flights), len(result.other_flights), lowest, level)
+                return result
+
         response = await self._client.get(SERPAPI_BASE_URL, params=params)
 
         self._calls_this_month += 1
@@ -99,6 +127,10 @@ class SerpAPIClient:
             raise SerpAPIError(f"SerpAPI returned HTTP {response.status_code}")
 
         data = response.json()
+
+        # Cache the response
+        if self._cache:
+            self._cache.put(params, data)
 
         if "error" in data:
             logger.error("SerpAPI error: %s", data["error"])

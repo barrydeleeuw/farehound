@@ -21,3 +21,4 @@ data/*.duckdb.wal
 
 *.log
 data/*.db*
+data/serpapi_cache/

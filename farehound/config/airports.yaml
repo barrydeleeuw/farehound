@@ -1,36 +1,70 @@
+# Airport transport data from The Hague (Google Maps, March 2026)
+# Cost estimates: driving €0.23/km (ANWB), parking varies by airport
+# Transit costs: NS/Thalys/ICE published fares (return trip)
+
 airports:
   - code: AMS
     name: Amsterdam Schiphol
     transport_mode: Uber
     transport_cost_eur: 45
-    transport_time_min: 30
+    transport_time_min: 34
+    transport_distance_km: 44
     parking_cost_eur: null
+    transit_time_min: 29
+    transit_cost_eur: 12
     is_primary: true
+
+  - code: RTM
+    name: Rotterdam The Hague
+    transport_mode: car
+    transport_cost_eur: 10
+    transport_time_min: 21
+    transport_distance_km: 20
+    parking_cost_eur: 80
+    transit_time_min: 44
+    transit_cost_eur: 8
+    is_primary: false
+
+  - code: EIN
+    name: Eindhoven
+    transport_mode: car
+    transport_cost_eur: 32
+    transport_time_min: 90
+    transport_distance_km: 138
+    parking_cost_eur: 120
+    transit_time_min: 137
+    transit_cost_eur: 50
+    is_primary: false
+
   - code: BRU
     name: Brussels
     transport_mode: Thalys
     transport_cost_eur: 70
-    transport_time_min: 150
+    transport_time_min: 144
+    transport_distance_km: 170
     parking_cost_eur: null
+    transit_time_min: 144
+    transit_cost_eur: 70
     is_primary: false
+
   - code: DUS
     name: Dusseldorf
     transport_mode: car
-    transport_cost_eur: 50
-    transport_time_min: 130
+    transport_cost_eur: 56
+    transport_time_min: 150
+    transport_distance_km: 243
     parking_cost_eur: 120
+    transit_time_min: 210
+    transit_cost_eur: 80
     is_primary: false
-  - code: EIN
-    name: Eindhoven
-    transport_mode: car
-    transport_cost_eur: 30
-    transport_time_min: 50
-    parking_cost_eur: 120
-    is_primary: false
+
   - code: CGN
     name: Cologne/Bonn
     transport_mode: train
-    transport_cost_eur: 70
-    transport_time_min: 180
+    transport_cost_eur: 100
+    transport_time_min: 250
+    transport_distance_km: 291
     parking_cost_eur: null
+    transit_time_min: 250
+    transit_cost_eur: 100
     is_primary: false
