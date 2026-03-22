@@ -355,37 +355,31 @@ class TripBot:
                     await self._start_onboarding(chat_id, client)
                     return
 
-            await loop.run_in_executor(None, lambda: self._db.update_user(user_id, home_location=location))
+            await loop.run_in_executor(None, lambda: self._db.update_user(
+                user_id, home_location=location, home_airport="AMS", onboarded=1
+            ))
 
-            # Resolve nearby airports
-            await self._send(client, chat_id, f"Finding airports near {location}...")
-            airports = await self._resolve_airports(location)
+            # Use predefined airports from config (shared for all NL-based users)
+            from src.config import _load_airports_yaml
+            default_airports = _load_airports_yaml()
+            if default_airports:
+                await loop.run_in_executor(None, self._db.seed_airport_transport, default_airports, user_id)
 
-            if airports:
-                # Store airports and set primary
-                await loop.run_in_executor(None, self._db.seed_airport_transport, airports, user_id)
-                closest = airports[0]
-                await loop.run_in_executor(
-                    None, lambda: self._db.update_user(user_id, home_airport=closest["code"], onboarded=1)
-                )
-
-                # Format airport list
-                lines = [f"Found {len(airports)} airports within 3 hours:"]
-                for ap in airports:
-                    primary = " ⭐ (primary)" if ap.get("is_primary") else ""
-                    hours = ap.get("transport_time_min", 0) / 60
-                    lines.append(f"  {ap['code']} — {ap.get('name', ap['code'])} ({hours:.1f}h){primary}")
-                lines.append(f"\nYour primary airport: *{closest['code']}*")
-                lines.append("\nNow tell me about a trip: 'Japan for 2 weeks in October, 2 passengers'")
-                await self._send(client, chat_id, "\n".join(lines))
-            else:
-                # Fallback: default to AMS
-                await loop.run_in_executor(
-                    None, lambda: self._db.update_user(user_id, home_airport="AMS", onboarded=1)
-                )
-                await self._send(client, chat_id,
-                    "Couldn't find nearby airports — defaulting to AMS (Amsterdam Schiphol).\n\n"
-                    "Now tell me about a trip: 'Japan for 2 weeks in October, 2 passengers'")
+            from src.utils.airports import airport_name
+            lines = [
+                f"Great, {pending.get('name', 'there')}! You're set up in *{location}*.",
+                "",
+                "I'll monitor flights from these airports for you:",
+                "  ✈️ Amsterdam Schiphol (primary)",
+                "  ✈️ Brussels",
+                "  ✈️ Dusseldorf",
+                "  ✈️ Eindhoven",
+                "  ✈️ Cologne/Bonn",
+                "",
+                "Now tell me about a trip! For example:",
+                "`Japan for 2 weeks in October, 2 passengers`",
+            ]
+            await self._send(client, chat_id, "\n".join(lines))
 
             # Clear onboarding pending
             self._pending.pop(chat_id, None)
