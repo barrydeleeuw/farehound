@@ -15,17 +15,17 @@ airports:
     is_primary: false
   - code: DUS
     name: Dusseldorf
-    transport_mode: train
-    transport_cost_eur: 60
-    transport_time_min: 170
-    parking_cost_eur: null
+    transport_mode: car
+    transport_cost_eur: 50
+    transport_time_min: 130
+    parking_cost_eur: 120
     is_primary: false
   - code: EIN
     name: Eindhoven
     transport_mode: car
     transport_cost_eur: 30
     transport_time_min: 50
-    parking_cost_eur: 50
+    parking_cost_eur: 120
     is_primary: false
   - code: CGN
     name: Cologne/Bonn

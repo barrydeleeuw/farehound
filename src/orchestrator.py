@@ -416,12 +416,19 @@ class Orchestrator:
             recent_deals = await loop.run_in_executor(None, self.db.get_deals_since, route.route_id, since)
             watch_deals = [d for d in recent_deals if d.urgency == "watch"]
 
+            # Use cheapest recent snapshot for dates
+            cheapest = await loop.run_in_executor(None, self.db.get_cheapest_recent_snapshot, route.route_id)
+            best = cheapest or latest
+
             summary: dict = {
                 "origin": route.origin,
                 "destination": route.destination,
-                "lowest_price": float(latest.lowest_price) if latest.lowest_price else None,
+                "lowest_price": float(best.lowest_price) if best and best.lowest_price else None,
                 "trend": trend,
                 "passengers": route.passengers,
+                "dates": f"{best.outbound_date} to {best.return_date}" if best and best.outbound_date else "",
+                "outbound_date": str(best.outbound_date) if best and best.outbound_date else "",
+                "return_date": str(best.return_date) if best and best.return_date else "",
             }
 
             if watch_deals:

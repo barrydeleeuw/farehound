@@ -204,32 +204,67 @@ class TelegramNotifier:
         if not routes_summary:
             return
 
-        lines = [f"📊 *FareHound Daily* — {len(routes_summary)} route(s)\n"]
-        for route in routes_summary:
-            origin = route.get("origin", "?")
-            dest = route.get("destination", "?")
-            lowest = route.get("lowest_price", "—")
-            trend = route.get("trend", "")
-            trend_icon = {"down": "📉", "up": "📈", "stable": "➡️"}.get(trend, "")
-            score = route.get("deal_score")
-            emoji = _deal_emoji(score)
-            lines.append(f"{emoji} {route_name(origin, dest)}: *€{float(lowest):,.0f}* {trend_icon}")
+        from src.utils.airports import airport_name
 
-            nearby_prices = route.get("nearby_prices") or []
+        # Send header
+        await self._send_message(
+            f"📊 *FareHound Daily* — {len(routes_summary)} route(s)"
+        )
+
+        # Send one message per route with full details and Search button
+        for route_data in routes_summary:
+            origin = route_data.get("origin", "?")
+            dest = route_data.get("destination", "?")
+            lowest = route_data.get("lowest_price")
+            trend = route_data.get("trend", "")
+            trend_icon = {"down": "📉", "up": "📈", "stable": "➡️"}.get(trend, "")
+            passengers = route_data.get("passengers", 2)
+            dates = route_data.get("dates", "")
+            score = route_data.get("deal_score")
+            emoji = _deal_emoji(score)
+
+            lines = [
+                f"{emoji} *{route_name(origin, dest)}* {trend_icon}",
+            ]
+            if dates:
+                lines.append(f"📅 {dates}")
+            if lowest is not None:
+                price_pp = float(lowest) / passengers if passengers > 1 else float(lowest)
+                lines.append(f"💰 *€{float(lowest):,.0f}* (€{price_pp:,.0f}/pp for {passengers} pax)")
+            else:
+                lines.append("⏳ No price data yet")
+
+            nearby_prices = route_data.get("nearby_prices") or []
             if nearby_prices:
-                from src.utils.airports import airport_name
+                lines.append("")
+                lines.append(f"*Nearby alternatives:*")
                 origin_name = airport_name(origin)
-                passengers = route.get("passengers", 2)
-                lines.append(f"  {origin_name}: €{float(lowest):,.0f}/pp")
                 for i, alt in enumerate(nearby_prices):
-                    icon = "🟢" if i == 0 else ""
+                    icon = "🟢" if i == 0 else "🟡"
                     name = alt.get("airport_name") or alt.get("airport_code", "?")
                     fare = alt.get("fare_pp", 0)
                     net = alt.get("net_cost", 0)
                     savings = alt.get("savings", 0)
-                    savings_str = f", save €{savings:,.0f}" if savings else ""
+                    mode = alt.get("transport_mode", "transport")
+                    t_cost = alt.get("transport_cost", 0)
+                    t_min = alt.get("transport_time_min", 0)
+                    hours = t_min / 60
                     lines.append(
-                        f"  {icon} {name}: €{fare:,.0f}/pp (€{net:,.0f} net{savings_str})".rstrip()
+                        f"{icon} {name}: €{fare:,.0f}/pp → €{net:,.0f} net (save €{savings:,.0f})"
+                    )
+                    lines.append(
+                        f"    {mode} €{t_cost:,.0f} return | {hours:.1f}h to airport"
                     )
 
-        await self._send_message("\n".join(lines))
+            search_url = self._google_flights_url({
+                "origin": origin, "destination": dest, "passengers": passengers,
+                "outbound_date": route_data.get("outbound_date", ""),
+                "return_date": route_data.get("return_date", ""),
+            })
+            reply_markup = {
+                "inline_keyboard": [[
+                    {"text": "Search Flights ✈️", "url": search_url},
+                ]]
+            }
+
+            await self._send_message("\n".join(lines), reply_markup=reply_markup)

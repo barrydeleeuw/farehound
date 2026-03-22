@@ -169,15 +169,19 @@ async def test_send_daily_digest_format(notifier):
 
         await notifier.send_daily_digest(routes)
 
-        payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
-        text = payload["text"]
-        assert "FareHound Daily" in text
-        assert "2 route(s)" in text
-        assert "Amsterdam → Tokyo Narita" in text
-        assert "€485" in text
-        assert "📉" in text
-        assert "Amsterdam → Istanbul" in text
-        assert "➡️" in text  # stable trend
+        # 3 messages: header + 2 routes
+        assert mock_client.post.call_count == 3
+        calls = [c.kwargs.get("json") or c[1]["json"] for c in mock_client.post.call_args_list]
+        header = calls[0]["text"]
+        assert "FareHound Daily" in header
+        assert "2 route(s)" in header
+        route1 = calls[1]["text"]
+        assert "Amsterdam → Tokyo Narita" in route1
+        assert "€485" in route1
+        assert "📉" in route1
+        route2 = calls[2]["text"]
+        assert "Amsterdam → Istanbul" in route2
+        assert "➡️" in route2
 
 
 @pytest.mark.asyncio
@@ -212,8 +216,10 @@ async def test_send_daily_digest_with_nearby(notifier):
 
         await notifier.send_daily_digest(routes)
 
-        payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
-        text = payload["text"]
+        # 2 messages: header + 1 route
+        assert mock_client.post.call_count == 2
+        route_payload = mock_client.post.call_args_list[1].kwargs.get("json") or mock_client.post.call_args_list[1][1]["json"]
+        text = route_payload["text"]
         assert "Amsterdam" in text
         assert "Brussels" in text
         assert "€1,600/pp" in text
