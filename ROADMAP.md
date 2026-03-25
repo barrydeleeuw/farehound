@@ -268,27 +268,6 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] API call budget stays within SerpAPI plan limits — monitoring and safeguards
   - [ ] Explore results cached and shared across users with the same/nearby home airport
 
-### [ITEM-039] JFC flight-hacking knowledge base
-- **Status:** Proposed
-- **Priority:** P2 (Medium)
-- **Effort:** M
-- **Dependencies:** [ITEM-006]
-- **Summary:** Ingest Jack's Flight Club flight-hacking articles (`https://members.jacksflightclub.com/articles/flight-hacking`, behind login) into a local knowledge base. These articles teach techniques like mistake fares, hidden city ticketing, positioning flights, and points hacking — knowledge FareHound could use to give smarter advice and eventually apply hacking strategies to user trips automatically.
-- **Design considerations:**
-  - Content is behind JFC member login — need authenticated scraping (session cookie or headless browser login)
-  - Scrape article list, then fetch each article's full text + metadata (title, category, date)
-  - Store in a `knowledge_articles` table: source, title, url, content, category, scraped_at
-  - Generate embeddings for RAG retrieval — when a user asks travel questions, FareHound can reference relevant flight-hacking techniques
-  - Respect rate limits and scraping ethics — cache aggressively, don't hammer their server
-  - Could also enrich deal alerts: "This fare from AMS→TYO looks like a mistake fare — book fast!"
-  - Re-scrape periodically (weekly?) to pick up new articles
-- **Acceptance Criteria:**
-  - [ ] Authenticated scraper fetches all flight-hacking articles from JFC members area
-  - [ ] Articles stored in local DB with full text, metadata, and embeddings
-  - [ ] RAG retrieval integrated into `_INTERPRET_SYSTEM` for general_chat responses
-  - [ ] FareHound can answer "how do mistake fares work?" or "tips for booking cheap flights" using JFC knowledge
-  - [ ] Periodic re-scrape picks up new articles without duplicating existing ones
-
 ### [ITEM-004] Google Maps one-time transport lookup per city
 - **Status:** Proposed
 - **Priority:** P2 (Medium)
