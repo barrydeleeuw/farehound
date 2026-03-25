@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS deals (
     alert_sent_at     TEXT,
     booked            INTEGER DEFAULT 0,
     feedback          TEXT,
+    follow_up_sent_at TEXT,
+    follow_up_count   INTEGER DEFAULT 0,
     created_at        TEXT DEFAULT (datetime('now'))
 );
 
@@ -176,6 +178,12 @@ class Database:
         for table in _USER_ID_TABLES:
             if not _has_column(self._conn, table, "user_id"):
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id TEXT")
+        self._conn.commit()
+        # Add follow-up tracking columns to deals if missing
+        for col, default in [("follow_up_sent_at", None), ("follow_up_count", "0")]:
+            if not _has_column(self._conn, "deals", col):
+                alter = f"ALTER TABLE deals ADD COLUMN {col} {'TEXT' if default is None else 'INTEGER DEFAULT ' + default}"
+                self._conn.execute(alter)
         self._conn.commit()
         # Migrate existing data: create default user if needed
         self._migrate_default_user()
@@ -477,8 +485,9 @@ class Database:
         self._conn.commit()
 
     def get_deals_pending_feedback(self, older_than_days: int = 3) -> list[dict]:
-        """Return deals where alert was sent 3+ days ago with no feedback."""
+        """Return deals where alert was sent 3+ days ago with no feedback and < 2 follow-ups."""
         cutoff = _to_isoformat(datetime.now(UTC) - timedelta(days=older_than_days))
+        second_cutoff = _to_isoformat(datetime.now(UTC) - timedelta(days=older_than_days + 4))
         cursor = self._conn.execute(
             """
             SELECT
@@ -491,12 +500,27 @@ class Database:
               AND d.feedback IS NULL
               AND d.alert_sent_at IS NOT NULL
               AND d.alert_sent_at <= ?
+              AND (d.follow_up_count < 2)
+              AND (d.follow_up_sent_at IS NULL OR d.follow_up_sent_at <= ?)
             ORDER BY d.alert_sent_at ASC
             """,
-            [cutoff],
+            [cutoff, second_cutoff],
         )
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def mark_follow_up_sent(self, deal_id: str) -> None:
+        self._conn.execute(
+            "UPDATE deals SET follow_up_sent_at = ?, follow_up_count = follow_up_count + 1 WHERE deal_id = ?",
+            [_to_isoformat(datetime.now(UTC)), deal_id],
+        )
+        self._conn.commit()
+
+    def expire_stale_deals(self) -> None:
+        self._conn.execute(
+            "UPDATE deals SET feedback = 'expired' WHERE follow_up_count >= 2 AND feedback IS NULL"
+        )
+        self._conn.commit()
 
     def get_routes_with_pending_deals(self, user_id: str | None = None) -> dict[str, float | None]:
         """Return route_ids where deals exist with alert_sent=1 and feedback IS NULL.

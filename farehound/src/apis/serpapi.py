@@ -11,9 +11,18 @@ logger = logging.getLogger(__name__)
 
 SERPAPI_BASE_URL = "https://serpapi.com/search"
 
+# Monthly budget thresholds (SerpAPI calls)
+MONTHLY_BUDGET_WARN = 700
+MONTHLY_BUDGET_ERROR = 900
+MONTHLY_BUDGET_HARD_CAP = 950
+
 
 class SerpAPIError(Exception):
     """Raised when SerpAPI returns an error or unexpected response."""
+
+
+class SerpAPIBudgetExhausted(SerpAPIError):
+    """Raised when monthly SerpAPI budget hard cap is reached."""
 
 
 @dataclass
@@ -33,6 +42,34 @@ class FlightSearchResult:
     booking_options: list[dict] = field(default_factory=list)
     search_params: dict = field(default_factory=dict)
     raw_response: dict = field(default_factory=dict)
+
+
+def extract_lowest_price(
+    result: FlightSearchResult,
+    max_stops: int | None = None,
+) -> float | None:
+    """Extract the lowest price from a FlightSearchResult.
+
+    Tries min(price) from best_flights + other_flights first (optionally
+    filtered by max_stops), falls back to price_insights.lowest_price.
+    """
+    all_flights = result.best_flights + result.other_flights
+    if max_stops is not None:
+        all_flights = [
+            f for f in all_flights
+            if len(f.get("flights", [])) - 1 <= max_stops
+        ]
+    prices = [f["price"] for f in all_flights if "price" in f]
+    if prices:
+        return min(prices)
+    return result.price_insights.get("lowest_price")
+
+
+def extract_min_duration(result: FlightSearchResult) -> int | None:
+    """Extract the minimum total_duration (minutes) from a FlightSearchResult."""
+    all_flights = result.best_flights + result.other_flights
+    durations = [f["total_duration"] for f in all_flights if "total_duration" in f]
+    return min(durations) if durations else None
 
 
 class SerpAPIClient:
@@ -57,6 +94,7 @@ class SerpAPIClient:
         return_date: str | date | None = None,
         passengers: int = 2,
         trip_type: str = "round_trip",
+        max_stops: int | None = None,
     ) -> FlightSearchResult:
         """Search Google Flights via SerpAPI.
 
@@ -86,6 +124,9 @@ class SerpAPIClient:
 
         if return_date and trip_type == "round_trip":
             params["return_date"] = str(return_date)
+
+        if max_stops is not None:
+            params["stops"] = max_stops + 1
 
         self._warn_rate_limit()
 
@@ -148,14 +189,28 @@ class SerpAPIClient:
             raw_response=data,
         )
 
-        lowest = result.price_insights.get("lowest_price")
+        insights_lowest = result.price_insights.get("lowest_price")
         level = result.price_insights.get("price_level")
         n_best = len(result.best_flights)
         n_other = len(result.other_flights)
         logger.info(
             "Results: %d best + %d other flights, lowest=€%s, level=%s",
-            n_best, n_other, lowest, level,
+            n_best, n_other, insights_lowest, level,
         )
+
+        # Compare price_insights.lowest_price vs actual flight prices
+        actual_lowest = extract_lowest_price(result)
+        logger.debug(
+            "Price check: insights=€%s, extract=€%s",
+            insights_lowest, actual_lowest,
+        )
+        if insights_lowest and actual_lowest and insights_lowest > 0:
+            divergence = abs(actual_lowest - insights_lowest) / insights_lowest
+            if divergence > 0.20:
+                logger.warning(
+                    "Price divergence >20%%: insights=€%s vs extract=€%s (%.0f%%)",
+                    insights_lowest, actual_lowest, divergence * 100,
+                )
 
         return result
 
@@ -246,11 +301,16 @@ class SerpAPIClient:
         )
 
     def _warn_rate_limit(self) -> None:
-        if self._calls_this_month >= 900:
-            logger.warning(
-                "SerpAPI usage critical: %d calls this month", self._calls_this_month
+        if self._calls_this_month >= MONTHLY_BUDGET_HARD_CAP:
+            raise SerpAPIBudgetExhausted(
+                f"SerpAPI monthly budget exhausted: {self._calls_this_month} calls"
             )
-        elif self._calls_this_month >= 750:
+        elif self._calls_this_month >= MONTHLY_BUDGET_ERROR:
+            logger.error(
+                "SerpAPI usage critical: %d calls this month (hard cap: %d)",
+                self._calls_this_month, MONTHLY_BUDGET_HARD_CAP,
+            )
+        elif self._calls_this_month >= MONTHLY_BUDGET_WARN:
             logger.warning(
                 "SerpAPI usage high: %d calls this month", self._calls_this_month
             )

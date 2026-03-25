@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from src.utils.airports import airport_name
+
+logger = logging.getLogger(__name__)
 
 # Transport modes where cost is per person (each passenger needs a ticket)
 _PER_PERSON_MODES = {"train", "thalys", "bus", "metro", "public transport", "ferry", "tram"}
@@ -48,6 +52,7 @@ def compare_airports(
         parking_cost=primary_result.get("parking_cost"),
         transport_mode=primary_result.get("transport_mode", ""),
     )
+    primary_flight_duration = primary_result.get("flight_duration_min")
 
     comparisons = []
     for sec in secondary_results:
@@ -70,7 +75,20 @@ def compare_airports(
                 "transport_cost": sec["transport_cost"],
                 "parking_cost": sec.get("parking_cost") or 0,
                 "transport_time_min": sec.get("transport_time_min", 0),
+                "flight_duration_min": sec.get("flight_duration_min"),
+                "primary_flight_duration_min": primary_flight_duration,
             })
 
     comparisons.sort(key=lambda x: x["savings"], reverse=True)
+
+    best_sec_net = comparisons[0]["net_cost"] if comparisons else None
+    best_savings = comparisons[0]["savings"] if comparisons else 0
+    logger.debug(
+        "Airport comparison: primary_net=€%.0f, best_secondary_net=€%s, savings=€%.0f, threshold_met=%s",
+        primary_net,
+        f"{best_sec_net:.0f}" if best_sec_net else "N/A",
+        best_savings,
+        bool(comparisons),
+    )
+
     return comparisons

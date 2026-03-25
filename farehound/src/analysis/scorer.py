@@ -224,9 +224,20 @@ class DealScorer:
                 fare = alt.get("fare_pp", 0)
                 net = alt.get("net_cost", 0)
                 savings = alt.get("savings", 0)
+                flight_dur = alt.get("flight_duration_min")
+                primary_dur = alt.get("primary_flight_duration_min")
+                dur_str = ""
+                if flight_dur:
+                    dur_h = flight_dur / 60
+                    if primary_dur and flight_dur != primary_dur:
+                        diff_h = (flight_dur - primary_dur) / 60
+                        sign = "+" if diff_h > 0 else ""
+                        dur_str = f", {dur_h:.0f}h flight ({sign}{diff_h:.0f}h vs primary)"
+                    else:
+                        dur_str = f", {dur_h:.0f}h flight"
                 lines.append(
                     f"- {name} ({mode}, €{t_cost:,.0f} return, {hours:.1f}h): "
-                    f"€{fare:,.0f}/pp, €{net:,.0f} net → save €{savings:,.0f} vs {origin_name}"
+                    f"€{fare:,.0f}/pp, €{net:,.0f} net → save €{savings:,.0f} vs {origin_name}{dur_str}"
                 )
             lines.append("")
             nearby_section = "\n".join(lines)

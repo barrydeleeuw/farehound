@@ -15,7 +15,7 @@ from src.analysis.nearby_airports import compare_airports
 from src.analysis.scorer import DealScorer
 from src.apis.community import CommunityListener, RSSListener
 from src.apis.community import CommunityFeedConfig as CommunityFeed
-from src.apis.serpapi import SerpAPIClient, SerpAPIError, VerificationResult, generate_date_windows
+from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows
 from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
 from src.storage.db import Database
@@ -29,11 +29,15 @@ DEFAULT_TRIP_DURATION_DAYS = 14
 # How often to do a full rescan of all windows (days)
 FULL_RESCAN_INTERVAL_DAYS = 7
 # Max windows per route for initial scan
-DEFAULT_MAX_WINDOWS = 4
+DEFAULT_MAX_WINDOWS = 2
 # Percentage drop below average that triggers an alert (used as pre-filter and static fallback)
 DROP_PERCENT_THRESHOLD = 0.15
 # Minimum snapshots before we have enough history to skip Claude scoring
 COLD_START_THRESHOLD = 5
+# Poll secondary airports every N cycles (saves API calls)
+SECONDARY_POLL_FREQUENCY = 3
+# Minimum hours between re-polling the same window
+MIN_REPOLL_HOURS = 6
 
 
 def _generate_weekend_windows(
@@ -339,14 +343,29 @@ class Orchestrator:
             for route in routes:
                 route_user_map[route.route_id] = user
 
-        logger.info("Sending follow-up for %d deals with no feedback", len(pending))
+        # Group pending deals by (route_id, user) — send ONE follow-up per route per user
+        from collections import defaultdict
+        route_groups: dict[tuple[str, str | None], list[dict]] = defaultdict(list)
         for deal in pending:
-            user = route_user_map.get(deal.get("route_id"))
+            route_id = deal.get("route_id")
+            user = route_user_map.get(route_id)
             chat_id = user["telegram_chat_id"] if user else None
+            route_groups[(route_id, chat_id)].append(deal)
+
+        logger.info("Sending follow-up for %d route groups (%d deals)", len(route_groups), len(pending))
+        for (route_id, chat_id), deals in route_groups.items():
+            # Pick the deal with the lowest price to show in the follow-up
+            best_deal = min(deals, key=lambda d: d.get("price") or float("inf"))
             try:
-                await self.telegram_notifier.send_follow_up(deal, chat_id=chat_id)
+                await self.telegram_notifier.send_follow_up(best_deal, chat_id=chat_id)
             except Exception:
-                logger.exception("Failed to send follow-up for deal %s", deal.get("deal_id"))
+                logger.exception("Failed to send follow-up for route %s", route_id)
+            # Mark ALL deals in this route group as follow-up sent
+            for deal in deals:
+                await loop.run_in_executor(None, self.db.mark_follow_up_sent, deal["deal_id"])
+
+        # Expire deals that have had 2 follow-ups with no response
+        await loop.run_in_executor(None, self.db.expire_stale_deals)
 
     async def shutdown(self, sig: signal.Signals | None = None) -> None:
         if sig:
@@ -405,7 +424,10 @@ class Orchestrator:
 
     async def poll_routes(self) -> None:
         """Poll all active users' routes with shared SerpAPI calls."""
-        logger.info("Starting poll cycle")
+        logger.info(
+            "Starting poll cycle (SerpAPI calls this month: %d)",
+            self.serpapi._calls_this_month,
+        )
         self._cycle_best_prices: dict[str, float] = {}
         self._pending_alerts: dict[str, dict] = {}  # route_id -> best alert candidate
         loop = asyncio.get_running_loop()
@@ -430,7 +452,7 @@ class Orchestrator:
                 user_route_windows.append((user, route, windows_to_poll))
                 for outbound, return_dt in windows_to_poll:
                     key = (route.origin, route.destination, outbound, return_dt,
-                           route.passengers, route.trip_type)
+                           route.passengers, route.trip_type, route.max_stops)
                     search_requests.setdefault(key, []).append((user, route))
 
         logger.info(
@@ -439,8 +461,9 @@ class Orchestrator:
         )
 
         # Phase 2: Execute each unique search once, distribute results
+        budget_exhausted = False
         for key, user_routes in search_requests.items():
-            origin, dest, outbound, return_dt, passengers, trip_type = key
+            origin, dest, outbound, return_dt, passengers, trip_type, max_stops = key
             try:
                 result = await self.serpapi.search_flights(
                     origin=origin,
@@ -449,7 +472,21 @@ class Orchestrator:
                     return_date=return_dt,
                     passengers=passengers,
                     trip_type=trip_type,
+                    max_stops=max_stops,
                 )
+            except SerpAPIBudgetExhausted as e:
+                logger.error("SerpAPI budget exhausted, pausing poll cycle: %s", e)
+                if self.telegram_notifier:
+                    for user, _route in user_routes:
+                        try:
+                            await self.telegram_notifier._send_message(
+                                user["telegram_chat_id"],
+                                "FareHound polling paused — SerpAPI monthly budget nearly exhausted",
+                            )
+                        except Exception:
+                            pass
+                budget_exhausted = True
+                break
             except SerpAPIError as e:
                 logger.error(
                     "SerpAPI error for %s→%s on %s: %s", origin, dest, outbound, e,
@@ -484,8 +521,8 @@ class Orchestrator:
         self._secondary_poll_counter += 1
         logger.info("Poll cycle complete (secondary counter: %d)", self._secondary_poll_counter)
 
-        # Phase 3: Secondary airports per user (every other cycle)
-        if self._secondary_poll_counter % 2 == 0:
+        # Phase 3: Secondary airports per user (every Nth cycle)
+        if not budget_exhausted and self._secondary_poll_counter % SECONDARY_POLL_FREQUENCY == 0:
             for user, route, windows in user_route_windows:
                 try:
                     await self._poll_secondary_airports(route, windows, user)
@@ -557,7 +594,7 @@ class Orchestrator:
 
         now = datetime.now(UTC)
         insights = result.price_insights
-        lowest_price = insights.get("lowest_price")
+        lowest_price = extract_lowest_price(result, max_stops=route.max_stops)
         typical_range = insights.get("typical_price_range", [])
         best_flight = result.best_flights[0] if result.best_flights else None
 
@@ -615,6 +652,12 @@ class Orchestrator:
         if needs_full_rescan:
             self._last_full_rescan = datetime.now(UTC)
             logger.info("Full rescan for route %s (%d windows)", route.route_id, len(all_windows))
+            # Still filter out recently-polled windows
+            existing_windows_rescan: list[PollWindow] = await loop.run_in_executor(
+                None, self.db.get_poll_windows, route.route_id
+            )
+            if existing_windows_rescan:
+                all_windows = self._filter_recently_polled(all_windows, existing_windows_rescan)
             return all_windows
 
         # Subsequent runs: focus on windows with lowest prices
@@ -644,7 +687,30 @@ class Orchestrator:
         )
         best = sorted_windows[0]
         selected = [(o, r) for o, r in all_windows if o == best.outbound_date]
+        selected = self._filter_recently_polled(selected or [all_windows[0]], existing_windows)
         return selected or [all_windows[0]]
+
+    @staticmethod
+    def _filter_recently_polled(
+        windows: list[tuple[date, date]],
+        poll_windows: list[PollWindow],
+    ) -> list[tuple[date, date]]:
+        """Remove windows that were polled less than MIN_REPOLL_HOURS ago."""
+        now = datetime.now(UTC)
+        recently_polled = set()
+        for pw in poll_windows:
+            if pw.last_polled_at:
+                polled_at = pw.last_polled_at if isinstance(pw.last_polled_at, datetime) else datetime.fromisoformat(str(pw.last_polled_at))
+                if polled_at.tzinfo is None:
+                    polled_at = polled_at.replace(tzinfo=UTC)
+                if (now - polled_at).total_seconds() < MIN_REPOLL_HOURS * 3600:
+                    recently_polled.add((pw.outbound_date, pw.return_date))
+        if not recently_polled:
+            return windows
+        filtered = [(o, r) for o, r in windows if (o, r) not in recently_polled]
+        if filtered:
+            logger.debug("Skipped %d recently-polled windows", len(windows) - len(filtered))
+        return filtered
 
     async def _poll_secondary_airports(
         self, route: DBRoute, windows: list[tuple[date, date]], user: dict
@@ -677,6 +743,13 @@ class Orchestrator:
             if not primary_snapshot or primary_snapshot.lowest_price is None:
                 continue
 
+            # Extract primary flight duration from stored snapshot
+            primary_duration = None
+            if primary_snapshot.all_flights:
+                durations = [f["total_duration"] for f in primary_snapshot.all_flights if "total_duration" in f]
+                if durations:
+                    primary_duration = min(durations)
+
             primary_result = {
                 "airport_code": route.origin,
                 "fare_pp": float(primary_snapshot.lowest_price) / route.passengers,
@@ -684,6 +757,7 @@ class Orchestrator:
                 "parking_cost": primary_transport.get("parking_cost_eur"),
                 "transport_mode": primary_transport.get("transport_mode", ""),
                 "transport_time_min": primary_transport.get("transport_time_min", 0),
+                "flight_duration_min": primary_duration,
             }
 
             secondary_results = []
@@ -696,15 +770,18 @@ class Orchestrator:
                         return_date=return_dt,
                         passengers=route.passengers,
                         trip_type=route.trip_type,
+                        max_stops=route.max_stops,
                     )
 
-                    insights = result.price_insights
-                    lowest = insights.get("lowest_price")
+                    lowest = extract_lowest_price(result, max_stops=route.max_stops)
                     if lowest is None:
                         continue
 
+                    sec_duration = extract_min_duration(result)
+
                     # Store snapshot with different origin marker in search_params
                     now = datetime.now(UTC)
+                    insights = result.price_insights
                     best_flight = result.best_flights[0] if result.best_flights else None
                     typical_range = insights.get("typical_price_range", [])
 
@@ -735,14 +812,30 @@ class Orchestrator:
                         airport["airport_code"], route.destination, lowest,
                     )
 
-                    secondary_results.append({
+                    sec_entry = {
                         "airport_code": airport["airport_code"],
                         "fare_pp": float(lowest) / route.passengers,
                         "transport_cost": airport.get("transport_cost_eur") or 0,
                         "parking_cost": airport.get("parking_cost_eur"),
                         "transport_mode": airport.get("transport_mode", ""),
                         "transport_time_min": airport.get("transport_time_min", 0),
-                    })
+                        "flight_duration_min": sec_duration,
+                    }
+                    secondary_results.append(sec_entry)
+
+                    from src.analysis.nearby_airports import calculate_net_cost
+                    est_net = calculate_net_cost(
+                        sec_entry["fare_pp"], route.passengers,
+                        sec_entry["transport_cost"],
+                        sec_entry.get("parking_cost"),
+                        sec_entry.get("transport_mode", ""),
+                    )
+                    logger.debug(
+                        "Secondary %s: fare_pp=€%.0f, transport=€%.0f, parking=€%.0f, est_net=€%.0f",
+                        airport["airport_code"], sec_entry["fare_pp"],
+                        sec_entry["transport_cost"], sec_entry.get("parking_cost") or 0,
+                        est_net,
+                    )
 
                 except SerpAPIError as e:
                     logger.error(
@@ -786,6 +879,13 @@ class Orchestrator:
         if not primary_transport:
             return
 
+        # Extract primary flight duration from snapshot
+        primary_duration = None
+        if snapshot.all_flights:
+            durations = [f["total_duration"] for f in snapshot.all_flights if "total_duration" in f]
+            if durations:
+                primary_duration = min(durations)
+
         primary_result = {
             "airport_code": route.origin,
             "fare_pp": float(snapshot.lowest_price) / route.passengers,
@@ -793,6 +893,7 @@ class Orchestrator:
             "parking_cost": primary_transport.get("parking_cost_eur"),
             "transport_mode": primary_transport.get("transport_mode", ""),
             "transport_time_min": primary_transport.get("transport_time_min", 0),
+            "flight_duration_min": primary_duration,
         }
 
         logger.info(
@@ -811,10 +912,13 @@ class Orchestrator:
                     return_date=snapshot.return_date,
                     passengers=route.passengers,
                     trip_type=route.trip_type,
+                    max_stops=route.max_stops,
                 )
-                lowest = result.price_insights.get("lowest_price")
+                lowest = extract_lowest_price(result, max_stops=route.max_stops)
                 if lowest is None:
                     continue
+
+                sec_duration = extract_min_duration(result)
 
                 now = datetime.now(UTC)
                 best_flight = result.best_flights[0] if result.best_flights else None
@@ -846,6 +950,7 @@ class Orchestrator:
                     "parking_cost": airport.get("parking_cost_eur"),
                     "transport_mode": airport.get("transport_mode", ""),
                     "transport_time_min": airport.get("transport_time_min", 0),
+                    "flight_duration_min": sec_duration,
                 })
             except SerpAPIError as e:
                 logger.error("SerpAPI error for secondary %s→%s: %s", airport["airport_code"], route.destination, e)
