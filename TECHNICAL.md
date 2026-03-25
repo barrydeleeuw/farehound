@@ -35,14 +35,14 @@ FareHound is a personal flight fare monitoring service deployed as a Home Assist
              │                             │
              ▼                             ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  DuckDB (/data/flights.duckdb)                               │
+│  SQLite (/data/flights.db)                                    │
 │  routes, price_snapshots, deals, alert_rules, poll_windows   │
 └──────────────────────────┬───────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  Analysis Engine (Claude API)                                │
-│  • Score against DuckDB history + SerpAPI price_insights     │
+│  • Score against SQLite history + SerpAPI price_insights      │
 │  • Behavioral feedback: learns from booked/dismissed deals   │
 │  • Urgency classification: book_now / watch / skip           │
 │  • Pre-filter: only scores deals 10%+ below avg              │
@@ -51,9 +51,7 @@ FareHound is a personal flight fare monitoring service deployed as a Home Assist
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  Alerting                                                    │
-│  • HA notifications (primary) — push + action buttons        │
-│  • Telegram bot (optional) — @BotFather bot                  │
-│  • Lovelace sensors — sensor.farehound_{route}_price         │
+│  • Telegram bot (primary) — @BotFather bot                   │
 │  • Daily digest — scheduled summary of all routes            │
 │  • Feedback loop — "Book Now" / "Not Interested" actions     │
 └──────────────────────────────────────────────────────────────┘
@@ -66,11 +64,10 @@ FareHound is a personal flight fare monitoring service deployed as a Home Assist
 | Config loader | `src/config.py` | Load/validate YAML config, resolve env vars, HA options translation |
 | SerpAPI client | `src/apis/serpapi.py` | Google Flights search + verify_fare + date windowing + rate tracking |
 | Community listener | `src/apis/community.py` | Telegram (Telethon) + RSS (feedparser) listeners, deal message parsing |
-| Database layer | `src/storage/db.py` | DuckDB queries, schema, feedback tracking |
+| Database layer | `src/storage/db.py` | SQLite queries, schema, feedback tracking |
 | Data models | `src/storage/models.py` | Dataclasses: Route, PriceSnapshot, Deal, PollWindow, AlertRule |
 | Deal scorer | `src/analysis/scorer.py` | Claude API scoring with behavioral feedback enrichment |
-| HA notifier | `src/alerts/homeassistant.py` | HA REST API notifications, action buttons, sensor updates |
-| Telegram notifier | `src/alerts/telegram.py` | Telegram Bot API alerts (optional secondary channel) |
+| Telegram notifier | `src/alerts/telegram.py` | Telegram Bot API alerts (primary channel) |
 | Orchestrator | `src/orchestrator.py` | Event loop, scheduling, pipeline coordination, community callback |
 | Entrypoint | `ha-addon/run.sh` | Container startup, env var export, graceful shutdown |
 | HA add-on config | `ha-addon/config.yaml` | Add-on metadata, options schema |
@@ -138,78 +135,105 @@ Goal: stay within ~150-300 SerpAPI searches/month per route.
 3. **Weekly rescan**: re-check all windows for price shifts
 4. **Expand on drops**: if a price drop detected, poll adjacent dates
 
-## DuckDB Schema
+## SQLite Schema
 
 ```sql
+CREATE TABLE users (
+    user_id           TEXT PRIMARY KEY,
+    telegram_chat_id  TEXT UNIQUE NOT NULL,
+    name              TEXT,
+    home_location     TEXT,
+    home_airport      TEXT DEFAULT 'AMS',
+    preferences       TEXT,
+    onboarded         INTEGER DEFAULT 0,
+    active            INTEGER DEFAULT 1,
+    created_at        TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE routes (
-    route_id          VARCHAR PRIMARY KEY,
-    origin            VARCHAR NOT NULL,
-    destination       VARCHAR NOT NULL,
-    trip_type         VARCHAR DEFAULT 'round_trip',
-    earliest_departure DATE,
-    latest_return     DATE,
+    route_id          TEXT PRIMARY KEY,
+    origin            TEXT NOT NULL,
+    destination       TEXT NOT NULL,
+    trip_type         TEXT DEFAULT 'round_trip',
+    earliest_departure TEXT,
+    latest_return     TEXT,
     date_flex_days    INTEGER DEFAULT 3,
     max_stops         INTEGER DEFAULT 1,
     passengers        INTEGER DEFAULT 2,
-    preferred_airlines VARCHAR[],
-    notes             VARCHAR,
-    active            BOOLEAN DEFAULT true,
-    created_at        TIMESTAMP DEFAULT now()
+    preferred_airlines TEXT,
+    notes             TEXT,
+    active            INTEGER DEFAULT 1,
+    created_at        TEXT DEFAULT (datetime('now')),
+    trip_duration_type TEXT,
+    trip_duration_days INTEGER,
+    preferred_departure_days TEXT,
+    preferred_return_days TEXT
 );
 
 CREATE TABLE poll_windows (
-    window_id         VARCHAR PRIMARY KEY,
-    route_id          VARCHAR REFERENCES routes(route_id),
-    outbound_date     DATE NOT NULL,
-    return_date       DATE,
-    priority          VARCHAR DEFAULT 'normal',
-    last_polled_at    TIMESTAMP,
-    lowest_seen_price DECIMAL(10,2),
-    created_at        TIMESTAMP DEFAULT now()
+    window_id         TEXT PRIMARY KEY,
+    route_id          TEXT REFERENCES routes(route_id),
+    outbound_date     TEXT NOT NULL,
+    return_date       TEXT,
+    priority          TEXT DEFAULT 'normal',
+    last_polled_at    TEXT,
+    lowest_seen_price REAL,
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE price_snapshots (
-    snapshot_id       VARCHAR PRIMARY KEY,
-    route_id          VARCHAR REFERENCES routes(route_id),
-    observed_at       TIMESTAMP NOT NULL,
-    source            VARCHAR NOT NULL,       -- 'serpapi_poll' | 'serpapi_verify'
+    snapshot_id       TEXT PRIMARY KEY,
+    route_id          TEXT REFERENCES routes(route_id),
+    window_id         TEXT REFERENCES poll_windows(window_id),
+    observed_at       TEXT NOT NULL,
+    source            TEXT NOT NULL,          -- 'serpapi_poll' | 'serpapi_verify'
+    outbound_date     TEXT,
+    return_date       TEXT,
     passengers        INTEGER NOT NULL,
-    outbound_date     DATE,
-    return_date       DATE,
-    lowest_price      DECIMAL(10,2),
-    currency          VARCHAR DEFAULT 'EUR',
-    best_flight       JSON,
-    all_flights       JSON,
-    price_level       VARCHAR,
-    typical_low       DECIMAL(10,2),
-    typical_high      DECIMAL(10,2),
-    price_history     JSON,
-    search_params     JSON,
-    created_at        TIMESTAMP DEFAULT now()
+    lowest_price      REAL,
+    currency          TEXT DEFAULT 'EUR',
+    best_flight       TEXT,
+    all_flights       TEXT,
+    price_level       TEXT,
+    typical_low       REAL,
+    typical_high      REAL,
+    price_history     TEXT,
+    search_params     TEXT,
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE deals (
-    deal_id           VARCHAR PRIMARY KEY,
-    snapshot_id       VARCHAR REFERENCES price_snapshots(snapshot_id),
-    route_id          VARCHAR REFERENCES routes(route_id),
-    score             DECIMAL(3,2),
-    urgency           VARCHAR,                -- 'book_now' | 'watch' | 'skip'
-    reasoning         VARCHAR,
-    booking_url       VARCHAR,
-    alert_sent        BOOLEAN DEFAULT false,
-    alert_sent_at     TIMESTAMP,
-    booked            BOOLEAN DEFAULT false,
-    feedback          VARCHAR,                -- 'booked' | 'dismissed' | NULL
-    created_at        TIMESTAMP DEFAULT now()
+    deal_id           TEXT PRIMARY KEY,
+    snapshot_id       TEXT REFERENCES price_snapshots(snapshot_id),
+    route_id          TEXT REFERENCES routes(route_id),
+    score             REAL,
+    urgency           TEXT,                   -- 'book_now' | 'watch' | 'skip'
+    reasoning         TEXT,
+    booking_url       TEXT,
+    alert_sent        INTEGER DEFAULT 0,
+    alert_sent_at     TEXT,
+    booked            INTEGER DEFAULT 0,
+    feedback          TEXT,                   -- 'booked' | 'dismissed' | NULL
+    created_at        TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE alert_rules (
-    rule_id           VARCHAR PRIMARY KEY,
-    route_id          VARCHAR REFERENCES routes(route_id),
-    rule_type         VARCHAR NOT NULL,
-    threshold         DECIMAL(10,2),
-    channel           VARCHAR NOT NULL,
-    active            BOOLEAN DEFAULT true
+    rule_id           TEXT PRIMARY KEY,
+    route_id          TEXT REFERENCES routes(route_id),
+    rule_type         TEXT NOT NULL,
+    threshold         REAL,
+    channel           TEXT NOT NULL,
+    active            INTEGER DEFAULT 1
+);
+
+CREATE TABLE airport_transport (
+    airport_code      TEXT PRIMARY KEY,
+    airport_name      TEXT,
+    transport_mode    TEXT,
+    transport_cost_eur REAL,
+    transport_time_min INTEGER,
+    parking_cost_eur  REAL,
+    is_primary        INTEGER DEFAULT 0
 );
 ```
 
@@ -222,7 +246,7 @@ CREATE TABLE alert_rules (
 async with httpx.AsyncClient() as client:
     response = await client.get(url, params=params)
 
-# DuckDB via run_in_executor (no native async)
+# SQLite via run_in_executor (no native async)
 loop = asyncio.get_running_loop()
 result = await loop.run_in_executor(None, db.method, *args)
 
@@ -251,9 +275,9 @@ result = await loop.run_in_executor(None, db.method, *args)
 ```
 # Core
 httpx              # Async HTTP (all API calls)
-duckdb             # Embedded analytical database
 anthropic          # Claude API client
 pyyaml             # Config parsing
+# sqlite3 is built-in (Python stdlib)
 
 # Community feeds
 telethon           # Telegram channel monitoring
@@ -299,7 +323,7 @@ rich               # CLI output formatting (scripts)
 ## Build Phases (all complete)
 
 ### Phase 1 — Core Monitoring Loop
-SerpAPI client, DuckDB storage, config system, smart date polling, static threshold alerts, HA notifications, add-on scaffolding, search_once.py test script.
+SerpAPI client, SQLite storage, config system, smart date polling, static threshold alerts, Telegram notifications, add-on scaffolding, search_once.py test script.
 
 ### Phase 2 — Claude Scoring
 Deal scorer with Claude API, replaced static thresholds with AI scoring, daily digest, Google Flights URLs in alerts, traveller preferences in config.

@@ -3,6 +3,7 @@
 **Date:** March 22, 2026
 **Author:** Architecture review for product evolution
 **Context:** Barry wants to evolve FareHound from a personal HA add-on into a monetizable multi-user product.
+*Note: Multi-user support (Phase A) was implemented on the existing HA/SQLite stack. This document remains the reference for the planned cloud migration.*
 
 ---
 
@@ -274,9 +275,9 @@ Reasoning:
 | Component | File | Why |
 |-----------|------|-----|
 | **HA add-on packaging** | `ha-addon/` | No longer deploying as HA add-on. |
-| **HA notifier** | `src/alerts/homeassistant.py` | Already unused (Telegram is primary). |
+| **HA notifier** | `src/alerts/homeassistant.py` | Already unused (Telegram is primary). Already removed. |
 | **HA-specific config translation** | `_translate_ha_options()` in config.py | No longer needed. |
-| **Lovelace card** | `ha-addon/lovelace-card.yaml` | No longer needed. |
+| **Lovelace card** | `ha-addon/lovelace-card.yaml` | No longer needed. Already removed. |
 
 ### Keep but defer changes
 
