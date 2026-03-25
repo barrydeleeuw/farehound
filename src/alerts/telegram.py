@@ -149,8 +149,20 @@ class TelegramNotifier:
                     alt_parts.append(f"€{t_total:,.0f} {mode.lower()}")
                 if parking:
                     alt_parts.append(f"€{parking:,.0f} parking")
+                duration_str = ""
+                flight_dur = alt.get("flight_duration_min")
+                primary_dur = alt.get("primary_flight_duration_min")
+                if flight_dur:
+                    dur_h = flight_dur / 60
+                    if primary_dur and flight_dur != primary_dur:
+                        diff_h = (flight_dur - primary_dur) / 60
+                        sign = "+" if diff_h > 0 else ""
+                        duration_str = f" | {dur_h:.0f}h flight ({sign}{diff_h:.0f}h)"
+                    else:
+                        duration_str = f" | {dur_h:.0f}h flight"
+
                 lines.append(
-                    f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f})"
+                    f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f}){duration_str}"
                 )
                 lines.append(
                     f"    {' + '.join(alt_parts)} = *€{net:,.0f} total*"
@@ -307,8 +319,20 @@ class TelegramNotifier:
                         alt_parts.append(f"€{t_total_alt:,.0f} {mode.lower()}")
                     if parking:
                         alt_parts.append(f"€{parking:,.0f} parking")
+                    duration_str = ""
+                    flight_dur = alt.get("flight_duration_min")
+                    primary_dur = alt.get("primary_flight_duration_min")
+                    if flight_dur:
+                        dur_h = flight_dur / 60
+                        if primary_dur and flight_dur != primary_dur:
+                            diff_h = (flight_dur - primary_dur) / 60
+                            sign = "+" if diff_h > 0 else ""
+                            duration_str = f" | {dur_h:.0f}h flight ({sign}{diff_h:.0f}h)"
+                        else:
+                            duration_str = f" | {dur_h:.0f}h flight"
+
                     lines.append(
-                        f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f})"
+                        f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f}){duration_str}"
                     )
                     lines.append(
                         f"    {' + '.join(alt_parts)} = *€{net:,.0f} total*"

@@ -797,6 +797,93 @@ def test_routes_scoped_by_user(db):
     assert db.get_active_routes(user_id=uid2)[0].route_id == "r2"
 
 
+# --- follow-up spam fix: follow_up_count ---
+
+def test_get_deals_pending_feedback_excludes_max_followups(db, sample_route):
+    """Deals with follow_up_count >= 2 should be excluded from pending feedback."""
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    snap = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now - timedelta(days=4),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+    )
+    db.insert_snapshot(snap)
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.85"), alert_sent=True,
+        alert_sent_at=now - timedelta(days=4),
+    )
+    db.insert_deal(deal)
+
+    # Simulate 2 follow-ups already sent
+    db.mark_follow_up_sent("d1")
+    db.mark_follow_up_sent("d1")
+
+    pending = db.get_deals_pending_feedback(older_than_days=3)
+    assert len(pending) == 0
+
+
+def test_mark_follow_up_sent_increments_counter(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    snap = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now - timedelta(days=4),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+    )
+    db.insert_snapshot(snap)
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.85"), alert_sent=True,
+        alert_sent_at=now - timedelta(days=4),
+    )
+    db.insert_deal(deal)
+
+    db.mark_follow_up_sent("d1")
+    # Check count via raw SQL
+    row = db._conn.execute("SELECT follow_up_count FROM deals WHERE deal_id = 'd1'").fetchone()
+    assert row[0] == 1
+
+    db.mark_follow_up_sent("d1")
+    row = db._conn.execute("SELECT follow_up_count FROM deals WHERE deal_id = 'd1'").fetchone()
+    assert row[0] == 2
+
+
+def test_expire_stale_deals(db, sample_route):
+    db.upsert_route(sample_route)
+    now = datetime.now(UTC)
+    snap = PriceSnapshot(
+        snapshot_id="s1", route_id="ams-nrt", observed_at=now - timedelta(days=10),
+        source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+    )
+    db.insert_snapshot(snap)
+    # Deal with 2 follow-ups and no feedback
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.85"), alert_sent=True,
+        alert_sent_at=now - timedelta(days=10),
+    )
+    db.insert_deal(deal)
+    db.mark_follow_up_sent("d1")
+    db.mark_follow_up_sent("d1")
+
+    # Deal with feedback should NOT be expired
+    deal2 = Deal(
+        deal_id="d2", snapshot_id="s1", route_id="ams-nrt",
+        score=Decimal("0.80"), alert_sent=True,
+        alert_sent_at=now - timedelta(days=10),
+        feedback="booked",
+    )
+    db.insert_deal(deal2)
+
+    db.expire_stale_deals()
+
+    row1 = db._conn.execute("SELECT feedback FROM deals WHERE deal_id = 'd1'").fetchone()
+    assert row1[0] == "expired"
+
+    row2 = db._conn.execute("SELECT feedback FROM deals WHERE deal_id = 'd2'").fetchone()
+    assert row2[0] == "booked"  # unchanged
+
+
 def test_default_user_migration(tmp_path):
     """Existing data gets assigned to a default user on init."""
     database = Database(db_path=tmp_path / "migrate.db")

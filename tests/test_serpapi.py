@@ -188,3 +188,93 @@ def test_reset_monthly_counter():
     client._calls_this_month = 100
     client.reset_monthly_counter()
     assert client._calls_this_month == 0
+
+
+# --- extract_lowest_price ---
+
+from src.apis.serpapi import extract_lowest_price, extract_min_duration, SerpAPIBudgetExhausted
+
+
+def test_extract_lowest_price_from_flights():
+    result = FlightSearchResult(
+        best_flights=[{"price": 500, "flights": [{"airline": "KL"}]}],
+        other_flights=[{"price": 600}, {"price": 450}],
+        price_insights={"lowest_price": 480},
+    )
+    assert extract_lowest_price(result) == 450
+
+
+def test_extract_lowest_price_fallback_to_insights():
+    result = FlightSearchResult(
+        best_flights=[{"flights": [{"airline": "KL"}]}],  # no price key
+        other_flights=[],
+        price_insights={"lowest_price": 480},
+    )
+    assert extract_lowest_price(result) == 480
+
+
+def test_extract_lowest_price_empty():
+    result = FlightSearchResult(
+        best_flights=[],
+        other_flights=[],
+        price_insights={},
+    )
+    assert extract_lowest_price(result) is None
+
+
+def test_extract_lowest_price_with_max_stops_filter():
+    result = FlightSearchResult(
+        best_flights=[
+            {"price": 400, "flights": [{"a": 1}, {"a": 2}, {"a": 3}]},  # 2 stops
+            {"price": 500, "flights": [{"a": 1}, {"a": 2}]},  # 1 stop
+        ],
+        other_flights=[
+            {"price": 450, "flights": [{"a": 1}]},  # direct
+        ],
+    )
+    # max_stops=1 should exclude the 2-stop flight at 400
+    assert extract_lowest_price(result, max_stops=1) == 450
+
+
+def test_extract_lowest_price_max_stops_filters_all():
+    result = FlightSearchResult(
+        best_flights=[
+            {"price": 400, "flights": [{"a": 1}, {"a": 2}, {"a": 3}]},  # 2 stops
+        ],
+        other_flights=[],
+        price_insights={"lowest_price": 600},
+    )
+    # max_stops=0 filters all flights, falls back to insights
+    assert extract_lowest_price(result, max_stops=0) == 600
+
+
+# --- extract_min_duration ---
+
+def test_extract_min_duration():
+    result = FlightSearchResult(
+        best_flights=[{"total_duration": 720}],
+        other_flights=[{"total_duration": 600}, {"total_duration": 840}],
+    )
+    assert extract_min_duration(result) == 600
+
+
+def test_extract_min_duration_empty():
+    result = FlightSearchResult(best_flights=[], other_flights=[])
+    assert extract_min_duration(result) is None
+
+
+def test_extract_min_duration_missing_key():
+    result = FlightSearchResult(
+        best_flights=[{"price": 500}],  # no total_duration
+        other_flights=[{"total_duration": 600}],
+    )
+    assert extract_min_duration(result) == 600
+
+
+# --- SerpAPIBudgetExhausted ---
+
+def test_budget_exhausted_at_hard_cap():
+    client = SerpAPIClient(api_key="test-key")
+    client._calls_this_month = 950
+    with pytest.raises(SerpAPIBudgetExhausted):
+        client._warn_rate_limit()

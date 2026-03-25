@@ -642,9 +642,13 @@ class TripBot:
                     raw = raw[:-3]
                 raw = raw.strip()
             result = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse Claude response as JSON: %s", raw)
+            await self._send(client, chat_id, "I had trouble understanding that. Could you rephrase?")
+            return
         except Exception:
-            logger.exception("Failed to interpret message")
-            await self._send(client, chat_id, "Sorry, I didn't understand that. Try /help for commands.")
+            logger.warning("Failed to interpret message", exc_info=True)
+            await self._send(client, chat_id, "I had trouble understanding that. Could you rephrase?")
             return
 
         intent = result.get("intent", "general_chat")
@@ -659,14 +663,16 @@ class TripBot:
             self._pending.pop(chat_id, None)
 
         if intent == "general_chat":
-            self._add_history(chat_id, "assistant", response_text)
-            await self._send(client, chat_id, response_text)
+            msg = response_text or "I'm not sure how to respond to that. Try /help for commands."
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg)
 
         elif intent == "add_trip":
             destination = params.get("destination")
             if not destination:
-                self._add_history(chat_id, "assistant", response_text)
-                await self._send(client, chat_id, response_text)
+                msg = response_text or "I couldn't understand that destination. Could you try again with a city or airport code?"
+                self._add_history(chat_id, "assistant", msg)
+                await self._send(client, chat_id, msg)
                 return
             origin = params.get("origin") or home_airport
             earliest = params.get("earliest_departure", "")
@@ -713,8 +719,9 @@ class TripBot:
             route_id = params.get("route_id")
             changes = params.get("changes", {})
             if not route_id or not changes:
-                self._add_history(chat_id, "assistant", response_text)
-                await self._send(client, chat_id, response_text)
+                msg = response_text or "I couldn't understand which route to modify. Use /trips to see your routes."
+                self._add_history(chat_id, "assistant", msg)
+                await self._send(client, chat_id, msg)
                 return
             # Verify route exists
             matching = [r for r in routes if r.route_id == route_id]
@@ -749,8 +756,9 @@ class TripBot:
         elif intent == "remove_trip":
             route_id = params.get("route_id")
             if not route_id:
-                self._add_history(chat_id, "assistant", response_text)
-                await self._send(client, chat_id, response_text)
+                msg = response_text or "I couldn't understand which route to remove. Use /trips to see your routes."
+                self._add_history(chat_id, "assistant", msg)
+                await self._send(client, chat_id, msg)
                 return
             matching = [r for r in routes if r.route_id == route_id]
             if not matching:
@@ -805,6 +813,12 @@ class TripBot:
             ]]}
             self._add_history(chat_id, "assistant", msg)
             await self._send(client, chat_id, msg, reply_markup=reply_markup)
+
+        else:
+            logger.warning("Unknown intent %r from Claude response", intent)
+            msg = response_text or "I'm not sure how to help with that. Try /help for commands."
+            self._add_history(chat_id, "assistant", msg)
+            await self._send(client, chat_id, msg)
 
     async def _handle_price_query(
         self, route_id: str | None, routes: list[Route], chat_id: str, client: httpx.AsyncClient
@@ -1202,8 +1216,9 @@ class TripBot:
 
             await self._send(client, chat_id, f"Route added: {route_name(route.origin, route.destination)}")
 
-            # Immediate price check
-            await self._immediate_price_check(route, uid, chat_id, client)
+            # Immediate price check (non-blocking)
+            task = asyncio.create_task(self._immediate_price_check(route, uid, chat_id, client))
+            task.add_done_callback(self._on_price_check_done)
 
         elif pending["action"] == "remove":
             await loop.run_in_executor(None, self._db.deactivate_route, pending["route_id"])
@@ -1290,6 +1305,13 @@ class TripBot:
         except Exception:
             pass
 
+    def _on_price_check_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error("Background price check failed: %s", exc, exc_info=exc)
+
     async def _immediate_price_check(
         self, route: Route, user_id: str, chat_id: str, client: httpx.AsyncClient,
     ) -> None:
@@ -1297,7 +1319,7 @@ class TripBot:
             return
 
         from datetime import date as date_type
-        from src.apis.serpapi import SerpAPIClient, generate_date_windows
+        from src.apis.serpapi import SerpAPIClient, extract_lowest_price, extract_min_duration, generate_date_windows
         from src.analysis.nearby_airports import compare_airports
         from src.utils.airports import route_name, airport_name
 
@@ -1332,13 +1354,10 @@ class TripBot:
                     outbound_date=out_date,
                     return_date=ret_date,
                     passengers=route.passengers,
+                    max_stops=route.max_stops,
                 )
 
-                primary_price = primary_result.price_insights.get("lowest_price")
-                if not primary_price:
-                    all_flights = primary_result.best_flights + primary_result.other_flights
-                    prices = [f["price"] for f in all_flights if "price" in f]
-                    primary_price = min(prices) if prices else None
+                primary_price = extract_lowest_price(primary_result, max_stops=route.max_stops)
 
                 if not primary_price:
                     await self._send(client, chat_id,
@@ -1380,14 +1399,18 @@ class TripBot:
                     lines.append(f"Typical range: €{typical_range[0]:,.0f} – €{typical_range[1]:,.0f}")
 
                 # Best flight details
+                primary_duration = extract_min_duration(primary_result)
                 if primary_result.best_flights:
                     bf = primary_result.best_flights[0]
                     airline = ""
                     legs = bf.get("flights", [])
                     if legs:
                         airline = legs[0].get("airline", "")
+                    dur_str = f" ({primary_duration // 60}h{primary_duration % 60:02d}m)" if primary_duration else ""
                     if airline:
-                        lines.append(f"✈️ {airline}")
+                        lines.append(f"✈️ {airline}{dur_str}")
+                    elif primary_duration:
+                        lines.append(f"✈️ {dur_str.strip('() ')}")
 
                 # Poll secondary airports
                 await self._send_typing(client, chat_id)
@@ -1401,6 +1424,7 @@ class TripBot:
                     "transport_cost": p_transport_cost,
                     "parking_cost": p_parking_cost,
                     "transport_mode": p_mode,
+                    "flight_duration_min": primary_duration,
                 }
 
                 secondary_results = []
@@ -1413,12 +1437,9 @@ class TripBot:
                             outbound_date=out_date,
                             return_date=ret_date,
                             passengers=route.passengers,
+                            max_stops=route.max_stops,
                         )
-                        sec_price = sec_result.price_insights.get("lowest_price")
-                        if not sec_price:
-                            sec_flights = sec_result.best_flights + sec_result.other_flights
-                            sec_prices = [f["price"] for f in sec_flights if "price" in f]
-                            sec_price = min(sec_prices) if sec_prices else None
+                        sec_price = extract_lowest_price(sec_result, max_stops=route.max_stops)
                         if sec_price:
                             sec_pp = float(sec_price) / route.passengers if route.passengers > 1 else float(sec_price)
                             secondary_results.append({
@@ -1428,6 +1449,7 @@ class TripBot:
                                 "parking_cost": apt.get("parking_cost_eur"),
                                 "transport_mode": apt.get("transport_mode", ""),
                                 "transport_time_min": apt.get("transport_time_min", 0),
+                                "flight_duration_min": extract_min_duration(sec_result),
                             })
                     except Exception:
                         logger.debug("Secondary airport %s check failed", apt["airport_code"])
@@ -1450,8 +1472,19 @@ class TripBot:
                             alt_parts.append(f"€{alt_t_total:,.0f} {alt['transport_mode'].lower()}")
                         if alt.get("parking_cost"):
                             alt_parts.append(f"€{alt['parking_cost']:,.0f} parking")
+                        alt_dur = alt.get("flight_duration_min")
+                        alt_pri_dur = alt.get("primary_flight_duration_min")
+                        alt_dur_str = ""
+                        if alt_dur:
+                            alt_dur_h = alt_dur / 60
+                            if alt_pri_dur and alt_dur != alt_pri_dur:
+                                diff_h = (alt_dur - alt_pri_dur) / 60
+                                sign = "+" if diff_h > 0 else ""
+                                alt_dur_str = f" | {alt_dur_h:.0f}h flight ({sign}{diff_h:.0f}h)"
+                            else:
+                                alt_dur_str = f" | {alt_dur_h:.0f}h flight"
                         lines.append(
-                            f"{icon} *{alt['airport_name']}*: €{alt['fare_pp']:,.0f}/pp (save €{alt['savings']:,.0f})"
+                            f"{icon} *{alt['airport_name']}*: €{alt['fare_pp']:,.0f}/pp (save €{alt['savings']:,.0f}){alt_dur_str}"
                         )
                         lines.append(
                             f"    {' + '.join(alt_parts)} = *€{alt['net_cost']:,.0f} total*"

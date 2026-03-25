@@ -1257,6 +1257,7 @@ async def test_help_mentions_inline_buttons(bot, user_id):
 @pytest.mark.asyncio
 async def test_immediate_price_check_sends_typing(bot, db, user_id):
     """After route add, typing action is sent before price check."""
+    import asyncio
     from src.apis.serpapi import FlightSearchResult
 
     bot._serpapi_key = "test-key"
@@ -1291,6 +1292,10 @@ async def test_immediate_price_check_sends_typing(bot, db, user_id):
         mock_serp_cls.return_value = mock_serp
 
         await bot._handle_update(_make_update("/yes"), client)
+        # Allow background price check task to complete
+        pending = [t for t in asyncio.all_tasks() if not t.done() and t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # Route should be added
     routes = db.get_active_routes(user_id=user_id)
@@ -1318,6 +1323,8 @@ async def test_immediate_price_check_sends_typing(bot, db, user_id):
 @pytest.mark.asyncio
 async def test_immediate_price_check_graceful_failure(bot, db, user_id):
     """If SerpAPI fails, route is still added and user gets fallback message."""
+    import asyncio
+
     bot._serpapi_key = "test-key"
     bot._pending["42"] = {
         "action": "add",
@@ -1344,6 +1351,10 @@ async def test_immediate_price_check_graceful_failure(bot, db, user_id):
         mock_serp_cls.return_value = mock_serp
 
         await bot._handle_update(_make_update("/yes"), client)
+        # Allow background price check task to complete
+        pending = [t for t in asyncio.all_tasks() if not t.done() and t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # Route should still be added
     routes = db.get_active_routes(user_id=user_id)
@@ -1701,3 +1712,44 @@ async def test_price_query_trend_info(bot, db, user_id):
     text = payload["text"]
     # Should show some trend indicator (below/above average, or price level)
     assert "average" in text.lower() or "avg" in text.lower() or "level" in text.lower()
+
+
+# --- ITEM-033: Silent failure fix — malformed Claude responses produce user-visible error ---
+
+
+@pytest.mark.asyncio
+async def test_malformed_claude_response_shows_error(bot, user_id):
+    """When Claude returns invalid JSON, user sees an error message (not silence)."""
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text="This is not valid JSON at all")]
+
+    with patch("src.bot.commands.anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_resp)
+        mock_cls.return_value = mock_client
+        await bot._handle_update(_make_update("track flights to Mars"), client)
+
+    # User should get an error message, not silence
+    assert client.post.called
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "trouble" in payload["text"].lower() or "rephrase" in payload["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_claude_api_exception_shows_error(bot, user_id):
+    """When Claude API throws, user sees an error message (not silence)."""
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    with patch("src.bot.commands.anthropic.AsyncAnthropic") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(side_effect=Exception("API error"))
+        mock_cls.return_value = mock_client
+        await bot._handle_update(_make_update("track flights somewhere"), client)
+
+    assert client.post.called
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "trouble" in payload["text"].lower() or "rephrase" in payload["text"].lower()

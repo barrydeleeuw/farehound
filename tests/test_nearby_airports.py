@@ -143,3 +143,34 @@ def test_compare_airports_includes_airport_name():
     ]
     result = compare_airports(primary, secondaries, passengers=2)
     assert result[0]["airport_name"] == "Cologne"
+
+
+# --- flight_duration_min passthrough ---
+
+def test_compare_airports_passes_through_flight_duration():
+    primary = _make_primary()
+    primary["flight_duration_min"] = 720
+    secondaries = [{
+        "airport_code": "BRU",
+        "fare_pp": 350,
+        "transport_cost": 35,
+        "parking_cost": None,
+        "transport_mode": "train",
+        "transport_time_min": 120,
+        "flight_duration_min": 680,
+    }]
+    result = compare_airports(primary, secondaries, passengers=2)
+    assert len(result) == 1
+    assert result[0]["flight_duration_min"] == 680
+    assert result[0]["primary_flight_duration_min"] == 720
+
+
+def test_compare_airports_flight_duration_none():
+    """When flight_duration_min is not provided, it should be None."""
+    primary = _make_primary()  # no flight_duration_min
+    secondaries = [
+        _make_secondary("BRU", 350, 35),
+    ]
+    result = compare_airports(primary, secondaries, passengers=2)
+    assert result[0]["flight_duration_min"] is None
+    assert result[0]["primary_flight_duration_min"] is None

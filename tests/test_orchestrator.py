@@ -340,6 +340,38 @@ async def test_secondary_airports_uses_user_id():
 
 
 @pytest.mark.asyncio
+async def test_check_pending_feedback_groups_by_route():
+    """Multiple deals for the same route should produce one follow-up."""
+    orch, mock_db = _make_orchestrator_with_mocks()
+    orch.telegram_notifier = AsyncMock()
+
+    user = _make_user("u1", "chat1", "Alice")
+    route = _make_route("r1", "AMS", "NRT")
+
+    # Two deals for the same route, both pending
+    pending_deals = [
+        {"deal_id": "d1", "route_id": "r1", "origin": "AMS", "destination": "NRT", "price": 450},
+        {"deal_id": "d2", "route_id": "r1", "origin": "AMS", "destination": "NRT", "price": 500},
+    ]
+
+    mock_db.get_deals_pending_feedback.return_value = pending_deals
+    mock_db.get_all_active_users.return_value = [user]
+    mock_db.get_active_routes.return_value = [route]
+
+    await orch._check_pending_feedback()
+
+    # Only ONE follow-up sent (grouped by route)
+    assert orch.telegram_notifier.send_follow_up.call_count == 1
+    # The follow-up should use the best (lowest) price deal
+    call_args = orch.telegram_notifier.send_follow_up.call_args
+    assert call_args.args[0]["price"] == 450
+    # Both deals should be marked as follow-up sent
+    assert mock_db.mark_follow_up_sent.call_count == 2
+    # Expire stale deals should be called
+    mock_db.expire_stale_deals.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_shared_polling_different_passengers():
     """Same route but different passenger counts = separate API calls."""
     orch, mock_db = _make_orchestrator_with_mocks()
