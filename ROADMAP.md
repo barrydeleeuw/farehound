@@ -29,6 +29,27 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## Ready
 
+### [ITEM-040] SerpAPI call budget optimization
+- **Status:** Ready
+- **Priority:** P0 (Critical)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** At 240 calls in the first week, FareHound is on track for ~1,020 calls/month — exceeding the Starter plan limit (1,000). The polling engine wastes calls on redundant date windows, too-frequent secondary airport checks, and no awareness of recent snapshots. Immediate call reduction needed before the budget runs out.
+- **Current burn rate:** ~34 calls/day across 3 routes with 4 secondary airports
+- **Quick wins (implement all):**
+  1. **Reduce date windows from 4 to 2** after initial scan — focus polling already picks the best window, so 4 is wasteful after the first full rescan. Saves ~50% of primary calls.
+  2. **Secondary airports every 3rd or 4th cycle** instead of every 2nd — secondary prices don't change fast enough to justify checking every 8h. Saves ~30-50% of secondary calls.
+  3. **Skip repoll if recent snapshot exists** — if `_immediate_price_check` (bot) just polled a route, the scheduler should skip it on the next cycle. Check `last_polled_at` against a minimum interval (e.g., 6h).
+  4. **Add budget monitoring with hard stop** — log a warning at 700 calls/month, error at 900, and stop polling at 950. Currently `_warn_rate_limit` warns at 750/900 but never stops.
+- **Expected result:** ~15-20 calls/day (down from ~34), well within the 1,000/month budget.
+- **Acceptance Criteria:**
+  - [ ] Focus polling uses 2 windows after initial scan (down from 4)
+  - [ ] Secondary airports polled every 3rd cycle (configurable)
+  - [ ] Recent snapshot check prevents redundant polls within 6h
+  - [ ] Hard budget cap stops polling at 950 calls/month with user notification
+  - [ ] Monthly call counter logged at INFO level each poll cycle
+  - [ ] Actual call rate verified to be under 700/month with current routes
+
 ### [ITEM-030] Fix: max_stops not enforced in SerpAPI searches
 - **Status:** Ready
 - **Priority:** P0 (Critical)
