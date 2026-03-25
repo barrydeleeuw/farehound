@@ -29,86 +29,6 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## Ready
 
-### [ITEM-040] SerpAPI call budget optimization
-- **Status:** Ready
-- **Priority:** P0 (Critical)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** At 240 calls in the first week, FareHound is on track for ~1,020 calls/month — exceeding the Starter plan limit (1,000). The polling engine wastes calls on redundant date windows, too-frequent secondary airport checks, and no awareness of recent snapshots. Immediate call reduction needed before the budget runs out.
-- **Current burn rate:** ~34 calls/day across 3 routes with 4 secondary airports
-- **Quick wins (implement all):**
-  1. **Reduce date windows from 4 to 2** after initial scan — focus polling already picks the best window, so 4 is wasteful after the first full rescan. Saves ~50% of primary calls.
-  2. **Secondary airports every 3rd or 4th cycle** instead of every 2nd — secondary prices don't change fast enough to justify checking every 8h. Saves ~30-50% of secondary calls.
-  3. **Skip repoll if recent snapshot exists** — if `_immediate_price_check` (bot) just polled a route, the scheduler should skip it on the next cycle. Check `last_polled_at` against a minimum interval (e.g., 6h).
-  4. **Add budget monitoring with hard stop** — log a warning at 700 calls/month, error at 900, and stop polling at 950. Currently `_warn_rate_limit` warns at 750/900 but never stops.
-- **Expected result:** ~15-20 calls/day (down from ~34), well within the 1,000/month budget.
-- **Acceptance Criteria:**
-  - [ ] Focus polling uses 2 windows after initial scan (down from 4)
-  - [ ] Secondary airports polled every 3rd cycle (configurable)
-  - [ ] Recent snapshot check prevents redundant polls within 6h
-  - [ ] Hard budget cap stops polling at 950 calls/month with user notification
-  - [ ] Monthly call counter logged at INFO level each poll cycle
-  - [ ] Actual call rate verified to be under 700/month with current routes
-
-### [ITEM-030] Fix: max_stops not enforced in SerpAPI searches
-- **Status:** Ready
-- **Priority:** P0 (Critical)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** `max_stops` is stored on the route model but never passed to SerpAPI or used to filter results — in primary polling, secondary polling, or on-demand secondary polls. SerpAPI's `stops` param supports this (0=any, 1=nonstop, 2=up to 1 stop, 3=up to 2 stops). This caused a false "€1,151 savings from Düsseldorf" claim for Amsterdam→Mexico City: the DUS cheapest flight (€1,410) had 2 stops (LHR+DFW), but the route was configured for max 1 stop. The price comparison should have excluded that flight entirely.
-- **Acceptance Criteria:**
-  - [ ] Pass `stops` parameter to SerpAPI `search_flights()` derived from `route.max_stops` (map: max_stops=0→stops=1 nonstop, max_stops=1→stops=2 up to 1 stop, etc.)
-  - [ ] Apply to all three call sites: primary poll, secondary poll, on-demand secondary poll
-  - [ ] Post-filter: if `price_insights.lowest_price` is used as fallback (ITEM-028), also filter `best_flights`/`other_flights` by stop count before taking min price
-  - [ ] Verify with cached SerpAPI responses that filtered results differ from unfiltered
-- **Fix location:** `src/apis/serpapi.py` (add `max_stops` param to `search_flights`), `src/orchestrator.py` (pass `route.max_stops` at all call sites)
-
-### [ITEM-031] Factor flight duration into deal scoring and nearby comparisons
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** Currently deals and nearby airport comparisons only consider price and transport cost/time to the airport. Flight duration (total travel time including layovers) is not factored in. A "cheaper" flight from a secondary airport with a 21h journey vs a 12h direct route from the primary airport may not be a genuine saving. Flight duration data is already available in SerpAPI results (`total_duration` on each flight). This should be surfaced in alerts and used by the scorer to qualify recommendations.
-- **Acceptance Criteria:**
-  - [ ] Extract `total_duration` from flight results and store alongside price data in secondary comparisons
-  - [ ] Include flight duration in the nearby comparison data passed to the Claude scorer and Telegram alerts
-  - [ ] Alert message shows flight duration for both primary and secondary alternatives (e.g. "DUS saves €200 but adds 9h travel time")
-  - [ ] Scorer prompt updated to weigh duration — a large duration penalty should reduce the recommendation strength
-- **Fix location:** `src/analysis/nearby_airports.py` (add duration to comparison dict), `src/orchestrator.py` (extract duration from results), `src/alerts/telegram.py` (display duration), `src/analysis/scorer.py` (update prompt)
-
-### [ITEM-028] Fix: secondary airport savings uses unreliable price source
-- **Status:** Ready
-- **Priority:** P0 (Critical)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** `_poll_secondary_airports` and `_poll_secondary_airports_for_snapshot` in orchestrator.py use `price_insights.lowest_price` from SerpAPI, which can be a historical low or per-person value inconsistent with actual bookable flights. This caused a false "€555 savings from Düsseldorf" claim for Amsterdam→Tokyo Narita when DUS flights were actually more expensive (€1,034/pp vs €866/pp from AMS). The same pattern is already done correctly in `verify_fare()`.
-- **Acceptance Criteria:**
-  - [ ] Use `min(f["price"] for f in best_flights + other_flights)` as primary price source in `_poll_secondary_airports` and `_poll_secondary_airports_for_snapshot`
-  - [ ] Fall back to `price_insights.lowest_price` only when no flight results have prices
-  - [ ] Apply same fix to `_store_snapshot` for primary airport consistency
-  - [ ] Existing `test_nearby_airports.py` tests still pass
-- **Fix location:** `src/orchestrator.py` lines ~700 and ~815, `src/apis/serpapi.py` (extract helper)
-
-### [ITEM-029] Enhanced debug logging for SerpAPI polling and airport comparisons
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** Currently the Docker logs only show HTTP request traces (httpx INFO) with no application-level detail about prices, comparisons, or savings calculations. The Düsseldorf bug (ITEM-028) was undiagnosable from logs alone. Add structured debug logging so future price discrepancies can be identified immediately from `ha apps logs`.
-- **Acceptance Criteria:**
-  - [ ] Each SerpAPI search logs: `price_insights.lowest_price` vs actual min flight price from results, with a warning if they diverge by >20%
-  - [ ] Secondary airport comparison logs per-airport breakdown: airport code, fare_pp, transport cost, parking, net total
-  - [ ] Final `compare_airports` result logs: primary net vs best secondary net, savings amount, whether threshold was met
-  - [ ] Log level is DEBUG (not INFO) so it doesn't flood normal logs — enable via HA add-on config option or env var
-
-### [ITEM-027] Non-blocking bot: run price checks as background tasks
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** The bot processes updates sequentially — while `_immediate_price_check` runs (5-15s of SerpAPI calls), no new messages are polled. If the user sends another message while a price check is running, it sits in the Telegram queue unprocessed. Fix: run `_immediate_price_check` as `asyncio.create_task()` instead of `await`. The bot loop continues polling immediately after "Route added". The price check sends its results when done. Same pattern for any long-running operation in the bot handler.
-- **Fix location:** `src/bot/commands.py` — replace `await self._immediate_price_check(...)` with `asyncio.create_task(self._immediate_price_check(...))`. Consider the same for `_interpret_message` Claude API calls.
-
 ### [ITEM-011] Weekend/short trip date windowing
 - **Status:** Ready
 - **Priority:** P1 (High)
@@ -130,46 +50,6 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 
 ## Proposed
-
-### [ITEM-032] Bug: Booking follow-up spam — duplicates and no send-once guard
-- **Status:** Proposed
-- **Priority:** P0 (Critical)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** Users receive duplicate "Did you book it?" follow-up messages — the same route+price asked multiple times per hour, indefinitely. Root cause: the hourly `_check_pending_feedback()` scheduler has no "follow-up already sent" tracking, no deduplication per route, and no rate limiting.
-- **Root causes identified:**
-  1. **No follow-up-sent tracking:** The `deals` table has `alert_sent` and `feedback` columns but no `follow_up_sent_at`. Once a deal is 3+ days old with `feedback IS NULL`, it matches `get_deals_pending_feedback()` every hour — forever — until the user responds.
-  2. **No dedup per route:** Multiple deal records can exist for the same route+price (different date windows, community deal sources). Each record triggers its own follow-up message, so the user gets "Did you book AMS→NRT at €1,937?" three times if three deal records match.
-  3. **No rate limiting or batching:** `_check_pending_feedback()` loops through all matching deals and fires Telegram messages immediately with no delay, batch grouping, or per-user throttle.
-  4. **Hourly re-firing:** The scheduler runs every hour, so an unanswered follow-up produces a new message every hour until feedback is given — 24 messages/day per deal.
-- **Fix approach:**
-  1. **Add `follow_up_sent_at` column** to `deals` table. Set it when a follow-up is sent. `get_deals_pending_feedback()` excludes deals where `follow_up_sent_at IS NOT NULL`.
-  2. **Deduplicate by route:** Group pending deals by `route_id` and send one follow-up per route (using the most recent/cheapest deal), not one per deal record.
-  3. **Batch follow-ups per user:** Instead of sending N individual messages, send one consolidated message per user: "You saw these deals recently — did you book any?" with a list of routes. Reduces notification noise from N messages to 1.
-  4. **Cap follow-up attempts:** Maximum 2 follow-ups per deal (e.g., at 3 days and 7 days). After that, mark the deal as `feedback = 'expired'` and stop asking. The user clearly isn't interested.
-  5. **Respect quiet hours:** Don't send follow-ups between 22:00–08:00 user local time (ties into future user preferences).
-- **Acceptance Criteria:**
-  - [ ] `follow_up_sent_at` column added to deals table; migration handles existing data
-  - [ ] Each deal receives at most 2 follow-up messages (at ~3 days and ~7 days)
-  - [ ] Only one follow-up per route per user — deduplicated across deal records
-  - [ ] Follow-ups batched into a single message per user when multiple routes are pending
-  - [ ] Unanswered deals auto-expire after second follow-up (`feedback = 'expired'`)
-  - [ ] No duplicate follow-up messages observed in testing
-
-### [ITEM-033] Bug: NL trip creation silent failures
-- **Status:** Proposed
-- **Priority:** P0 (Critical)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** NL trip creation via Telegram silently fails on certain inputs. Observed: "Add a trip to Seoul on the same dates as Japan" produced no response at all. The `_interpret_message()` method in `commands.py` has a broad try-except that swallows Claude interpretation errors. If Claude fails to resolve a cross-trip reference or returns malformed JSON, the user gets either a generic "I didn't understand" or nothing. Additionally, the `add_trip` handler silently returns if `destination` is missing and `response_text` is empty.
-- **Fix approach:**
-  - Add specific error handling for cross-trip reference resolution failures — tell the user "I couldn't find a trip called 'Japan' in your active routes"
-  - Ensure every code path in `_interpret_message()` sends visible feedback to the user
-  - Log the raw Claude response on failure for debugging
-- **Acceptance Criteria:**
-  - [ ] Every NL message gets a visible response — no silent failures
-  - [ ] Cross-trip reference failures produce a helpful error ("I couldn't find trip X")
-  - [ ] Failed Claude interpretations logged with raw response for debugging
 
 ### [ITEM-034] Bug: Region/archipelago destinations should ask for clarification
 - **Status:** Proposed
@@ -402,6 +282,9 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-017] SerpAPI response cache for local testing
 - **Status:** Done — SERPAPI_CACHE_DIR env var enables cached responses locally. 17 responses recorded. Zero API calls during dev.
+
+### [ITEM-D10] Trust the Numbers (v2.4)
+- **Status:** Done — ITEM-028 (actual flight prices), ITEM-030 (max_stops enforced), ITEM-040 (API budget: windows 4→2, secondary every 3rd cycle, hard cap at 950), ITEM-031 (flight duration in comparisons), ITEM-029 (debug logging), ITEM-032 (follow-up spam fix), ITEM-033 (NL silent failures fix), ITEM-027 (non-blocking bot). 297 tests pass (19 new).
 
 ### [ITEM-D09] NL add-trip prompt fix (v2.3.x)
 - **Status:** Done
