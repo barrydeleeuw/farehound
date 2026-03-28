@@ -10,12 +10,16 @@ logger = logging.getLogger(__name__)
 _PER_PERSON_MODES = {"train", "thalys", "bus", "metro", "public transport", "ferry", "tram"}
 
 
-def is_per_person_transport(mode: str) -> bool:
+def is_per_person_transport(mode: str | None) -> bool:
+    if not mode:
+        return False
     return mode.lower().strip() in _PER_PERSON_MODES
 
 
-def transport_total(transport_cost: float, mode: str, passengers: int) -> float:
+def transport_total(transport_cost: float | None, mode: str | None, passengers: int) -> float:
     """Total round-trip transport cost accounting for per-person vs per-vehicle modes."""
+    if not transport_cost:
+        return 0.0
     one_way = transport_cost * passengers if is_per_person_transport(mode) else transport_cost
     return one_way * 2  # round trip
 
