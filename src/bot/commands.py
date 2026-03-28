@@ -366,8 +366,13 @@ class TripBot:
 
         if step == "name":
             name = text.strip()
-            # Create user in DB
-            user_id = await loop.run_in_executor(None, self._db.create_user, chat_id, name)
+            # Create or update user in DB
+            existing = self._get_user(chat_id)
+            if existing:
+                user_id = existing["user_id"]
+                await loop.run_in_executor(None, lambda: self._db.update_user(user_id, name=name))
+            else:
+                user_id = await loop.run_in_executor(None, self._db.create_user, chat_id, name)
             pending["user_id"] = user_id
             pending["name"] = name
             pending["step"] = "location"
