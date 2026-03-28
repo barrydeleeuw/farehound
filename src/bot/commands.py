@@ -188,22 +188,56 @@ def _format_date_display(route_or_pending: dict | Route) -> str:
         earliest = route_or_pending.get("earliest_departure", "")
         latest = route_or_pending.get("latest_return", "")
 
+    # Parse dates for window size calculation
+    from datetime import date as date_type
+    e_date = None
+    l_date = None
+    if earliest:
+        try:
+            e_date = earliest if isinstance(earliest, date_type) else date_type.fromisoformat(str(earliest))
+        except (ValueError, TypeError):
+            pass
+    if latest:
+        try:
+            l_date = latest if isinstance(latest, date_type) else date_type.fromisoformat(str(latest))
+        except (ValueError, TypeError):
+            pass
+
+    # Determine window description based on how tight the dates are
+    trip_label = ""
     if dur_type == "weekend":
         dep_str = "/".join(_DAY_NAMES[d] for d in (dep_days or [3, 4]))
         ret_str = "/".join(_DAY_NAMES[d] for d in (ret_days or [0, 6]))
-        period = _format_period(earliest, latest)
-        return f"Long weekends ({dep_str}-{ret_str}) throughout {period}"
+        trip_label = f"Long weekend ({dep_str}→{ret_str})"
     elif dur_type == "weeks" and dur_days:
         weeks = dur_days // 7
-        label = f"{weeks} week{'s' if weeks > 1 else ''}"
-        period = _format_period(earliest, latest)
-        return f"{label} trips throughout {period}"
+        trip_label = f"{weeks}-week trip"
     elif dur_type == "days" and dur_days:
+        trip_label = f"{dur_days}-day trip"
+
+    if dur_type == "flexible" or (not dur_type and not dur_days):
+        if e_date and l_date:
+            return f"{e_date.strftime('%b %d')} → {l_date.strftime('%b %d, %Y')}"
         period = _format_period(earliest, latest)
-        return f"{dur_days}-day trips throughout {period}"
-    elif dur_type == "flexible":
+        return f"Flexible dates in {period}" if dur_type == "flexible" else f"{earliest} → {latest}"
+
+    # Calculate departure window span
+    if e_date and l_date and dur_days:
+        dep_window_days = (l_date - e_date).days - dur_days
+        if dep_window_days <= 5:
+            # Tight window (±2 days) — show as fixed date
+            mid = e_date + timedelta(days=dep_window_days // 2)
+            return f"{trip_label}, departing {mid.strftime('%b %d')} (±2 days)"
+        elif dep_window_days <= 16:
+            # Medium window (±1 week) — show departure range
+            return f"{trip_label}, departing {e_date.strftime('%b %d')}–{(e_date + timedelta(days=dep_window_days)).strftime('%b %d')}"
+        else:
+            # Wide window — show full period
+            period = _format_period(earliest, latest)
+            return f"{trip_label} throughout {period}"
+    elif trip_label:
         period = _format_period(earliest, latest)
-        return f"Flexible dates in {period}"
+        return f"{trip_label} throughout {period}"
     else:
         return f"{earliest} → {latest}"
 
