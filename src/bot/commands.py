@@ -42,8 +42,11 @@ Duration type rules:
 
 For "long weekend in May", set earliest_departure to May 1 and latest_return to May 31 (the search window), NOT the trip dates.
 
-If the destination is a country (e.g. "Japan", "Mexico", "Spain"), set needs_clarification=true
-and suggest the top 2-3 cities with their airport codes.
+If the destination is a country (e.g. "Japan", "Mexico", "Spain"), a region, an archipelago,
+or an island group (e.g. "Canary Islands", "Balearic Islands", "Greek Islands", "Hawaii",
+"Caribbean"), set needs_clarification=true and suggest the top 2-4 airports with their IATA codes.
+For archipelagos/island groups, list the main airports on different islands.
+Example: "Canary Islands" → options: ["Gran Canaria (LPA)", "Tenerife South (TFS)", "Fuerteventura (FUE)", "Lanzarote (ACE)"]
 
 If dates have no year, assume the next occurrence of that date.
 Today is {today}.
@@ -1501,7 +1504,7 @@ class TripBot:
         loop = asyncio.get_running_loop()
 
         try:
-            await self._send_typing(client, chat_id)
+            await self._send(client, chat_id, "🔍 Checking prices now...")
 
             # Determine date windows
             earliest = route.earliest_departure
@@ -1536,7 +1539,7 @@ class TripBot:
 
                 if not primary_price:
                     await self._send(client, chat_id,
-                        "I'll check prices on the next poll cycle.")
+                        "No flights found for those dates. I'll keep checking on the next poll cycle.")
                     return
 
                 # Get transport info
@@ -1573,19 +1576,21 @@ class TripBot:
                 if typical_range and len(typical_range) == 2:
                     lines.append(f"Typical range: €{typical_range[0]:,.0f} – €{typical_range[1]:,.0f}")
 
-                # Best flight details
+                # Flight details
                 primary_duration = extract_min_duration(primary_result)
                 if primary_result.best_flights:
                     bf = primary_result.best_flights[0]
-                    airline = ""
                     legs = bf.get("flights", [])
-                    if legs:
-                        airline = legs[0].get("airline", "")
-                    dur_str = f" ({primary_duration // 60}h{primary_duration % 60:02d}m)" if primary_duration else ""
+                    airline = legs[0].get("airline", "") if legs else ""
+                    stops = max(0, len(legs) - 1)
+                    dur = bf.get("total_duration")
+                    parts = []
                     if airline:
-                        lines.append(f"✈️ {airline}{dur_str}")
-                    elif primary_duration:
-                        lines.append(f"✈️ {dur_str.strip('() ')}")
+                        parts.append(airline)
+                    parts.append("Direct" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}")
+                    if dur:
+                        parts.append(f"{dur // 60}h{dur % 60:02d}m")
+                    lines.insert(1, f"✈️ {' · '.join(parts)}")
 
                 # Poll secondary airports
                 await self._send_typing(client, chat_id)
@@ -1676,4 +1681,4 @@ class TripBot:
         except Exception:
             logger.exception("Immediate price check failed")
             await self._send(client, chat_id,
-                "I'll check prices on the next poll cycle.")
+                "Couldn't check prices right now — I'll try again on the next poll cycle.")

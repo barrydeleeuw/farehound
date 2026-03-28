@@ -1091,6 +1091,9 @@ class Orchestrator:
         primary_parking = primary_transport.get("parking_cost_eur") if primary_transport else None
         primary_mode = primary_transport.get("transport_mode", "") if primary_transport else ""
 
+        best = snapshot.best_flight or {}
+        best_legs = best.get("flights", [])
+
         deal_info = {
             "deal_id": deal.deal_id,
             "origin": route.origin,
@@ -1098,7 +1101,8 @@ class Orchestrator:
             "price": price,
             "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
             "airline": airline,
-            "stops": stops,
+            "stops": max(0, len(best_legs) - 1) if best_legs else stops,
+            "flight_duration_min": best.get("total_duration"),
             "dates": f"{snapshot.outbound_date} to {snapshot.return_date}",
             "outbound_date": str(snapshot.outbound_date),
             "return_date": str(snapshot.return_date),
@@ -1111,6 +1115,9 @@ class Orchestrator:
             "primary_transport_cost": primary_t_cost,
             "primary_parking_cost": primary_parking or 0,
             "primary_transport_mode": primary_mode,
+            "price_level": snapshot.price_level,
+            "typical_low": snapshot.typical_low,
+            "typical_high": snapshot.typical_high,
         }
 
         try:
@@ -1194,6 +1201,10 @@ class Orchestrator:
                 # Include alert price for price-change display
                 alert_price = pending_routes.get(route.route_id)
 
+                digest_best = (best.best_flight or {}) if best else {}
+                digest_legs = digest_best.get("flights", [])
+                digest_airline_code = digest_legs[0].get("airline", "") if digest_legs else ""
+
                 summary: dict = {
                     "origin": route.origin,
                     "destination": route.destination,
@@ -1204,6 +1215,9 @@ class Orchestrator:
                     "outbound_date": str(best.outbound_date) if best and best.outbound_date else "",
                     "return_date": str(best.return_date) if best and best.return_date else "",
                     "alert_price": alert_price,
+                    "airline": airline_name(digest_airline_code) if digest_airline_code else "",
+                    "stops": max(0, len(digest_legs) - 1) if digest_legs else None,
+                    "flight_duration_min": digest_best.get("total_duration"),
                 }
 
                 if watch_deals:
@@ -1428,12 +1442,16 @@ class Orchestrator:
                 fb_legs = verification.flights[0].get("flights", [])
                 if fb_legs:
                     fallback_airline_code = fb_legs[0].get("airline", "")
+            fb_best = verification.flights[0] if verification.flights else {}
+            fb_best_legs = fb_best.get("flights", [])
             fallback_info = {
                 "deal_id": fallback_deal_id,
                 "origin": route.origin,
                 "destination": route.destination,
                 "price": actual_price,
                 "airline": airline_name(fallback_airline_code) if fallback_airline_code else "Unknown",
+                "stops": max(0, len(fb_best_legs) - 1) if fb_best_legs else None,
+                "flight_duration_min": fb_best.get("total_duration"),
                 "dates": f"{outbound_date} to {return_date}" if return_date else str(outbound_date),
                 "outbound_date": str(outbound_date),
                 "return_date": str(return_date) if return_date else "",
@@ -1488,6 +1506,8 @@ class Orchestrator:
                 stops = max(0, len(flights_list) - 1) if flights_list else 0
             airline = airline_name(airline_code) if airline_code else "Unknown"
 
+            comm_best = verification.flights[0] if verification.flights else {}
+            comm_best_legs = comm_best.get("flights", [])
             alert_info = {
                 "deal_id": deal.deal_id,
                 "origin": route.origin,
@@ -1495,7 +1515,8 @@ class Orchestrator:
                 "price": actual_price,
                 "avg_price": f"{float(avg_price):.0f}" if avg_price else "?",
                 "airline": airline,
-                "stops": stops,
+                "stops": max(0, len(comm_best_legs) - 1) if comm_best_legs else stops,
+                "flight_duration_min": comm_best.get("total_duration"),
                 "dates": f"{outbound_date} to {return_date}" if return_date else str(outbound_date),
                 "outbound_date": str(outbound_date),
                 "return_date": str(return_date) if return_date else "",

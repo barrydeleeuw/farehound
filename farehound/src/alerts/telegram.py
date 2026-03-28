@@ -38,6 +38,25 @@ def _deal_label(score: float | None, urgency: str | None = None) -> str:
     return "Not Great"
 
 
+def _format_flight_line(deal_info: dict) -> str:
+    """Format a single line with airline, stops, and duration."""
+    airline = deal_info.get("airline", "")
+    stops = deal_info.get("stops")
+    duration_min = deal_info.get("flight_duration_min")
+
+    parts = []
+    if airline:
+        parts.append(airline)
+    if stops is not None:
+        parts.append("Direct" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}")
+    if duration_min:
+        hours = duration_min // 60
+        mins = duration_min % 60
+        parts.append(f"{hours}h{mins:02d}m")
+
+    return " · ".join(parts) if parts else ""
+
+
 class TelegramNotifier:
     """Send flight deal alerts via Telegram Bot API."""
 
@@ -110,8 +129,17 @@ class TelegramNotifier:
         route = route_name(origin, dest)
         lines = [
             f"{emoji} *{label}* — {route}",
-            f"*€{price_pp:,.0f}/pp* | {airline} | {dates}",
         ]
+        # Flight info
+        flight_line = _format_flight_line(deal_info)
+        if flight_line:
+            lines.append(f"✈️ {flight_line}")
+        if dates:
+            lines.append(f"📅 {dates}")
+
+        # Pricing
+        lines.append(f"💰 *€{price_pp:,.0f}/pp*")
+
         # Always show full cost breakdown for primary airport
         primary_t = deal_info.get("primary_transport_cost", 0)
         primary_p = deal_info.get("primary_parking_cost", 0)
@@ -124,6 +152,18 @@ class TelegramNotifier:
         if primary_p:
             cost_parts.append(f"€{primary_p:,.0f} parking")
         lines.append(f"{' + '.join(cost_parts)} = *€{primary_total:,.0f} total*")
+
+        # Price context
+        price_level = deal_info.get("price_level", "")
+        typical_low = deal_info.get("typical_low")
+        typical_high = deal_info.get("typical_high")
+        if price_level:
+            level_icon = {"low": "📉", "typical": "➡️", "high": "📈"}.get(price_level, "")
+            context = f"{level_icon} Price level: *{price_level}*"
+            if typical_low is not None and typical_high is not None:
+                context += f" (€{float(typical_low):,.0f}–€{float(typical_high):,.0f})"
+            lines.append(context)
+
         if reasoning:
             lines.append(f"_{reasoning}_")
 
@@ -200,9 +240,14 @@ class TelegramNotifier:
         route = route_name(origin, dest)
         lines = [
             f"🔥 *Error Fare* — {route}",
-            f"*€{float(price):,.0f}* | {airline} | {dates}",
-            "BOOK NOW — these usually disappear fast!",
         ]
+        flight_line = _format_flight_line(deal_info)
+        if flight_line:
+            lines.append(f"✈️ {flight_line}")
+        if dates:
+            lines.append(f"📅 {dates}")
+        lines.append(f"💰 *€{float(price):,.0f}*")
+        lines.append("⚡ BOOK NOW — these usually disappear fast!")
         if reasoning:
             lines.append(f"_{reasoning}_")
         lines.append(f"[Book Now]({booking_url})")
@@ -267,6 +312,9 @@ class TelegramNotifier:
             lines = [
                 f"{emoji} *{route_name(origin, dest)}* {trend_icon}",
             ]
+            flight_line = _format_flight_line(route_data)
+            if flight_line:
+                lines.append(f"✈️ {flight_line}")
             if dates:
                 lines.append(f"📅 {dates}")
             if lowest is not None:

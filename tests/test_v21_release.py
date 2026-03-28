@@ -255,9 +255,8 @@ class TestCostBreakdown:
 
             payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
             text = payload["text"]
-            lines = text.split("\n")
-            # Second line should contain per-person price
-            assert "€485/pp" in lines[1]
+            # Per-person price should appear in the message (after flight info and dates)
+            assert "€485/pp" in text
 
     @pytest.mark.asyncio
     async def test_primary_airport_breakdown_always_shown(self, notifier):

@@ -40,64 +40,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## Proposed
 
-### [ITEM-035] Immediate fare feedback after trip creation
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** After adding a route, the user should immediately see that FareHound is looking up fares (typing indicator + "Checking prices..." message), followed by actual results seconds later. Currently, `_immediate_price_check()` exists and sends a typing indicator, but when it fails the user only sees "I'll check prices on the next poll cycle" — which feels broken. The happy path also lacks an explicit "Checking prices now..." message before the typing indicator, so the user doesn't know what's happening.
-- **Fix approach:**
-  - Send "Checking prices now..." message immediately after "Route added" confirmation
-  - Ensure typing indicator stays active during the SerpAPI call
-  - On success: show fares for home airport + nearby airports with price comparison
-  - On failure: show specific error ("Price check timed out, will retry on next poll cycle") instead of generic fallback
-  - On partial success (home airport OK, some nearby airports failed): show what we have, note which airports couldn't be checked
-- **Acceptance Criteria:**
-  - [ ] User sees "Checking prices now..." immediately after route confirmation
-  - [ ] Typing indicator visible during SerpAPI lookup
-  - [ ] Fares displayed inline for home + nearby airports on success
-  - [ ] Partial failures show available results + note about missing airports
-  - [ ] Full failure shows specific error message, not generic fallback
 
-### [ITEM-034] Bug: Region/archipelago destinations should ask for clarification
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** "Add a trip to the Canary Islands" auto-picked Las Palmas (LPA) without asking which island. The `_PARSE_PROMPT` only triggers `needs_clarification` for country-level destinations (e.g. "Japan" → which city?), but not for regions or archipelagos with multiple airports. "Canary Islands" should offer: Gran Canaria (LPA), Tenerife (TFS), Fuerteventura (FUE), Lanzarote (ACE). Related to ITEM-012 (multi-destination) but this is a simpler prompt fix — treat regions/archipelagos like countries in the disambiguation logic.
-- **Fix approach:**
-  - Extend `_PARSE_PROMPT` disambiguation rule to cover regions, archipelagos, and island groups — not just countries
-  - Add examples: "Canary Islands", "Balearic Islands", "Greek Islands", "Hawaii"
-  - When user says "all of them", create routes for each (ties into ITEM-012)
-- **Acceptance Criteria:**
-  - [ ] "Canary Islands" triggers clarification with LPA, TFS, FUE, ACE options
-  - [ ] Other archipelago/region destinations also trigger clarification
-  - [ ] User can pick one or say "all" (ITEM-012 dependency for "all")
-
-
-
-### [ITEM-036] Redesign trip recommendation message layout
-- **Status:** Proposed
-- **Priority:** P1 (High)
-- **Effort:** M
-- **Dependencies:** None (but should land before or alongside ITEM-022, ITEM-005)
-- **Summary:** Current trip recommendation messages mix Google Flights data, FareHound-calculated costs, and price context in an inconsistent order. The message starts with price/pp, then total cost, then dates, and ends with typical range — making it hard to scan. Alternative airports are inconsistently shown (sometimes present, sometimes missing). With upcoming features adding more information (luggage costs via ITEM-037, preferred airline via ITEM-005, discovery deals via ITEM-038), the layout needs a clear, consistent structure before it gets worse.
-- **Current problems:**
-  - Information order isn't logical — price comes before dates, context comes last
-  - No visual separation between "flight facts" (from Google Flights) and "FareHound value-add" (transport, parking, total cost)
-  - Alternative airports inconsistently shown — sometimes present, sometimes absent, no explanation why
-  - No room for upcoming data: luggage costs, preferred airline comparison, deal source
-  - Error fare alerts use a completely different layout from regular alerts
-  - Daily digest uses yet another layout variation
-- **Acceptance Criteria:**
-  - [ ] All three message types (deal alert, error fare, digest) use consistent section ordering
-  - [ ] Flight info (airline, stops, dates) shown before pricing
-  - [ ] True cost breakdown clearly separated from flight price with FareHound label
-  - [ ] Price context (level + range + trend) grouped together near cost
-  - [ ] Alternatives section always present — shows alternatives or "none cheaper"
-  - [ ] Error fare alerts include cost breakdown and alternatives
-  - [ ] Daily digest includes airline info
-  - [ ] Message renders well on mobile Telegram (tested on iOS + Android)
 
 ### [ITEM-037] Luggage-aware total cost calculation
 - **Status:** Proposed
@@ -159,6 +102,18 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Total cost estimate included in alert (ticket + baggage via ITEM-037)
   - [ ] API call budget stays within SerpAPI plan limits — monitoring and safeguards
   - [ ] Explore results cached and shared across users with the same/nearby home airport
+
+### [ITEM-045] Onboarding: ask transport mode per airport
+- **Status:** Proposed
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** [ITEM-043]
+- **Summary:** After airport confirmation, ask the user how they get to each airport. Without this, transport costs are blank and FareHound can't calculate true door-to-door cost — the core value proposition. A simple per-airport question ("How do you get to Schiphol? Car / Train / Uber / Bus") plus estimated cost fills the `airport_transport` table properly. Could be a single Claude-powered conversational step: "How do you usually get to the airport? e.g. 'I drive to Schiphol, take the train to Rotterdam, and Uber to Eindhoven'" → Claude parses into structured transport data.
+- **Acceptance Criteria:**
+  - [ ] User is asked about transport to each airport during onboarding
+  - [ ] Transport mode and estimated cost stored in `airport_transport`
+  - [ ] Works conversationally (one natural language message, not N separate questions)
+  - [ ] Fallback: if user skips, transport costs remain NULL (already handled gracefully)
 
 ### [ITEM-004] Google Maps one-time transport lookup per city
 - **Status:** Proposed
@@ -273,6 +228,9 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-017] SerpAPI response cache for local testing
 - **Status:** Done — SERPAPI_CACHE_DIR env var enables cached responses locally. 17 responses recorded. Zero API calls during dev.
+
+### [ITEM-D13] First Impressions (v0.7.0)
+- **Status:** Done — ITEM-035 (immediate fare feedback: "Checking prices now..." message, specific error messages on failure), ITEM-034 (region/archipelago disambiguation in parse prompt), ITEM-036 (message layout redesign: flight info line with airline/stops/duration across all message types, price context with level and range). 271 tests pass.
 
 ### [ITEM-D12] Know Your Airports + Approval Gate (v0.6.0)
 - **Status:** Done — ITEM-043 (onboarding resolves airports via Claude, confirmation with inline buttons, fallback to manual IATA), ITEM-044 (user approval gate: approved column, first user auto-approved as admin, waitlist message, admin Telegram notification with Approve/Reject buttons, orchestrator skips unapproved users). 271 tests pass (9 new).
