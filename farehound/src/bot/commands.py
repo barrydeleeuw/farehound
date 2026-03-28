@@ -20,8 +20,8 @@ _PARSE_PROMPT = """\
 Extract flight route from this text. Return ONLY valid JSON with these fields:
 - origin: IATA airport code or null if not specified
 - destination: IATA airport code (use city codes like TYO for Tokyo when multiple airports)
-- earliest_departure: YYYY-MM-DD (first day of the travel window)
-- latest_return: YYYY-MM-DD (last day of the travel window)
+- earliest_departure: YYYY-MM-DD (first day of the search window)
+- latest_return: YYYY-MM-DD (last day of the search window)
 - passengers: int (default 2)
 - max_stops: int (default 1, 0 if user says "direct only" or "nonstop")
 - notes: string or null
@@ -40,7 +40,31 @@ Duration type rules:
 - "sometime in October" or "in May" with no specific dates → trip_duration_type="flexible"
 - Specific dates like "Oct 18 - Nov 8" → trip_duration_type=null (exact dates given)
 
-For "long weekend in May", set earliest_departure to May 1 and latest_return to May 31 (the search window), NOT the trip dates.
+CRITICAL — Date window rules (earliest_departure and latest_return):
+The search window must stay close to what the user asked for. Do NOT expand to full months.
+
+1. SPECIFIC DATE: "departure October 18" or "leaving on Oct 18"
+   → earliest_departure = Oct 16, latest_return = Oct 20 + trip_duration_days
+   (±2 days around the stated date)
+
+2. APPROXIMATE DATE: "departure around October 18" or "mid-October"
+   → earliest_departure = Oct 11, latest_return = Oct 25 + trip_duration_days
+   (±1 week around the stated date)
+
+3. VAGUE/MONTH ONLY: "sometime in October" or "in May"
+   → earliest_departure = Oct 1, latest_return = Oct 31
+   (full month, trip_duration_type="flexible")
+
+4. WEEKEND: "long weekend in May"
+   → earliest_departure = May 1, latest_return = May 31
+
+5. EXACT RANGE: "Oct 18 - Nov 8"
+   → earliest_departure = Oct 18, latest_return = Nov 8 (exact, no expansion)
+
+Examples:
+- "Japan for 3 weeks departure October 18" → earliest_departure=2026-10-16, latest_return=2026-11-10 (tight ±2 days)
+- "Japan for 3 weeks departure around October 18" → earliest_departure=2026-10-11, latest_return=2026-11-15 (±1 week)
+- "Japan for 3 weeks in October" → earliest_departure=2026-10-01, latest_return=2026-10-31 (full month, flexible)
 
 If the destination is a country (e.g. "Japan", "Mexico", "Spain"), a region, an archipelago,
 or an island group (e.g. "Canary Islands", "Balearic Islands", "Greek Islands", "Hawaii",

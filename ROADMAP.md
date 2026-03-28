@@ -40,7 +40,23 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## Proposed
 
-
+### [ITEM-046] Bug: date windows ignore user's specified departure date
+- **Status:** Proposed
+- **Priority:** P0 (Critical)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** "Japan for 3 weeks departure around October 18" returns flights departing Nov 9 — three weeks off from the requested date. The parse prompt treats "around October 18" as a wide Oct-Nov search window, then `generate_date_windows` picks the cheapest window regardless of proximity to the user's intended date. The system should respect the departure date the user gave.
+- **Two fixes needed:**
+  1. **Parse prompt**: When the user gives a specific departure date (e.g. "departure October 18"), set `earliest_departure` to Oct 16 and `latest_return` based on trip duration from Oct 20 (±2 days flex). Don't expand to the full month.
+  2. **Date flexibility step**: After parsing dates, ask the user: "Is October 18 a fixed departure, or are you flexible within a few weeks?" If fixed → ±2 days. If flexible → ask how many weeks of flexibility, then use that as the window.
+- **Current behavior:** "departure around Oct 18, 3 weeks" → `earliest_departure=Oct 1, latest_return=Nov 30` → window generator picks Nov 9 → user gets flights 3 weeks late
+- **Expected behavior:** "departure around Oct 18, 3 weeks" → `earliest_departure=Oct 16, latest_return=Nov 10` → window generator stays near Oct 18
+- **Acceptance Criteria:**
+  - [ ] Specific departure date ("October 18") generates ±2 day window, not full month
+  - [ ] "Around October" (vague) generates full month window as today
+  - [ ] User asked about date flexibility during trip creation
+  - [ ] Flexible users get wider search, fixed users get tight window
+  - [ ] Date shown in deal alerts matches what user asked for
 
 ### [ITEM-037] Luggage-aware total cost calculation
 - **Status:** Proposed
@@ -261,3 +277,6 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-P03] 1Password / passport checks
 - **Parked:** Over-engineered for current stage.
+
+### [ITEM-P04] Tikkie (iDEAL) payment integration
+- **Parked:** Use Tikkie Business API to send payment requests directly in the Telegram chat — trusted by the Dutch demographic (especially older users who distrust credit card forms). Replaces ITEM-007/ITEM-008's payment mechanism. Netherlands-only (iDEAL). Revisit when: (1) ITEM-002 savings tracker proves value, (2) 3-5 active users, (3) contribution vs subscription model decided.
