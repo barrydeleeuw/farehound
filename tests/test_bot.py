@@ -79,9 +79,29 @@ async def test_onboarding_name_step(bot, db):
     assert user["name"] == "Alice"
 
 
+_MOCK_AIRPORTS = {
+    "primary": {"code": "AMS", "name": "Amsterdam Schiphol"},
+    "nearby": [
+        {"code": "EIN", "name": "Eindhoven"},
+        {"code": "RTM", "name": "Rotterdam The Hague"},
+        {"code": "BRU", "name": "Brussels"},
+        {"code": "DUS", "name": "Dusseldorf"},
+    ],
+}
+
+_MOCK_LHR_AIRPORTS = {
+    "primary": {"code": "LHR", "name": "London Heathrow"},
+    "nearby": [
+        {"code": "LGW", "name": "London Gatwick"},
+        {"code": "STN", "name": "London Stansted"},
+        {"code": "LTN", "name": "London Luton"},
+    ],
+}
+
+
 @pytest.mark.asyncio
-async def test_onboarding_location_step_no_serpapi(bot, db):
-    """Location step without SerpAPI key falls back to AMS."""
+async def test_onboarding_location_resolves_airports(bot, db):
+    """Location step calls Claude to resolve airports and shows confirmation."""
     uid = db.create_user("999", name="Alice")
     bot._pending["999"] = {
         "action": "onboarding", "step": "location",
@@ -89,17 +109,62 @@ async def test_onboarding_location_step_no_serpapi(bot, db):
     }
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
-    await bot._handle_update(_make_update("The Hague", chat_id="999"), client)
-    # Should fallback to AMS
+
+    with patch.object(bot, "_resolve_airports_via_claude", return_value=_MOCK_AIRPORTS):
+        await bot._handle_update(_make_update("The Hague", chat_id="999"), client)
+
+    # Should be waiting for airport confirmation, not yet onboarded
+    assert bot._pending["999"]["step"] == "confirm_airports"
     user = db.get_user(uid)
-    assert user["home_airport"] == "AMS"
-    assert user["onboarded"] is True
+    assert user["onboarded"] is not True  # Not yet!
+
+    # Message should show resolved airports with confirmation buttons
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "Amsterdam Schiphol" in payload["text"]
+    assert "reply_markup" in payload
+
+
+@pytest.mark.asyncio
+async def test_onboarding_location_claude_failure_fallback(bot, db):
+    """When Claude can't resolve airports, fall back to manual entry."""
+    uid = db.create_user("999", name="Alice")
+    bot._pending["999"] = {
+        "action": "onboarding", "step": "location",
+        "chat_id": "999", "user_id": uid, "name": "Alice",
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    with patch.object(bot, "_resolve_airports_via_claude", return_value=None):
+        await bot._handle_update(_make_update("Nowhereville", chat_id="999"), client)
+
+    assert bot._pending["999"]["step"] == "manual_airport"
+    payload = client.post.call_args.kwargs.get("json") or client.post.call_args[1]["json"]
+    assert "IATA" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_onboarding_manual_airport(bot, db):
+    """Manual airport entry completes onboarding."""
+    uid = db.create_user("999", name="Alice")
+    bot._pending["999"] = {
+        "action": "onboarding", "step": "manual_airport",
+        "chat_id": "999", "user_id": uid, "name": "Alice", "location": "Nowhereville",
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_update("JFK", chat_id="999"), client)
+
     assert "999" not in bot._pending
+    user = db.get_user(uid)
+    assert user["home_airport"] == "JFK"
+    assert user["onboarded"] is True
 
 
 @pytest.mark.asyncio
 async def test_onboarding_full_flow(bot, db):
-    """Complete onboarding: unknown user → name → location → done."""
+    """Complete onboarding: unknown user → name → location → confirm airports → done."""
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
 
@@ -111,15 +176,155 @@ async def test_onboarding_full_flow(bot, db):
     await bot._handle_update(_make_update("Bob", chat_id="777"), client)
     assert bot._pending["777"]["step"] == "location"
 
-    # Step 3: Provide location (no serpapi, will fallback)
-    await bot._handle_update(_make_update("Amsterdam", chat_id="777"), client)
+    # Step 3: Provide location (mock Claude)
+    with patch.object(bot, "_resolve_airports_via_claude", return_value=_MOCK_AIRPORTS):
+        await bot._handle_update(_make_update("Amsterdam", chat_id="777"), client)
+    assert bot._pending["777"]["step"] == "confirm_airports"
+
+    # Step 4: Confirm airports via callback
+    callback_update = {
+        "update_id": 2,
+        "callback_query": {
+            "id": "cb1",
+            "data": "confirm_airports:_",
+            "message": {"message_id": 1, "chat": {"id": 777}, "text": "airports..."},
+        },
+    }
+    await bot._handle_update(callback_update, client)
     assert "777" not in bot._pending
 
-    # User should be onboarded
+    # User should be onboarded with correct airport
     user = db.get_user_by_chat_id("777")
     assert user is not None
     assert user["name"] == "Bob"
+    assert user["home_airport"] == "AMS"
     assert user["onboarded"] is True
+
+
+@pytest.mark.asyncio
+async def test_onboarding_change_airports(bot, db):
+    """User rejects suggested airports and provides a different city."""
+    uid = db.create_user("999", name="Alice")
+    bot._pending["999"] = {
+        "action": "onboarding", "step": "confirm_airports",
+        "chat_id": "999", "user_id": uid, "name": "Alice",
+        "location": "The Hague", "airports": _MOCK_AIRPORTS,
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    # Tap "Change" button
+    callback_update = {
+        "update_id": 2,
+        "callback_query": {
+            "id": "cb1",
+            "data": "change_airports:_",
+            "message": {"message_id": 1, "chat": {"id": 999}, "text": "airports..."},
+        },
+    }
+    await bot._handle_update(callback_update, client)
+    assert bot._pending["999"]["step"] == "change_airport"
+
+    # Provide London as new city
+    with patch.object(bot, "_resolve_airports_via_claude", return_value=_MOCK_LHR_AIRPORTS):
+        await bot._handle_update(_make_update("London", chat_id="999"), client)
+    assert bot._pending["999"]["step"] == "confirm_airports"
+    assert bot._pending["999"]["airports"]["primary"]["code"] == "LHR"
+
+
+# --- Approval gate ---
+
+@pytest.mark.asyncio
+async def test_first_user_auto_approved(bot, db):
+    """First user to onboard is auto-approved as admin."""
+    uid = db.create_user("888", name="Admin")
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._finish_onboarding("888", uid, "Admin", "Amsterdam", _MOCK_AIRPORTS, client)
+
+    user = db.get_user(uid)
+    assert user["approved"] is True
+
+
+@pytest.mark.asyncio
+async def test_second_user_gets_waitlist(bot, db):
+    """Second user gets waitlist message and admin is notified."""
+    # Create first user (admin, approved)
+    admin_uid = db.create_user("888", name="Barry")
+    db.update_user(admin_uid, home_airport="AMS", onboarded=1, approved=1)
+
+    # Create second user
+    uid = db.create_user("999", name="Alice")
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._finish_onboarding("999", uid, "Alice", "London", _MOCK_LHR_AIRPORTS, client)
+
+    # User should NOT be approved
+    user = db.get_user(uid)
+    assert user.get("approved") is not True
+
+    # Should have sent messages: one to Alice (waitlist) and one to admin (approval request)
+    calls = client.post.call_args_list
+    texts = [c.kwargs.get("json", {}).get("text", "") for c in calls]
+    assert any("waitlist" in t.lower() for t in texts), f"No waitlist message found in: {texts}"
+    assert any("approval" in t.lower() or "approve" in t.lower() for t in texts), f"No admin notification found in: {texts}"
+
+
+@pytest.mark.asyncio
+async def test_approve_user_callback(bot, db):
+    """Admin approving a user sets approved=1 and notifies user."""
+    admin_uid = db.create_user("888", name="Barry")
+    db.update_user(admin_uid, home_airport="AMS", onboarded=1, approved=1)
+    uid = db.create_user("999", name="Alice")
+    db.update_user(uid, home_airport="LHR", onboarded=1)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    callback_update = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cb1",
+            "data": f"approve_user:{uid}",
+            "message": {"message_id": 1, "chat": {"id": 888}, "text": "New user..."},
+        },
+    }
+    await bot._handle_update(callback_update, client)
+
+    user = db.get_user(uid)
+    assert user["approved"] is True
+
+    # Should have notified the user
+    calls = client.post.call_args_list
+    texts = [c.kwargs.get("json", {}).get("text", "") for c in calls]
+    assert any("approved" in t.lower() for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_reject_user_callback(bot, db):
+    """Admin rejecting a user deactivates them and sends rejection message."""
+    admin_uid = db.create_user("888", name="Barry")
+    db.update_user(admin_uid, home_airport="AMS", onboarded=1, approved=1)
+    uid = db.create_user("999", name="Alice")
+    db.update_user(uid, home_airport="LHR", onboarded=1)
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    callback_update = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cb1",
+            "data": f"reject_user:{uid}",
+            "message": {"message_id": 1, "chat": {"id": 888}, "text": "New user..."},
+        },
+    }
+    await bot._handle_update(callback_update, client)
+
+    user = db.get_user(uid)
+    assert user["active"] is not True
 
 
 # --- /trips ---

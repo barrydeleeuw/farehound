@@ -120,9 +120,28 @@ Always use IATA airport codes for origin and destination, never city or country 
 
 _DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-_CANDIDATE_AIRPORTS = ["AMS", "BRU", "DUS", "EIN", "CGN", "RTM", "CRL", "LGG", "NRN", "FRA", "HAM", "LHR", "CDG"]
+_AIRPORT_RESOLVE_PROMPT = """\
+The user lives in "{location}". Identify:
+1. Their closest major commercial airport (the "primary" airport they'd normally fly from)
+2. 4-5 nearby alternative airports within roughly 3 hours travel, ordered by proximity
 
-_MAX_TRAVEL_SECONDS = 10800  # 3 hours
+Return ONLY valid JSON:
+{{
+  "primary": {{"code": "IATA", "name": "Full airport name"}},
+  "nearby": [
+    {{"code": "IATA", "name": "Full airport name"}},
+    ...
+  ]
+}}
+
+Rules:
+- Use standard 3-letter IATA codes (e.g. LHR, AMS, CDG, JFK)
+- For cities with multiple airports, pick the main international one as primary
+- Only include airports with scheduled commercial passenger service
+- "nearby" should be OTHER airports, not the primary repeated
+- Order nearby by rough proximity to the user's city
+- Include airports in neighbouring countries if they're within range (e.g. Brussels for someone in The Hague)
+"""
 
 
 def _format_date_display(route_or_pending: dict | Route) -> str:
@@ -359,7 +378,6 @@ class TripBot:
             location = text.strip()
             user_id = pending.get("user_id")
             if not user_id:
-                # Recover: look up user
                 user = self._get_user(chat_id)
                 if user:
                     user_id = user["user_id"]
@@ -367,96 +385,195 @@ class TripBot:
                     await self._start_onboarding(chat_id, client)
                     return
 
+            # Store location immediately
             await loop.run_in_executor(None, lambda: self._db.update_user(
-                user_id, home_location=location, home_airport="AMS", onboarded=1
+                user_id, home_location=location,
             ))
 
-            # Use predefined airports from config (shared for all NL-based users)
-            from src.config import _load_airports_yaml
-            default_airports = _load_airports_yaml()
-            if default_airports:
-                await loop.run_in_executor(None, self._db.seed_airport_transport, default_airports, user_id)
+            # Resolve airports via Claude
+            await self._send_typing(client, chat_id)
+            airports = await self._resolve_airports_via_claude(location)
+            if not airports:
+                # Fallback: ask user to specify their airport manually
+                pending["step"] = "manual_airport"
+                await self._send(client, chat_id,
+                    "I couldn't determine airports near you. "
+                    "What's the IATA code of your home airport? (e.g. LHR, CDG, JFK)")
+                return
 
-            from src.utils.airports import airport_name
+            primary = airports["primary"]
+            nearby = airports.get("nearby", [])
+
+            # Store resolved airports in pending for confirmation
+            pending["step"] = "confirm_airports"
+            pending["airports"] = airports
+            pending["location"] = location
+
             lines = [
-                f"Great, {pending.get('name', 'there')}! You're set up in *{location}*.",
-                "",
-                "I'll monitor flights from these airports for you:",
-                "  ✈️ Amsterdam Schiphol (primary)",
-                "  ✈️ Brussels",
-                "  ✈️ Dusseldorf",
-                "  ✈️ Eindhoven",
-                "  ✈️ Cologne/Bonn",
-                "",
-                "Now tell me about a trip! For example:",
-                "`Japan for 2 weeks in October, 2 passengers`",
+                f"Based on *{location}*, your home airport is:",
+                f"  ✈️ *{primary['name']} ({primary['code']})* (primary)",
             ]
-            await self._send(client, chat_id, "\n".join(lines))
+            if nearby:
+                lines.append("")
+                lines.append("I'll also check nearby airports for cheaper flights:")
+                for ap in nearby:
+                    lines.append(f"  ✈️ {ap['name']} ({ap['code']})")
 
-            # Clear onboarding pending
-            self._pending.pop(chat_id, None)
+            reply_markup = {"inline_keyboard": [[
+                {"text": "Looks good ✅", "callback_data": "confirm_airports:_"},
+                {"text": "Change ✏️", "callback_data": "change_airports:_"},
+            ]]}
+            await self._send(client, chat_id, "\n".join(lines), reply_markup=reply_markup)
 
-    async def _resolve_airports(self, location: str) -> list[dict]:
-        """Use SerpAPI Google Maps to find nearby airports within 3 hours."""
-        if not self._serpapi_key:
-            logger.warning("No SerpAPI key — skipping airport resolution")
-            return []
+        elif step == "manual_airport":
+            code = text.strip().upper()
+            if len(code) != 3 or not code.isalpha():
+                await self._send(client, chat_id,
+                    "That doesn't look like an IATA code. Please enter a 3-letter airport code (e.g. LHR, CDG, JFK).")
+                return
+            user_id = pending.get("user_id")
+            await self._finish_onboarding(
+                chat_id, user_id, pending.get("name", "there"),
+                pending.get("location", ""),
+                {"primary": {"code": code, "name": code}, "nearby": []},
+                client,
+            )
 
-        from src.utils.airports import AIRPORTS
+        elif step == "change_airport":
+            location = text.strip()
+            user_id = pending.get("user_id")
+            await self._send_typing(client, chat_id)
+            airports = await self._resolve_airports_via_claude(location)
+            if not airports:
+                await self._send(client, chat_id,
+                    "I still couldn't determine airports there. "
+                    "What's the IATA code of your home airport? (e.g. LHR, CDG, JFK)")
+                pending["step"] = "manual_airport"
+                return
 
-        results = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for code in _CANDIDATE_AIRPORTS:
-                airport_name = AIRPORTS.get(code, code)
-                try:
-                    params = {
-                        "engine": "google_maps_directions",
-                        "api_key": self._serpapi_key,
-                        "start_addr": location,
-                        "end_addr": f"{airport_name} Airport",
-                    }
-                    resp = await client.get("https://serpapi.com/search.json", params=params)
-                    resp.raise_for_status()
-                    data = resp.json()
+            primary = airports["primary"]
+            nearby = airports.get("nearby", [])
+            pending["step"] = "confirm_airports"
+            pending["airports"] = airports
 
-                    # Extract duration and distance from directions
-                    directions = data.get("directions", [])
-                    if not directions:
-                        continue
-                    best = directions[0]
-                    legs = best.get("legs", [])
-                    if not legs:
-                        continue
-                    leg = legs[0]
+            lines = [
+                f"Got it! Your home airport is:",
+                f"  ✈️ *{primary['name']} ({primary['code']})* (primary)",
+            ]
+            if nearby:
+                lines.append("")
+                lines.append("Nearby airports:")
+                for ap in nearby:
+                    lines.append(f"  ✈️ {ap['name']} ({ap['code']})")
 
-                    duration_sec = leg.get("duration", {}).get("value", 99999)
-                    distance_m = leg.get("distance", {}).get("value", 0)
-                    distance_km = distance_m / 1000
+            reply_markup = {"inline_keyboard": [[
+                {"text": "Looks good ✅", "callback_data": "confirm_airports:_"},
+                {"text": "Change ✏️", "callback_data": "change_airports:_"},
+            ]]}
+            await self._send(client, chat_id, "\n".join(lines), reply_markup=reply_markup)
 
-                    if duration_sec > _MAX_TRAVEL_SECONDS:
-                        continue
+    async def _resolve_airports_via_claude(self, location: str) -> dict | None:
+        """Use Claude to resolve a city name to primary + nearby airports."""
+        try:
+            ai_client = anthropic.AsyncAnthropic(api_key=self._anthropic_key)
+            resp = await ai_client.messages.create(
+                model=self._anthropic_model,
+                max_tokens=256,
+                messages=[{"role": "user", "content": _AIRPORT_RESOLVE_PROMPT.format(location=location)}],
+            )
+            raw = resp.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
+            result = json.loads(raw)
+            if "primary" not in result or "code" not in result["primary"]:
+                logger.warning("Claude airport response missing primary: %s", raw)
+                return None
+            return result
+        except Exception:
+            logger.warning("Failed to resolve airports for %s", location, exc_info=True)
+            return None
 
-                    transport_cost = round(distance_km * 0.20, 2)
+    async def _finish_onboarding(
+        self, chat_id: str, user_id: str, name: str, location: str,
+        airports: dict, client: httpx.AsyncClient,
+    ) -> None:
+        """Complete onboarding: store airports, mark user as onboarded."""
+        loop = asyncio.get_running_loop()
+        primary = airports["primary"]
+        nearby = airports.get("nearby", [])
 
-                    results.append({
-                        "code": code,
-                        "name": airport_name,
-                        "transport_mode": "car",
-                        "transport_cost_eur": transport_cost,
-                        "transport_time_min": round(duration_sec / 60),
-                        "parking_cost_eur": 50 if code != "AMS" else None,
-                        "is_primary": False,
-                    })
-                except Exception:
-                    logger.warning("Failed to get directions to %s", code)
-                    continue
+        # Update user with resolved home airport
+        await loop.run_in_executor(None, lambda: self._db.update_user(
+            user_id, home_airport=primary["code"], onboarded=1,
+        ))
 
-        # Sort by travel time, mark closest as primary
-        results.sort(key=lambda x: x["transport_time_min"])
-        if results:
-            results[0]["is_primary"] = True
+        # Seed airport_transport (no transport costs yet — ITEM-004 will add those)
+        airport_data = [{"code": primary["code"], "name": primary["name"], "is_primary": True}]
+        for ap in nearby:
+            airport_data.append({"code": ap["code"], "name": ap["name"], "is_primary": False})
+        await loop.run_in_executor(None, self._db.seed_airport_transport, airport_data, user_id)
 
-        return results
+        # Check if this user is the first user (auto-approve as admin)
+        all_users = await loop.run_in_executor(None, self._db.get_all_active_users)
+        is_first_user = len(all_users) <= 1
+
+        if is_first_user:
+            await loop.run_in_executor(None, lambda: self._db.update_user(user_id, approved=1))
+
+        lines = [
+            f"Great, {name}! You're all set in *{location}*.",
+            "",
+            "I'll monitor flights from these airports for you:",
+            f"  ✈️ {primary['name']} ({primary['code']}) (primary)",
+        ]
+        for ap in nearby:
+            lines.append(f"  ✈️ {ap['name']} ({ap['code']})")
+        lines.append("")
+
+        if is_first_user:
+            lines.append("Now tell me about a trip! For example:")
+            lines.append("`Japan for 2 weeks in October, 2 passengers`")
+        else:
+            lines.append("You can already add trips — for example:")
+            lines.append("`Japan for 2 weeks in October, 2 passengers`")
+            lines.append("")
+            lines.append("🕐 *You're on the waitlist!* I'll start monitoring your flights "
+                         "once the admin approves you — usually within a few hours. "
+                         "You can WhatsApp Barry to speed things up.")
+
+            # Notify admin (first approved user)
+            await self._notify_admin_new_user(name, location, primary["code"], user_id, client)
+
+        await self._send(client, chat_id, "\n".join(lines))
+        self._pending.pop(chat_id, None)
+
+    async def _notify_admin_new_user(
+        self, name: str, location: str, airport: str, user_id: str,
+        client: httpx.AsyncClient,
+    ) -> None:
+        """Send a Telegram notification to the admin about a new user awaiting approval."""
+        loop = asyncio.get_running_loop()
+        all_users = await loop.run_in_executor(None, self._db.get_all_active_users)
+        admin = next((u for u in all_users if u.get("approved")), None)
+        if not admin:
+            logger.warning("No admin user found to notify about new user %s", name)
+            return
+
+        admin_chat_id = admin["telegram_chat_id"]
+        msg = (
+            f"🐕 *New user awaiting approval*\n\n"
+            f"*Name:* {name}\n"
+            f"*Location:* {location}\n"
+            f"*Home airport:* {airport}"
+        )
+        reply_markup = {"inline_keyboard": [[
+            {"text": "Approve ✅", "callback_data": f"approve_user:{user_id}"},
+            {"text": "Reject ❌", "callback_data": f"reject_user:{user_id}"},
+        ]]}
+        await self._send(client, admin_chat_id, msg, reply_markup=reply_markup)
 
     # --- Callbacks ---
 
@@ -498,6 +615,59 @@ class TripBot:
         chat_id = str(message.get("chat", {}).get("id", ""))
 
         message_id = message.get("message_id")
+
+        # Admin approval callbacks
+        if action == "approve_user":
+            target_user_id = payload
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: self._db.update_user(target_user_id, approved=1))
+            await self._answer_callback(client, callback_id, "User approved!")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Approved")
+            # Notify the approved user
+            target_user = await loop.run_in_executor(None, self._db.get_user, target_user_id)
+            if target_user:
+                await self._send(client, target_user["telegram_chat_id"],
+                    "🎉 *You're approved!* I'm now monitoring your flights. "
+                    "You'll get alerts when I find good deals.")
+            return
+        if action == "reject_user":
+            target_user_id = payload
+            loop = asyncio.get_running_loop()
+            await self._answer_callback(client, callback_id, "User rejected")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "❌ Rejected")
+            target_user = await loop.run_in_executor(None, self._db.get_user, target_user_id)
+            if target_user:
+                await self._send(client, target_user["telegram_chat_id"],
+                    "Sorry, your access request wasn't approved at this time. "
+                    "Reach out to Barry if you think this is a mistake.")
+                await loop.run_in_executor(None, lambda: self._db.update_user(target_user_id, active=0))
+            return
+
+        # Onboarding airport confirmation callbacks
+        if action == "confirm_airports":
+            await self._answer_callback(client, callback_id, "Confirmed!")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Confirmed")
+            pending = self._pending.get(chat_id)
+            if pending and pending.get("step") == "confirm_airports":
+                await self._finish_onboarding(
+                    chat_id, pending["user_id"], pending.get("name", "there"),
+                    pending.get("location", ""), pending["airports"], client,
+                )
+            return
+        if action == "change_airports":
+            await self._answer_callback(client, callback_id, "Tell me your city")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "✏️ Changing")
+            pending = self._pending.get(chat_id)
+            if pending:
+                pending["step"] = "change_airport"
+            if chat_id:
+                await self._send(client, chat_id,
+                    "No problem! Tell me a different city or your airport code (e.g. LHR, CDG).")
+            return
 
         # Route confirmation callbacks
         if action in ("confirm_route", "confirm_modify", "confirm_remove"):

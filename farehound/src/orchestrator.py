@@ -377,9 +377,10 @@ class Orchestrator:
         self._pending_alerts: dict[str, dict] = {}  # route_id -> best alert candidate
         loop = asyncio.get_running_loop()
 
-        users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        all_users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        users = [u for u in all_users if u.get("approved")]
         if not users:
-            logger.warning("No active users to poll")
+            logger.warning("No approved users to poll")
             return
 
         # Phase 1: Collect all search requests, dedup by search key
@@ -1123,9 +1124,10 @@ class Orchestrator:
         logger.info("Preparing daily digest")
         loop = asyncio.get_running_loop()
 
-        users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        all_users = await loop.run_in_executor(None, self.db.get_all_active_users)
+        users = [u for u in all_users if u.get("approved")]
         if not users:
-            logger.info("No active users, skipping digest")
+            logger.info("No approved users, skipping digest")
             return
 
         for user in users:

@@ -181,7 +181,7 @@ class TestSmartDigestSkipsNoDeals:
             orch = Orchestrator(config)
 
         user = {"user_id": "u1", "telegram_chat_id": "chat1", "name": "Alice",
-                "home_airport": "AMS", "preferences": None, "onboarded": True, "active": True}
+                "home_airport": "AMS", "preferences": None, "onboarded": True, "approved": True, "active": True}
         route = Route(route_id="r1", origin="AMS", destination="NRT", passengers=2, active=True)
 
         mock_db.get_all_active_users.return_value = [user]
@@ -404,7 +404,7 @@ class TestFollowUp:
              "destination": "NRT", "price": 400.0},
         ]
         user = {"user_id": "u1", "telegram_chat_id": "chat1", "name": "Alice",
-                "home_airport": "AMS", "preferences": None, "onboarded": True, "active": True}
+                "home_airport": "AMS", "preferences": None, "onboarded": True, "approved": True, "active": True}
         route = Route(route_id="r1", origin="AMS", destination="NRT", passengers=2, active=True)
 
         mock_db.get_deals_pending_feedback.return_value = pending

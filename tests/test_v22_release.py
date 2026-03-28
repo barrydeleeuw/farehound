@@ -34,6 +34,7 @@ def _make_user(user_id="u1", chat_id="chat1", name="Alice"):
         "home_airport": "AMS",
         "preferences": None,
         "onboarded": True,
+        "approved": True,
         "active": True,
     }
 

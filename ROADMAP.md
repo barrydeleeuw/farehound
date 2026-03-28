@@ -74,6 +74,8 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Other archipelago/region destinations also trigger clarification
   - [ ] User can pick one or say "all" (ITEM-012 dependency for "all")
 
+
+
 ### [ITEM-036] Redesign trip recommendation message layout
 - **Status:** Proposed
 - **Priority:** P1 (High)
@@ -271,6 +273,12 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-017] SerpAPI response cache for local testing
 - **Status:** Done — SERPAPI_CACHE_DIR env var enables cached responses locally. 17 responses recorded. Zero API calls during dev.
+
+### [ITEM-D12] Know Your Airports + Approval Gate (v0.6.0)
+- **Status:** Done — ITEM-043 (onboarding resolves airports via Claude, confirmation with inline buttons, fallback to manual IATA), ITEM-044 (user approval gate: approved column, first user auto-approved as admin, waitlist message, admin Telegram notification with Approve/Reject buttons, orchestrator skips unapproved users). 271 tests pass (9 new).
+
+### [ITEM-043] Know Your Airports (v0.6.0)
+- **Status:** Done — Onboarding resolves city → airports via Claude. Confirmation with inline buttons. Fallback to manual IATA entry. Deleted unused SerpAPI-based `_resolve_airports()`. 267 tests pass (5 new).
 
 ### [ITEM-D11] Clean Signals (v0.5.0)
 - **Status:** Done — ITEM-042 (daily digest crash: table-qualified user_id in JOIN), ITEM-041 (removed RSS/Telethon community listeners, community.py, config). Version reset to SemVer 0.x (pre-release). 264 tests pass (1 new regression test).

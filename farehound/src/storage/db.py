@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
     home_airport      TEXT DEFAULT 'AMS',
     preferences       TEXT,
     onboarded         INTEGER DEFAULT 0,
+    approved          INTEGER DEFAULT 0,
     active            INTEGER DEFAULT 1,
     created_at        TEXT DEFAULT (datetime('now'))
 );
@@ -185,6 +186,11 @@ class Database:
                 alter = f"ALTER TABLE deals ADD COLUMN {col} {'TEXT' if default is None else 'INTEGER DEFAULT ' + default}"
                 self._conn.execute(alter)
         self._conn.commit()
+        # Add approved column if missing; auto-approve existing users
+        if not _has_column(self._conn, "users", "approved"):
+            self._conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
+            self._conn.execute("UPDATE users SET approved = 1 WHERE onboarded = 1")
+            self._conn.commit()
         # Migrate existing data: create default user if needed
         self._migrate_default_user()
 
@@ -225,6 +231,7 @@ class Database:
         columns = [desc[0] for desc in cursor.description]
         result = dict(zip(columns, row))
         result["onboarded"] = bool(result["onboarded"])
+        result["approved"] = bool(result.get("approved"))
         result["active"] = bool(result["active"])
         if result.get("preferences"):
             result["preferences"] = json.loads(result["preferences"])
@@ -240,13 +247,14 @@ class Database:
         columns = [desc[0] for desc in cursor.description]
         result = dict(zip(columns, row))
         result["onboarded"] = bool(result["onboarded"])
+        result["approved"] = bool(result.get("approved"))
         result["active"] = bool(result["active"])
         if result.get("preferences"):
             result["preferences"] = json.loads(result["preferences"])
         return result
 
     def update_user(self, user_id: str, **fields) -> bool:
-        allowed = {"name", "home_location", "home_airport", "preferences", "onboarded", "active"}
+        allowed = {"name", "home_location", "home_airport", "preferences", "onboarded", "approved", "active"}
         to_update = {k: v for k, v in fields.items() if k in allowed}
         if not to_update:
             return False
@@ -271,6 +279,7 @@ class Database:
         for row in cursor.fetchall():
             d = dict(zip(columns, row))
             d["onboarded"] = bool(d["onboarded"])
+            d["approved"] = bool(d.get("approved"))
             d["active"] = bool(d["active"])
             if d.get("preferences"):
                 d["preferences"] = json.loads(d["preferences"])
