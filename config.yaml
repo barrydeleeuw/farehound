@@ -46,44 +46,6 @@ scoring:
   poll_interval_hours: 24
   digest_time: "08:00"
 
-community_feeds:
-  # RSS feeds — polled every 5 minutes, no auth needed
-  - type: rss
-    channel: "SecretFlying"
-    url: "https://www.secretflying.com/feed/"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  - type: rss
-    channel: "SecretFlying-ErrorFares"
-    url: "https://www.secretflying.com/posts/category/error-fare/feed/"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  - type: rss
-    channel: "TheFlightDeal"
-    url: "https://www.theflightdeal.com/feed/"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  - type: rss
-    channel: "r/cheapflights"
-    url: "https://www.reddit.com/r/cheapflights/new.json"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  - type: rss
-    channel: "r/flights"
-    url: "https://www.reddit.com/r/flights/new.json"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  - type: rss
-    channel: "r/TravelHacking"
-    url: "https://www.reddit.com/r/TravelHacking/new.json"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  - type: rss
-    channel: "r/Shoestring"
-    url: "https://www.reddit.com/r/Shoestring/new.json"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  # Telegram channels — real-time via Telethon
-  - type: telegram_channel
-    channel: "@trip4world"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-  - type: telegram_channel
-    channel: "@holidaypirates"
-    filter_origins: [AMS, BRU, DUS, RTM, EIN, CGN, CRL, LGG, NRN]
-
 # Telegram Bot alerts (optional secondary alert channel)
 # To set up: message @BotFather on Telegram, create a bot, copy the token.
 # Then create a group/channel, add the bot, and get the chat_id

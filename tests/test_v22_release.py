@@ -75,8 +75,6 @@ def _make_orchestrator_with_mocks():
     config.anthropic.api_key = "test"
     config.anthropic.model = "test"
     config.telegram_alerts = None
-    config.telegram = None
-    config.community_feeds = []
     config.scoring.poll_interval_hours = 6
     config.scoring.digest_time = (8, 0)
     config.scoring.alert_threshold = 0.75

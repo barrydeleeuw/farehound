@@ -121,23 +121,6 @@ class ScoringConfig:
 
 
 @dataclass
-class CommunityFeedConfig:
-    type: str
-    channel: str
-    filter_origins: list[str] = field(default_factory=list)
-    url: str | None = None
-
-    @classmethod
-    def from_dict(cls, d: dict) -> CommunityFeedConfig:
-        return cls(
-            type=d["type"],
-            channel=d["channel"],
-            filter_origins=d.get("filter_origins", []),
-            url=d.get("url"),
-        )
-
-
-@dataclass
 class TelegramAlertConfig:
     bot_token_env: str
     chat_id_env: str
@@ -161,32 +144,12 @@ class TelegramAlertConfig:
 
 
 @dataclass
-class TelegramConfig:
-    api_id_env: str
-    api_hash_env: str
-
-    @classmethod
-    def from_dict(cls, d: dict) -> TelegramConfig:
-        return cls(api_id_env=d["api_id_env"], api_hash_env=d["api_hash_env"])
-
-    @property
-    def api_id(self) -> str:
-        return _resolve_env(self.api_id_env)
-
-    @property
-    def api_hash(self) -> str:
-        return _resolve_env(self.api_hash_env)
-
-
-@dataclass
 class AppConfig:
     serpapi: SerpAPIConfig
     anthropic: AnthropicConfig
     traveller: TravellerConfig
     routes: list[Route]
     scoring: ScoringConfig
-    community_feeds: list[CommunityFeedConfig]
-    telegram: TelegramConfig | None = None
     telegram_alerts: TelegramAlertConfig | None = None
     airports: list[dict] = field(default_factory=list)
 
@@ -198,13 +161,6 @@ class AppConfig:
             traveller=TravellerConfig.from_dict(d["traveller"]),
             routes=[Route.from_dict(r) for r in d.get("routes", [])],
             scoring=ScoringConfig.from_dict(d.get("scoring", {})),
-            community_feeds=[
-                CommunityFeedConfig.from_dict(f)
-                for f in d.get("community_feeds", [])
-            ],
-            telegram=TelegramConfig.from_dict(d["telegram"])
-            if "telegram" in d
-            else None,
             telegram_alerts=TelegramAlertConfig.from_dict(d["telegram_alerts"])
             if "telegram_alerts" in d
             else None,
@@ -250,7 +206,6 @@ def _translate_ha_options(opts: dict) -> dict:
             "alert_threshold": opts.get("alert_threshold", 0.75),
             "poll_interval_hours": opts.get("poll_interval_hours", 4),
         },
-        "community_feeds": [],
     }
 
     # Routes: HA options stores as JSON list
@@ -261,13 +216,6 @@ def _translate_ha_options(opts: dict) -> dict:
         translated["routes"] = routes
     else:
         translated["routes"] = []
-
-    # Telegram config (optional — community listener)
-    if opts.get("telegram_api_id"):
-        translated["telegram"] = {
-            "api_id_env": "TELEGRAM_API_ID",
-            "api_hash_env": "TELEGRAM_API_HASH",
-        }
 
     # Telegram alerts (optional — bot notifications)
     if opts.get("telegram_bot_token"):
@@ -286,8 +234,6 @@ def _translate_ha_options(opts: dict) -> dict:
         # config.yaml routes take precedence if HA options has none
         if not translated["routes"] and "routes" in yaml_data:
             translated["routes"] = yaml_data["routes"]
-        if not translated["community_feeds"] and "community_feeds" in yaml_data:
-            translated["community_feeds"] = yaml_data["community_feeds"]
         if "telegram_alerts" not in translated and "telegram_alerts" in yaml_data:
             translated["telegram_alerts"] = yaml_data["telegram_alerts"]
 

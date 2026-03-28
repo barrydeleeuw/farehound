@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.alerts.telegram import TelegramNotifier
-from src.apis.community import RSSListener, CommunityFeedConfig
 from src.storage.db import Database
 from src.storage.models import Deal, PriceSnapshot, Route
 
@@ -129,6 +128,28 @@ class TestGetRoutesWithPendingDeals:
         result = db.get_routes_with_pending_deals()
         assert result == {}
 
+    def test_user_id_filter_with_join(self, db, sample_route):
+        """Regression: user_id must be table-qualified in JOIN query (ITEM-042)."""
+        uid = db.create_user("42", name="Barry")
+        db.upsert_route(sample_route, user_id=uid)
+        now = datetime.now(UTC)
+        snap = PriceSnapshot(
+            snapshot_id="s1", route_id="ams-nrt", observed_at=now,
+            source="serpapi_poll", passengers=2, lowest_price=Decimal("400"),
+        )
+        db.insert_snapshot(snap, user_id=uid)
+        deal = Deal(
+            deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+            score=Decimal("0.85"), alert_sent=True,
+            alert_sent_at=now - timedelta(days=1),
+        )
+        db.insert_deal(deal, user_id=uid)
+
+        # This used to raise sqlite3.OperationalError: ambiguous column name: user_id
+        result = db.get_routes_with_pending_deals(user_id=uid)
+        assert "ams-nrt" in result
+        assert result["ams-nrt"] == 400.0
+
 
 class TestSmartDigestSkipsNoDeals:
     @pytest.mark.asyncio
@@ -142,8 +163,6 @@ class TestSmartDigestSkipsNoDeals:
         config.anthropic.api_key = "test"
         config.anthropic.model = "test"
         config.telegram_alerts = None
-        config.telegram = None
-        config.community_feeds = []
         config.scoring.poll_interval_hours = 6
         config.scoring.digest_time = (8, 0)
         config.scoring.alert_threshold = 0.75
@@ -363,8 +382,6 @@ class TestFollowUp:
         config.anthropic.api_key = "test"
         config.anthropic.model = "test"
         config.telegram_alerts = None
-        config.telegram = None
-        config.community_feeds = []
         config.scoring.poll_interval_hours = 6
         config.scoring.digest_time = (8, 0)
         config.scoring.alert_threshold = 0.75
@@ -414,8 +431,6 @@ class TestFollowUp:
         config.anthropic.api_key = "test"
         config.anthropic.model = "test"
         config.telegram_alerts = None
-        config.telegram = None
-        config.community_feeds = []
         config.scoring.poll_interval_hours = 6
         config.scoring.digest_time = (8, 0)
         config.scoring.alert_threshold = 0.75
@@ -461,46 +476,6 @@ class TestFollowUp:
         assert pending[0]["deal_id"] == "d1"
         assert pending[0]["origin"] == "AMS"
         assert float(pending[0]["price"]) == 400.0
-
-
-# ────────────────────────────────────────────────────────
-# ITEM-010: RSS User-Agent fix
-# ────────────────────────────────────────────────────────
-
-class TestRSSUserAgent:
-    @pytest.mark.asyncio
-    async def test_rss_uses_browser_user_agent(self):
-        """RSS client uses a browser-like User-Agent to avoid 403s from Reddit."""
-        feed_xml = """<?xml version="1.0" encoding="UTF-8"?>
-        <rss version="2.0"><channel><title>Test</title>
-          <item><title>AMS to NRT €450</title><guid>deal1</guid></item>
-        </channel></rss>"""
-
-        feeds = [CommunityFeedConfig(channel="test", filter_origins=[], url="https://example.com/rss")]
-        listener = RSSListener(feeds=feeds)
-        callback = AsyncMock()
-        await listener.start(callback)
-
-        with patch("src.apis.community.httpx.AsyncClient") as mock_cls:
-            mock_client = AsyncMock()
-            mock_resp = MagicMock()
-            mock_resp.text = feed_xml
-            mock_resp.raise_for_status = MagicMock()
-            mock_client.get = AsyncMock(return_value=mock_resp)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_cls.return_value = mock_client
-
-            await listener._poll(seed=True)
-
-            # Verify the httpx.AsyncClient was created with browser-like User-Agent
-            call_kwargs = mock_cls.call_args
-            headers = call_kwargs.kwargs.get("headers") or (call_kwargs[1].get("headers") if len(call_kwargs) > 1 else None)
-            assert headers is not None
-            ua = headers.get("User-Agent", "")
-            # Should NOT be "FareHound/1.0" — should be a browser UA
-            assert "FareHound" not in ua
-            assert "Mozilla" in ua
 
 
 # ────────────────────────────────────────────────────────

@@ -16,8 +16,6 @@ from src.config import (
     TravellerConfig,
     Route,
     ScoringConfig,
-    CommunityFeedConfig,
-    TelegramConfig,
     TelegramAlertConfig,
     _resolve_env,
     _translate_ha_options,
@@ -128,25 +126,6 @@ def test_scoring_config_invalid_digest_time():
     assert cfg.digest_time == (8, 0)
 
 
-# --- CommunityFeedConfig ---
-
-def test_community_feed_config():
-    cfg = CommunityFeedConfig.from_dict({
-        "type": "telegram_channel",
-        "channel": "@test",
-        "filter_origins": ["AMS"],
-    })
-    assert cfg.type == "telegram_channel"
-    assert cfg.filter_origins == ["AMS"]
-
-
-# --- TelegramConfig ---
-
-def test_telegram_config():
-    cfg = TelegramConfig.from_dict({"api_id_env": "TG_ID", "api_hash_env": "TG_HASH"})
-    assert cfg.api_id_env == "TG_ID"
-
-
 # --- TelegramAlertConfig ---
 
 def test_telegram_alert_config_from_dict():
@@ -184,7 +163,7 @@ def test_validate_no_routes_raises():
         traveller=TravellerConfig(name="T"),
         routes=[],
         scoring=ScoringConfig(),
-        community_feeds=[],
+
     )
     with pytest.raises(ValueError, match="At least one route"):
         _validate(config)
@@ -197,7 +176,7 @@ def test_validate_missing_origin_raises():
         traveller=TravellerConfig(name="T"),
         routes=[Route(id="r1", origin="", destination="NRT")],
         scoring=ScoringConfig(),
-        community_feeds=[],
+
     )
     with pytest.raises(ValueError, match="missing origin or destination"):
         _validate(config)
@@ -210,7 +189,7 @@ def test_validate_zero_passengers_raises():
         traveller=TravellerConfig(name="T"),
         routes=[Route(id="r1", origin="AMS", destination="NRT", passengers=0)],
         scoring=ScoringConfig(),
-        community_feeds=[],
+
     )
     with pytest.raises(ValueError, match="at least 1 passenger"):
         _validate(config)
@@ -229,22 +208,6 @@ def test_translate_ha_options_basic():
     assert result["traveller"]["name"] == "Bob"
     assert result["traveller"]["home_airport"] == "LHR"
     assert len(result["routes"]) == 1
-
-
-def test_translate_ha_options_telegram():
-    opts = {
-        "ha_notify_service": "notify.phone",
-        "telegram_api_id": "123",
-    }
-    result = _translate_ha_options(opts)
-    assert "telegram" in result
-    assert result["telegram"]["api_id_env"] == "TELEGRAM_API_ID"
-
-
-def test_translate_ha_options_no_telegram():
-    opts = {"ha_notify_service": "notify.phone"}
-    result = _translate_ha_options(opts)
-    assert "telegram" not in result
 
 
 # --- load_config ---

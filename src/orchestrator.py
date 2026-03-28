@@ -13,8 +13,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.alerts.telegram import TelegramNotifier
 from src.analysis.nearby_airports import compare_airports
 from src.analysis.scorer import DealScorer
-from src.apis.community import CommunityListener, RSSListener
-from src.apis.community import CommunityFeedConfig as CommunityFeed
 from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows
 from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
@@ -124,37 +122,6 @@ class Orchestrator:
         self._latest_nearby_comparison: dict[str, list[dict]] = {}
         self._pending_alerts: dict[str, dict] = {}
         self._cycle_best_prices: dict[str, float] = {}
-
-        # Community listeners (Layer 2)
-        self.community_listener: CommunityListener | None = None
-        self._community_task: asyncio.Task | None = None
-        self.rss_listener: RSSListener | None = None
-        self._rss_task: asyncio.Task | None = None
-
-        # Split feeds by type
-        telegram_feeds = [f for f in config.community_feeds if f.type == "telegram_channel"]
-        rss_feeds = [f for f in config.community_feeds if f.type == "rss"]
-
-        if config.telegram is not None and telegram_feeds:
-            feeds = [
-                CommunityFeed(channel=f.channel, filter_origins=f.filter_origins)
-                for f in telegram_feeds
-            ]
-            try:
-                self.community_listener = CommunityListener(
-                    api_id=config.telegram.api_id,
-                    api_hash=config.telegram.api_hash,
-                    feeds=feeds,
-                )
-            except Exception as e:
-                logger.warning("Could not init Telegram community listener: %s", e)
-
-        if rss_feeds:
-            feeds = [
-                CommunityFeed(channel=f.channel, filter_origins=f.filter_origins, url=f.url)
-                for f in rss_feeds
-            ]
-            self.rss_listener = RSSListener(feeds=feeds)
 
         # Telegram bot for /trip commands (reuses alert bot token)
         self.trip_bot: TripBot | None = None
@@ -282,28 +249,10 @@ class Orchestrator:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.shutdown(s)))
 
-        # Start community listeners as concurrent tasks
-        if self.community_listener is not None:
-            try:
-                await self.community_listener.start(callback=self.on_community_deal)
-                self._community_task = asyncio.create_task(
-                    self.community_listener.run_until_disconnected()
-                )
-                self._community_task.add_done_callback(self._on_community_task_done)
-                logger.info("Telegram community listener started")
-            except RuntimeError:
-                logger.warning("Telegram channel listener skipped (not authorized). RSS feeds still active.")
-
-        if self.rss_listener is not None:
-            await self.rss_listener.start(callback=self.on_community_deal)
-            self._rss_task = asyncio.create_task(self.rss_listener.run_forever())
-            self._rss_task.add_done_callback(self._on_community_task_done)
-            logger.info("RSS community listener started")
-
         # Start TripBot for /trip commands
         if self.trip_bot is not None:
             self._trip_bot_task = asyncio.create_task(self.trip_bot.run())
-            self._trip_bot_task.add_done_callback(self._on_community_task_done)
+            self._trip_bot_task.add_done_callback(self._on_task_done)
             logger.info("TripBot command handler started")
 
         self.scheduler.start()
@@ -319,12 +268,12 @@ class Orchestrator:
         except asyncio.CancelledError:
             pass
 
-    def _on_community_task_done(self, task: asyncio.Task) -> None:
+    def _on_task_done(self, task: asyncio.Task) -> None:
         if task.cancelled():
             return
         exc = task.exception()
         if exc:
-            logger.error("Community listener crashed: %s", exc, exc_info=exc)
+            logger.error("Background task crashed: %s", exc, exc_info=exc)
 
     async def _check_pending_feedback(self) -> None:
         """Send follow-up messages for deals alerted 3+ days ago with no feedback."""
@@ -373,10 +322,6 @@ class Orchestrator:
         else:
             logger.info("Shutting down")
 
-        if self.community_listener is not None:
-            await self.community_listener.disconnect()
-        if self.rss_listener is not None:
-            self.rss_listener.stop()
         if self.trip_bot is not None:
             self.trip_bot.stop()
 

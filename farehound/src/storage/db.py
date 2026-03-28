@@ -535,7 +535,9 @@ class Database:
             WHERE d.alert_sent = 1
               AND d.feedback IS NULL
         """
-        sql += _user_filter(user_id, params)
+        if user_id is not None:
+            params.append(user_id)
+            sql += " AND d.user_id = ?"
         sql += " ORDER BY d.created_at DESC"
         cursor = self._conn.execute(sql, params)
         result: dict[str, float | None] = {}

@@ -1,6 +1,6 @@
 # FareHound Roadmap
 
-> Last updated: 2026-03-25
+> Last updated: 2026-03-28
 
 ## Mission
 
@@ -14,18 +14,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## In Progress
 
-### [ITEM-001] Multi-user stabilization
-- **Status:** In Progress
-- **Priority:** P0 (Critical)
-- **Effort:** M
-- **Dependencies:** None
-- **Summary:** Fix remaining bugs from v2.0 multi-user launch — onboarding flow, cache consistency, SerpAPI budget management.
-- **Acceptance Criteria:**
-  - [ ] Onboarding flow works end-to-end (name → location → airports → first trip)
-  - [ ] Cached SerpAPI responses used for local testing
-  - [ ] Poll interval at 24h keeps within Starter plan budget
-  - [ ] Barry's routes work correctly after fresh DB migration
-  - [ ] Second user can onboard and see separate trips
+<!-- No items currently in progress -->
 
 ## Ready
 
@@ -51,23 +40,8 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## Proposed
 
-### [ITEM-034] Bug: Region/archipelago destinations should ask for clarification
-- **Status:** Proposed
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** "Add a trip to the Canary Islands" auto-picked Las Palmas (LPA) without asking which island. The `_PARSE_PROMPT` only triggers `needs_clarification` for country-level destinations (e.g. "Japan" → which city?), but not for regions or archipelagos with multiple airports. "Canary Islands" should offer: Gran Canaria (LPA), Tenerife (TFS), Fuerteventura (FUE), Lanzarote (ACE). Related to ITEM-012 (multi-destination) but this is a simpler prompt fix — treat regions/archipelagos like countries in the disambiguation logic.
-- **Fix approach:**
-  - Extend `_PARSE_PROMPT` disambiguation rule to cover regions, archipelagos, and island groups — not just countries
-  - Add examples: "Canary Islands", "Balearic Islands", "Greek Islands", "Hawaii"
-  - When user says "all of them", create routes for each (ties into ITEM-012)
-- **Acceptance Criteria:**
-  - [ ] "Canary Islands" triggers clarification with LPA, TFS, FUE, ACE options
-  - [ ] Other archipelago/region destinations also trigger clarification
-  - [ ] User can pick one or say "all" (ITEM-012 dependency for "all")
-
 ### [ITEM-035] Immediate fare feedback after trip creation
-- **Status:** Proposed
+- **Status:** Ready
 - **Priority:** P1 (High)
 - **Effort:** S
 - **Dependencies:** None
@@ -84,6 +58,21 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Fares displayed inline for home + nearby airports on success
   - [ ] Partial failures show available results + note about missing airports
   - [ ] Full failure shows specific error message, not generic fallback
+
+### [ITEM-034] Bug: Region/archipelago destinations should ask for clarification
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** S
+- **Dependencies:** None
+- **Summary:** "Add a trip to the Canary Islands" auto-picked Las Palmas (LPA) without asking which island. The `_PARSE_PROMPT` only triggers `needs_clarification` for country-level destinations (e.g. "Japan" → which city?), but not for regions or archipelagos with multiple airports. "Canary Islands" should offer: Gran Canaria (LPA), Tenerife (TFS), Fuerteventura (FUE), Lanzarote (ACE). Related to ITEM-012 (multi-destination) but this is a simpler prompt fix — treat regions/archipelagos like countries in the disambiguation logic.
+- **Fix approach:**
+  - Extend `_PARSE_PROMPT` disambiguation rule to cover regions, archipelagos, and island groups — not just countries
+  - Add examples: "Canary Islands", "Balearic Islands", "Greek Islands", "Hawaii"
+  - When user says "all of them", create routes for each (ties into ITEM-012)
+- **Acceptance Criteria:**
+  - [ ] "Canary Islands" triggers clarification with LPA, TFS, FUE, ACE options
+  - [ ] Other archipelago/region destinations also trigger clarification
+  - [ ] User can pick one or say "all" (ITEM-012 dependency for "all")
 
 ### [ITEM-036] Redesign trip recommendation message layout
 - **Status:** Proposed
@@ -112,7 +101,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Status:** Proposed
 - **Priority:** P1 (High)
 - **Effort:** M
-- **Dependencies:** [ITEM-001]
+- **Dependencies:** None
 - **Summary:** Factor baggage costs into deal scoring and alerts. A €200 fare with €60 return baggage fees isn't really €200 — it's €260. Currently FareHound only considers ticket price. This item adds luggage cost awareness so users see the true cost of flying, directly serving the mission of showing real cost.
 - **Design considerations:**
   - **SerpAPI data:** Google Flights results via SerpAPI include `carry_on_bag`, `checked_bag` fields in booking options with costs per bag. Extract and use these.
@@ -137,7 +126,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Status:** Proposed
 - **Priority:** P1 (High)
 - **Effort:** L
-- **Dependencies:** [ITEM-001], [ITEM-037]
+- **Dependencies:** [ITEM-037]
 - **Summary:** Replace paid deal subscriptions (Jack's Flight Club, Secret Flying premium) with automated discovery. Use SerpAPI's Google Travel Explore API to scan cheap flights from the user's home airports and nearby airports (e.g. AMS, EIN, BRU, DUS, CRL), detect anomalous price drops, and alert users about deals on routes they haven't explicitly configured — including destinations they hadn't considered.
 - **Why this matters:** JFC and Secret Flying charge monthly fees to do essentially the same thing — monitor fares broadly and flag cheap ones. FareHound can automate this with the same Google Flights data, personalized to the user's home airports, and with total cost awareness (see ITEM-037).
 - **Design considerations:**
@@ -173,7 +162,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Status:** Proposed
 - **Priority:** P2 (Medium)
 - **Effort:** S
-- **Dependencies:** [ITEM-001]
+- **Dependencies:** None
 - **Summary:** Cache Google Maps transport data by city. If two users live in Amsterdam, reuse the same lookup.
 
 ### [ITEM-005] Preferred airline comparison
@@ -237,14 +226,14 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Status:** Proposed
 - **Priority:** P2 (Medium)
 - **Effort:** M
-- **Dependencies:** [ITEM-001]
+- **Dependencies:** None
 - **Summary:** "Japan" monitors NRT + KIX + NGO as separate routes under one trip. User says "all of them" → creates routes for each.
 
 ### [ITEM-015] Adaptive polling frequency
 - **Status:** Proposed
 - **Priority:** P2 (Medium)
 - **Effort:** M
-- **Dependencies:** [ITEM-001]
+- **Dependencies:** None
 - **Summary:** Poll more when departure < 6 weeks (4h), less when > 4 months (48h). Currently fixed at 24h.
 
 ### [ITEM-018] E2E Telegram bot test harness
@@ -282,6 +271,12 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-017] SerpAPI response cache for local testing
 - **Status:** Done — SERPAPI_CACHE_DIR env var enables cached responses locally. 17 responses recorded. Zero API calls during dev.
+
+### [ITEM-D11] Clean Signals (v0.5.0)
+- **Status:** Done — ITEM-042 (daily digest crash: table-qualified user_id in JOIN), ITEM-041 (removed RSS/Telethon community listeners, community.py, config). Version reset to SemVer 0.x (pre-release). 264 tests pass (1 new regression test).
+
+### [ITEM-001] Multi-user stabilization
+- **Status:** Done — Onboarding flow, SerpAPI cache (25 responses), 24h poll interval with hard cap at 950, DB migration with user scoping, multi-user isolation tested. Shipped across v2.0–v2.4.
 
 ### [ITEM-D10] Trust the Numbers (v2.4)
 - **Status:** Done — ITEM-028 (actual flight prices), ITEM-030 (max_stops enforced), ITEM-040 (API budget: windows 4→2, secondary every 3rd cycle, hard cap at 950), ITEM-031 (flight duration in comparisons), ITEM-029 (debug logging), ITEM-032 (follow-up spam fix), ITEM-033 (NL silent failures fix), ITEM-027 (non-blocking bot). 297 tests pass (19 new).
