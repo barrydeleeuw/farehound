@@ -1,6 +1,6 @@
 # FareHound Roadmap
 
-> Last updated: 2026-03-28
+> Last updated: 2026-04-06
 
 ## Mission
 
@@ -25,38 +25,19 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** None
 - **Summary:** "Long weekend in May" should generate Thu/Fri→Sun/Mon windows, not May 1-31. Trip duration model exists but needs proper orchestrator integration.
 
-### [ITEM-002] Savings tracker
+### [ITEM-045] Onboarding: ask transport mode per airport
 - **Status:** Ready
 - **Priority:** P1 (High)
 - **Effort:** S
-- **Dependencies:** None
-- **Summary:** Track cumulative savings per user. Every time FareHound finds a cheaper alternative, log it. This is the proof that our mission works — "FareHound has found €12,400 in savings for our users."
+- **Dependencies:** [ITEM-043] (Done)
+- **Summary:** After airport confirmation, ask the user how they get to each airport. Without this, transport costs are blank and FareHound can't calculate true door-to-door cost — the core value proposition. A simple per-airport question ("How do you get to Schiphol? Car / Train / Uber / Bus") plus estimated cost fills the `airport_transport` table properly. Could be a single Claude-powered conversational step: "How do you usually get to the airport? e.g. 'I drive to Schiphol, take the train to Rotterdam, and Uber to Eindhoven'" → Claude parses into structured transport data.
 - **Acceptance Criteria:**
-  - [ ] New `savings_log` table: user_id, deal_id, route_id, primary_cost, alternative_cost, savings_amount, airport_code, timestamp
-  - [ ] Logged every time a nearby alternative with savings > €75 is found
-  - [ ] `/savings` command shows total: "FareHound has found €2,400 in potential savings across your trips"
-  - [ ] Data available for future contribution/billing features
-
+  - [ ] User is asked about transport to each airport during onboarding
+  - [ ] Transport mode and estimated cost stored in `airport_transport`
+  - [ ] Works conversationally (one natural language message, not N separate questions)
+  - [ ] Fallback: if user skips, transport costs remain NULL (already handled gracefully)
 
 ## Proposed
-
-### [ITEM-046] Bug: date windows ignore user's specified departure date
-- **Status:** Proposed
-- **Priority:** P0 (Critical)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** "Japan for 3 weeks departure around October 18" returns flights departing Nov 9 — three weeks off from the requested date. The parse prompt treats "around October 18" as a wide Oct-Nov search window, then `generate_date_windows` picks the cheapest window regardless of proximity to the user's intended date. The system should respect the departure date the user gave.
-- **Two fixes needed:**
-  1. **Parse prompt**: When the user gives a specific departure date (e.g. "departure October 18"), set `earliest_departure` to Oct 16 and `latest_return` based on trip duration from Oct 20 (±2 days flex). Don't expand to the full month.
-  2. **Date flexibility step**: After parsing dates, ask the user: "Is October 18 a fixed departure, or are you flexible within a few weeks?" If fixed → ±2 days. If flexible → ask how many weeks of flexibility, then use that as the window.
-- **Current behavior:** "departure around Oct 18, 3 weeks" → `earliest_departure=Oct 1, latest_return=Nov 30` → window generator picks Nov 9 → user gets flights 3 weeks late
-- **Expected behavior:** "departure around Oct 18, 3 weeks" → `earliest_departure=Oct 16, latest_return=Nov 10` → window generator stays near Oct 18
-- **Acceptance Criteria:**
-  - [ ] Specific departure date ("October 18") generates ±2 day window, not full month
-  - [ ] "Around October" (vague) generates full month window as today
-  - [ ] User asked about date flexibility during trip creation
-  - [ ] Flexible users get wider search, fixed users get tight window
-  - [ ] Date shown in deal alerts matches what user asked for
 
 ### [ITEM-037] Luggage-aware total cost calculation
 - **Status:** Proposed
@@ -118,18 +99,6 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Total cost estimate included in alert (ticket + baggage via ITEM-037)
   - [ ] API call budget stays within SerpAPI plan limits — monitoring and safeguards
   - [ ] Explore results cached and shared across users with the same/nearby home airport
-
-### [ITEM-045] Onboarding: ask transport mode per airport
-- **Status:** Proposed
-- **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** [ITEM-043]
-- **Summary:** After airport confirmation, ask the user how they get to each airport. Without this, transport costs are blank and FareHound can't calculate true door-to-door cost — the core value proposition. A simple per-airport question ("How do you get to Schiphol? Car / Train / Uber / Bus") plus estimated cost fills the `airport_transport` table properly. Could be a single Claude-powered conversational step: "How do you usually get to the airport? e.g. 'I drive to Schiphol, take the train to Rotterdam, and Uber to Eindhoven'" → Claude parses into structured transport data.
-- **Acceptance Criteria:**
-  - [ ] User is asked about transport to each airport during onboarding
-  - [ ] Transport mode and estimated cost stored in `airport_transport`
-  - [ ] Works conversationally (one natural language message, not N separate questions)
-  - [ ] Fallback: if user skips, transport costs remain NULL (already handled gracefully)
 
 ### [ITEM-004] Google Maps one-time transport lookup per city
 - **Status:** Proposed
@@ -244,6 +213,12 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-017] SerpAPI response cache for local testing
 - **Status:** Done — SERPAPI_CACHE_DIR env var enables cached responses locally. 17 responses recorded. Zero API calls during dev.
+
+### [ITEM-D14] Take Action (v0.8.0)
+- **Status:** Done — ITEM-048 (daily digest actionable buttons: "Booked ✅" and "Not interested" callbacks, bulk route dismiss), ITEM-047 (cheapest departure date hint from existing price_history in deal alerts, digest, and price checks), ITEM-002 (savings tracker: savings_log table, automatic logging at nearby airport comparison, /savings command). 311 tests pass (38 new).
+
+### [ITEM-046] Date windows respect user's departure date
+- **Status:** Done — Parse prompt generates tight ±2 day window for specific departure dates. Confirmation message shows actual search window.
 
 ### [ITEM-D13] First Impressions (v0.7.0)
 - **Status:** Done — ITEM-035 (immediate fare feedback: "Checking prices now..." message, specific error messages on failure), ITEM-034 (region/archipelago disambiguation in parse prompt), ITEM-036 (message layout redesign: flight info line with airline/stops/duration across all message types, price context with level and range). 271 tests pass.

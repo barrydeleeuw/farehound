@@ -86,7 +86,8 @@ class TestGetRoutesWithPendingDeals:
 
         result = db.get_routes_with_pending_deals()
         assert "ams-nrt" in result
-        assert result["ams-nrt"] == 400.0
+        assert result["ams-nrt"]["price"] == 400.0
+        assert "d1" in result["ams-nrt"]["deal_ids"]
 
     def test_excludes_routes_with_feedback(self, db, sample_route):
         db.upsert_route(sample_route)
@@ -148,7 +149,8 @@ class TestGetRoutesWithPendingDeals:
         # This used to raise sqlite3.OperationalError: ambiguous column name: user_id
         result = db.get_routes_with_pending_deals(user_id=uid)
         assert "ams-nrt" in result
-        assert result["ams-nrt"] == 400.0
+        assert result["ams-nrt"]["price"] == 400.0
+        assert "d1" in result["ams-nrt"]["deal_ids"]
 
 
 class TestSmartDigestSkipsNoDeals:

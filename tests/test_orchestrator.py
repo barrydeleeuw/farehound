@@ -243,7 +243,8 @@ async def test_send_daily_digest_per_user():
     mock_db.get_cheapest_recent_snapshot.return_value = snapshot
     # Smart digest: routes must have pending deals to be included
     mock_db.get_routes_with_pending_deals.side_effect = lambda uid: {
-        "u1": {"r1": 500.0}, "u2": {"r2": 500.0}
+        "u1": {"r1": {"price": 500.0, "deal_ids": ["d1"]}},
+        "u2": {"r2": {"price": 500.0, "deal_ids": ["d2"]}},
     }[uid]
 
     # Set up notifier mock

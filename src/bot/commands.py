@@ -398,6 +398,9 @@ class TripBot:
             elif cmd == "/no":
                 await self._handle_no(chat_id, client)
                 return
+            elif cmd == "/savings":
+                await self._handle_savings(chat_id, user_id, client)
+                return
 
         # Guard: casual affirmatives after informational responses should NOT
         # trigger pending confirmations — re-interpret them instead.
@@ -733,6 +736,30 @@ class TripBot:
             if chat_id:
                 await self._send(client, chat_id,
                     "No problem! Tell me a different city or your airport code (e.g. LHR, CDG).")
+            return
+
+        # Digest action callbacks
+        if action == "digest_booked":
+            deal_id = payload
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._db.update_deal_feedback, deal_id, "booked")
+            self._db._conn.execute(
+                "UPDATE deals SET booked = 1 WHERE deal_id = ?", [deal_id]
+            )
+            self._db._conn.commit()
+            await self._answer_callback(client, callback_id, "Marked as booked!")
+            if chat_id and message_id:
+                await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Marked as booked!")
+            return
+        if action == "digest_dismiss":
+            parts2 = payload.split(":", 1)
+            if len(parts2) == 2:
+                route_id, target_user_id = parts2
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._db.bulk_dismiss_route_deals, route_id, target_user_id)
+                await self._answer_callback(client, callback_id, "Dismissed")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "👋 Dismissed")
             return
 
         # Route confirmation callbacks
@@ -1142,6 +1169,17 @@ class TripBot:
                 level_icon = {"low": "📉", "typical": "➡️", "high": "📈"}.get(cheapest.price_level, "")
                 lines.append(f"{level_icon} Price level: {cheapest.price_level}")
 
+            from src.alerts.telegram import find_cheapest_date
+            cheapest_hint = find_cheapest_date(
+                cheapest.price_history,
+                str(r.earliest_departure) if r.earliest_departure else "",
+                str(r.latest_return) if r.latest_return else "",
+                total_price,
+                r.passengers,
+            )
+            if cheapest_hint:
+                lines.append(cheapest_hint)
+
             # Nearby alternatives from DB (no new API calls)
             if hasattr(self._db, "get_nearby_snapshots"):
                 nearby_snaps = await loop.run_in_executor(
@@ -1201,8 +1239,29 @@ class TripBot:
             "`/trip Tokyo, Oct 18 - Nov 8, 2 people` — add a route\n"
             "`/trips` — list your routes with prices\n"
             "`/remove Tokyo` — stop monitoring a route\n"
+            "`/savings` — see how much I've found in nearby airport savings\n"
             "`/yes` `/no` — confirm or cancel (also works as fallback)"
         ), parse_mode="Markdown")
+
+    async def _handle_savings(self, chat_id: str, user_id: str, client: httpx.AsyncClient) -> None:
+        from src.utils.airports import route_name as _route_name, airport_name as _airport_name
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(None, self._db.get_total_savings, user_id)
+        if data["route_count"] == 0:
+            await self._send(client, chat_id,
+                "No savings tracked yet. Keep monitoring — I'll find deals!")
+            return
+        lines = [
+            f"📊 FareHound has found *€{data['total']:,.0f}* in potential savings across {data['route_count']} route(s)\n",
+        ]
+        routes = await loop.run_in_executor(None, self._db.get_active_routes, user_id)
+        route_map = {r.route_id: r for r in routes}
+        for detail in sorted(data["details"], key=lambda d: d["savings"], reverse=True):
+            r = route_map.get(detail["route_id"])
+            name = _route_name(r.origin, r.destination) if r else detail["route_id"]
+            alt_name = _airport_name(detail["airport_code"])
+            lines.append(f"• *{name}*: save €{detail['savings']:,.0f} via {alt_name}")
+        await self._send(client, chat_id, "\n".join(lines), parse_mode="Markdown")
 
     async def _handle_trip(
         self, user_text: str, chat_id: str, user_id: str, home_airport: str, client: httpx.AsyncClient
