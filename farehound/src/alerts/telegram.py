@@ -9,6 +9,58 @@ from src.utils.airports import route_name
 
 logger = logging.getLogger(__name__)
 
+
+def find_cheapest_date(
+    price_history: list | None,
+    earliest_dep: str,
+    latest_ret: str,
+    current_price: float,
+    passengers: int,
+) -> str | None:
+    if not price_history:
+        return None
+    try:
+        from datetime import date as date_type
+        earliest = date_type.fromisoformat(earliest_dep) if earliest_dep else None
+        latest = date_type.fromisoformat(latest_ret) if latest_ret else None
+    except (ValueError, TypeError):
+        return None
+    if not earliest or not latest:
+        return None
+
+    cheapest_date = None
+    cheapest_price = None
+    for entry in price_history:
+        try:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                d_str, price = entry[0], entry[1]
+            elif isinstance(entry, dict):
+                d_str = entry.get("date", "")
+                price = entry.get("price")
+            else:
+                continue
+            if price is None:
+                continue
+            price = float(price)
+            d = date_type.fromisoformat(str(d_str)[:10])
+            if d < earliest or d > latest:
+                continue
+            if cheapest_price is None or price < cheapest_price:
+                cheapest_price = price
+                cheapest_date = d
+        except (ValueError, TypeError, IndexError):
+            continue
+
+    if cheapest_date is None or cheapest_price is None:
+        return None
+
+    current_pp = current_price / passengers if passengers > 1 else current_price
+    cheapest_pp = cheapest_price / passengers if passengers > 1 else cheapest_price
+    saving_pp = current_pp - cheapest_pp
+    if saving_pp > 20:
+        return f"💡 {cheapest_date.strftime('%b %d')} is €{saving_pp:,.0f}/pp cheaper for this route"
+    return None
+
 TELEGRAM_API = "https://api.telegram.org"
 
 
@@ -163,6 +215,16 @@ class TelegramNotifier:
             if typical_low is not None and typical_high is not None:
                 context += f" (€{float(typical_low):,.0f}–€{float(typical_high):,.0f})"
             lines.append(context)
+
+        cheapest_hint = find_cheapest_date(
+            deal_info.get("price_history"),
+            deal_info.get("earliest_departure", ""),
+            deal_info.get("latest_return", ""),
+            float(price),
+            passengers,
+        )
+        if cheapest_hint:
+            lines.append(cheapest_hint)
 
         if reasoning:
             lines.append(f"_{reasoning}_")
@@ -339,6 +401,15 @@ class TelegramNotifier:
                     if abs(diff) >= 1:
                         direction = "📉" if diff < 0 else "📈"
                         lines.append(f"{direction} {'Dropped' if diff < 0 else 'Rose'} €{abs(diff):,.0f} since alert")
+                cheapest_hint = find_cheapest_date(
+                    route_data.get("price_history"),
+                    route_data.get("earliest_departure", ""),
+                    route_data.get("latest_return", ""),
+                    float(lowest),
+                    passengers,
+                )
+                if cheapest_hint:
+                    lines.append(cheapest_hint)
             else:
                 lines.append("⏳ No price data yet")
 
@@ -394,10 +465,15 @@ class TelegramNotifier:
                 "outbound_date": route_data.get("outbound_date", ""),
                 "return_date": route_data.get("return_date", ""),
             })
-            reply_markup = {
-                "inline_keyboard": [[
-                    {"text": "Book Now ✈️", "url": search_url},
-                ]]
-            }
+            deal_ids = route_data.get("deal_ids", [])
+            route_id = route_data.get("route_id", "")
+            user_id = route_data.get("user_id", "")
+            keyboard = [[{"text": "Book Now ✈️", "url": search_url}]]
+            if deal_ids and route_id:
+                keyboard.append([
+                    {"text": "Booked ✅", "callback_data": f"digest_booked:{deal_ids[0]}"},
+                    {"text": "Not interested", "callback_data": f"digest_dismiss:{route_id}:{user_id}"},
+                ])
+            reply_markup = {"inline_keyboard": keyboard}
 
             await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)

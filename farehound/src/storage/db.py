@@ -120,6 +120,20 @@ CREATE TABLE IF NOT EXISTS airport_transport (
     parking_cost_eur  REAL,
     is_primary        INTEGER DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS savings_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    deal_id TEXT,
+    route_id TEXT NOT NULL,
+    primary_cost REAL NOT NULL,
+    alternative_cost REAL NOT NULL,
+    savings_amount REAL NOT NULL,
+    airport_code TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(route_id, airport_code, snapshot_date)
+);
 """
 
 # Tables that need a user_id column added via migration
@@ -531,14 +545,14 @@ class Database:
         )
         self._conn.commit()
 
-    def get_routes_with_pending_deals(self, user_id: str | None = None) -> dict[str, float | None]:
+    def get_routes_with_pending_deals(self, user_id: str | None = None) -> dict[str, dict]:
         """Return route_ids where deals exist with alert_sent=1 and feedback IS NULL.
 
-        Returns dict of route_id -> snapshot price at time of alert (for price change display).
+        Returns dict of route_id -> {"price": float|None, "deal_ids": list[str]}.
         """
         params: list = []
         sql = """
-            SELECT d.route_id, ps.lowest_price
+            SELECT d.route_id, ps.lowest_price, d.deal_id
             FROM deals d
             LEFT JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
             WHERE d.alert_sent = 1
@@ -549,12 +563,24 @@ class Database:
             sql += " AND d.user_id = ?"
         sql += " ORDER BY d.created_at DESC"
         cursor = self._conn.execute(sql, params)
-        result: dict[str, float | None] = {}
+        result: dict[str, dict] = {}
         for row in cursor.fetchall():
             route_id = row[0]
             if route_id not in result:
-                result[route_id] = float(row[1]) if row[1] is not None else None
+                result[route_id] = {
+                    "price": float(row[1]) if row[1] is not None else None,
+                    "deal_ids": [],
+                }
+            result[route_id]["deal_ids"].append(row[2])
         return result
+
+    def bulk_dismiss_route_deals(self, route_id: str, user_id: str) -> int:
+        cursor = self._conn.execute(
+            "UPDATE deals SET feedback = 'dismissed' WHERE route_id = ? AND user_id = ? AND feedback IS NULL",
+            [route_id, user_id],
+        )
+        self._conn.commit()
+        return cursor.rowcount
 
     def get_recent_feedback(self, limit: int = 20) -> list[dict]:
         cursor = self._conn.execute(
@@ -854,3 +880,53 @@ class Database:
             d["is_primary"] = False
             results.append(d)
         return results
+
+    # --- Savings ---
+
+    def log_saving(
+        self,
+        user_id: str,
+        route_id: str,
+        primary_cost: float,
+        alternative_cost: float,
+        savings_amount: float,
+        airport_code: str,
+        snapshot_date: str,
+        deal_id: str | None = None,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO savings_log (
+                user_id, deal_id, route_id, primary_cost,
+                alternative_cost, savings_amount, airport_code, snapshot_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [user_id, deal_id, route_id, primary_cost,
+             alternative_cost, savings_amount, airport_code, snapshot_date],
+        )
+        self._conn.commit()
+
+    def get_total_savings(self, user_id: str) -> dict:
+        cursor = self._conn.execute(
+            """
+            SELECT route_id, airport_code, MAX(savings_amount) AS best_saving
+            FROM savings_log
+            WHERE user_id = ?
+            GROUP BY route_id, airport_code
+            """,
+            [user_id],
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            return {"total": 0, "route_count": 0, "details": []}
+        route_best: dict[str, dict] = {}
+        for route_id, airport_code, best_saving in rows:
+            if route_id not in route_best or best_saving > route_best[route_id]["savings"]:
+                route_best[route_id] = {
+                    "route_id": route_id,
+                    "airport_code": airport_code,
+                    "savings": float(best_saving),
+                }
+        details = list(route_best.values())
+        total = sum(d["savings"] for d in details)
+        return {"total": total, "route_count": len(details), "details": details}

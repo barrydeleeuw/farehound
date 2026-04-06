@@ -806,6 +806,17 @@ class Orchestrator:
                         comparison[0]["savings"],
                         comparison[0]["airport_name"],
                     )
+                    today = datetime.now(UTC).strftime("%Y-%m-%d")
+                    for alt in comparison:
+                        try:
+                            await loop.run_in_executor(
+                                None, self.db.log_saving,
+                                user_id, route.route_id,
+                                alt["net_cost"] + alt["savings"], alt["net_cost"],
+                                alt["savings"], alt["airport_code"], today,
+                            )
+                        except Exception:
+                            logger.debug("Failed to log saving for %s", alt["airport_code"])
 
     async def _poll_secondary_airports_for_snapshot(
         self, route: DBRoute, snapshot: PriceSnapshot, user: dict
@@ -907,6 +918,18 @@ class Orchestrator:
             comparison = compare_airports(primary_result, secondary_results, route.passengers)
             if comparison:
                 self._latest_nearby_comparison[route.route_id] = comparison
+                user_id = user["user_id"]
+                today = datetime.now(UTC).strftime("%Y-%m-%d")
+                for alt in comparison:
+                    try:
+                        await loop.run_in_executor(
+                            None, self.db.log_saving,
+                            user_id, route.route_id,
+                            alt["net_cost"] + alt["savings"], alt["net_cost"],
+                            alt["savings"], alt["airport_code"], today,
+                        )
+                    except Exception:
+                        logger.debug("Failed to log saving for %s", alt["airport_code"])
             else:
                 self._latest_nearby_comparison.pop(route.route_id, None)
         else:
@@ -1118,6 +1141,9 @@ class Orchestrator:
             "price_level": snapshot.price_level,
             "typical_low": snapshot.typical_low,
             "typical_high": snapshot.typical_high,
+            "price_history": snapshot.price_history,
+            "earliest_departure": str(route.earliest_departure) if route.earliest_departure else "",
+            "latest_return": str(route.latest_return) if route.latest_return else "",
         }
 
         try:
@@ -1198,8 +1224,10 @@ class Orchestrator:
                 )
                 best = cheapest or latest
 
-                # Include alert price for price-change display
-                alert_price = pending_routes.get(route.route_id)
+                # Include alert price and deal_ids for digest buttons
+                pending_info = pending_routes.get(route.route_id, {})
+                alert_price = pending_info.get("price")
+                deal_ids = pending_info.get("deal_ids", [])
 
                 digest_best = (best.best_flight or {}) if best else {}
                 digest_legs = digest_best.get("flights", [])
@@ -1218,6 +1246,12 @@ class Orchestrator:
                     "airline": airline_name(digest_airline_code) if digest_airline_code else "",
                     "stops": max(0, len(digest_legs) - 1) if digest_legs else None,
                     "flight_duration_min": digest_best.get("total_duration"),
+                    "deal_ids": deal_ids,
+                    "route_id": route.route_id,
+                    "user_id": user_id,
+                    "price_history": best.price_history if best else None,
+                    "earliest_departure": str(route.earliest_departure) if route.earliest_departure else "",
+                    "latest_return": str(route.latest_return) if route.latest_return else "",
                 }
 
                 if watch_deals:
