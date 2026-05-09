@@ -407,6 +407,9 @@ class TripBot:
             elif cmd == "/unsnooze":
                 await self._handle_unsnooze(text[9:].strip(), chat_id, user_id, client)
                 return
+            elif cmd == "/status":
+                await self._handle_status(chat_id, user_id, client)
+                return
 
         # Guard: casual affirmatives after informational responses should NOT
         # trigger pending confirmations — re-interpret them instead.
@@ -1426,6 +1429,57 @@ class TripBot:
             if q in _rn(r.origin, r.destination).lower():
                 return r
         return None
+
+    async def _handle_status(
+        self, chat_id: str, user_id: str, client: httpx.AsyncClient
+    ) -> None:
+        """Show /status overview: monitoring count, last poll, alerts this week, savings, digest skip count."""
+        from src.apis.serpapi import MONTHLY_BUDGET_HARD_CAP
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, self._db.get_status_stats, user_id)
+        # Format last poll relative time
+        last_poll_str = "never"
+        if stats["last_poll"]:
+            try:
+                from datetime import datetime as _dt, timezone
+                lp = _dt.fromisoformat(str(stats["last_poll"]).replace(" ", "T"))
+                if lp.tzinfo is None:
+                    lp = lp.replace(tzinfo=timezone.utc)
+                delta = datetime.now(UTC) - lp
+                hours = int(delta.total_seconds() / 3600)
+                last_poll_str = "less than 1h ago" if hours < 1 else f"{hours}h ago"
+            except Exception:
+                last_poll_str = str(stats["last_poll"])
+        # Feedback breakdown
+        fb = stats["feedback_breakdown"]
+        booked = fb.get("booked", 0)
+        watching = fb.get("watching", 0) + fb.get("waiting", 0)
+        dismissed = fb.get("dismissed", 0)
+        no_response = fb.get("no_response", 0)
+        fb_parts = []
+        if booked: fb_parts.append(f"{booked} booked")
+        if watching: fb_parts.append(f"{watching} watching")
+        if dismissed: fb_parts.append(f"{dismissed} dismissed")
+        if no_response: fb_parts.append(f"{no_response} no-response")
+        fb_text = f" ({', '.join(fb_parts)})" if fb_parts else ""
+
+        lines = [
+            "📊 *FareHound Status*",
+            f"• Monitoring: *{stats['monitoring']}* route{'s' if stats['monitoring'] != 1 else ''}"
+            + (f" ({stats['snoozed']} snoozed)" if stats['snoozed'] else ""),
+            f"• Last poll: {last_poll_str}",
+            f"• Alerts this week: *{stats['alerts_this_week']}*{fb_text}",
+            f"• SerpAPI usage: {stats['snapshots_30d']}/{MONTHLY_BUDGET_HARD_CAP} (last 30d)",
+        ]
+        if stats["savings_total"] > 0:
+            lines.append(
+                f"• Saved you *€{stats['savings_total']:,.0f}* across {stats['savings_route_count']} trip{'s' if stats['savings_route_count'] != 1 else ''} (/savings)"
+            )
+        if stats["digest_skip_count"] > 0:
+            lines.append(
+                f"• Digest skipped {stats['digest_skip_count']} of last 7 days (no significant price moves)"
+            )
+        await self._send(client, chat_id, "\n".join(lines), parse_mode="Markdown")
 
     async def _handle_snooze(
         self, args: str, chat_id: str, user_id: str, client: httpx.AsyncClient

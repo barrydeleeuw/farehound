@@ -183,3 +183,26 @@
   - `send_daily_digest`: per-route 3-button row + Details, transparency footer, date transparency.
 - Updated 3 existing v0.7/v0.8/v2.1 release tests to assert the new R7 keyboard shape (test_send_deal_alert_buttons, test_send_error_fare_alert_buttons, test_send_follow_up, test_digest_route_has_book_and_action_buttons, test_digest_route_without_deals_has_no_action_buttons, test_send_follow_up_format).
 - Tests: full suite 382/382 passing; Tester's T14 (per-message-type assertions) unblocked.
+
+## T8 watching_skip_buttons
+- Keyboard rendering already landed in T7 via `_build_deal_keyboard`; handlers already landed in T13 via `_handle_new_callback`.
+  - Deal alert + Daily digest both render `[Book Now] [Watching 👀] [Skip route 🔕]` on row 1, `[📊 Details]` on row 2.
+  - `route:snooze:7:{route_id}` callback snoozes the route AND bulk-dismisses pending deals on that route (Condition C9-style symmetry).
+- No additional code needed for T8 acceptance — completed by T7 + T13.
+- Tests: full suite 382/382 passing.
+
+## T11 status_command
+- New `db.get_status_stats(user_id)` aggregates monitoring count + snoozed, last poll, alerts this week with feedback breakdown, snapshots in last 30d (SerpAPI usage proxy), savings, digest skip count.
+- New `TripBot._handle_status` handler renders the §1.4.3 format. Sample output:
+  ```
+  📊 FareHound Status
+  • Monitoring: 1 route (1 snoozed)
+  • Last poll: 6h ago
+  • Alerts this week: 3 (2 booked, 1 no-response)
+  • SerpAPI usage: 184/950 (last 30d)
+  • Saved you €450 across 2 trips (/savings)
+  • Digest skipped 3 of last 7 days (no significant price moves)
+  ```
+- `/status` slash command wired into the message dispatcher.
+- Smoke-tested: 2 active routes, 1 snoozed → stats correctly show 1 monitoring + 1 snoozed.
+- Tests: full suite 382/382 passing.

@@ -366,6 +366,61 @@ class Database:
         )
         self._conn.commit()
 
+    def get_status_stats(self, user_id: str) -> dict:
+        """Aggregate stats for /status — counts and timestamps for the user-facing dashboard."""
+        now = datetime.now(UTC)
+        now_iso = _to_isoformat(now)
+        # Total + snoozed routes (active=1, regardless of snooze).
+        total_active = self._conn.execute(
+            "SELECT COUNT(*) FROM routes WHERE active = 1 AND user_id = ?", [user_id],
+        ).fetchone()[0]
+        snoozed = self._conn.execute(
+            "SELECT COUNT(*) FROM routes WHERE active = 1 AND user_id = ? "
+            "AND snoozed_until IS NOT NULL AND snoozed_until > ?",
+            [user_id, now_iso],
+        ).fetchone()[0]
+        # Last poll = max observed_at across this user's snapshots.
+        last_poll_row = self._conn.execute(
+            "SELECT MAX(observed_at) FROM price_snapshots WHERE user_id = ?", [user_id],
+        ).fetchone()
+        last_poll = last_poll_row[0] if last_poll_row else None
+        # Alerts this week with feedback breakdown.
+        week_ago = _to_isoformat(now - timedelta(days=7))
+        alert_rows = self._conn.execute(
+            "SELECT feedback, COUNT(*) FROM deals WHERE user_id = ? AND alert_sent = 1 "
+            "AND alert_sent_at IS NOT NULL AND alert_sent_at >= ? GROUP BY feedback",
+            [user_id, week_ago],
+        ).fetchall()
+        feedback_breakdown: dict[str, int] = {}
+        total_alerts_week = 0
+        for fb, cnt in alert_rows:
+            label = fb or "no_response"
+            feedback_breakdown[label] = cnt
+            total_alerts_week += cnt
+        # SerpAPI calls this month — proxy by counting unique snapshots in last 30 days
+        # across this user. Approximate; the precise counter lives in-memory on SerpAPIClient.
+        thirty_days_ago = _to_isoformat(now - timedelta(days=30))
+        snapshots_30d = self._conn.execute(
+            "SELECT COUNT(*) FROM price_snapshots WHERE user_id = ? AND observed_at >= ?",
+            [user_id, thirty_days_ago],
+        ).fetchone()[0]
+        # Digest skip count + total savings come from existing helpers.
+        user = self.get_user(user_id)
+        digest_skip_count = (user or {}).get("digest_skip_count_7d") or 0
+        savings = self.get_total_savings(user_id)
+        return {
+            "total_active": total_active,
+            "snoozed": snoozed,
+            "monitoring": total_active - snoozed,
+            "last_poll": last_poll,
+            "alerts_this_week": total_alerts_week,
+            "feedback_breakdown": feedback_breakdown,
+            "snapshots_30d": snapshots_30d,
+            "digest_skip_count": digest_skip_count,
+            "savings_total": savings.get("total", 0),
+            "savings_route_count": savings.get("route_count", 0),
+        }
+
     def upsert_route(self, route: Route, user_id: str | None = None) -> None:
         uid = user_id or route.user_id
         self._conn.execute(

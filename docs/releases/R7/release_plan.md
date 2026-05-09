@@ -507,7 +507,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Add "📊 Details" button as second keyboard row, URL = `_google_flights_url(deal_info)` (Condition C10 — placeholder only).
   - Keyboard row 1 modifications (3-button row) come in T8.
 
-#### `[ ]` T8 — watching_skip_buttons
+#### `[x]` T8 — watching_skip_buttons
 - **Owner:** builder
 - **Depends on:** T7, T13
 - **Blocks:** T19
@@ -550,7 +550,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - On send: build delta lines from `db.get_recent_snapshots(route_id, limit=2)`; render `"Daily — N routes, M prices moved"` header per §11.4.
   - Reset `digest_skip_count_7d` to 0 when last_digest_sent_at is older than 7 days (rolling window approximation — sufficient for `/status` display).
 
-#### `[ ]` T11 — status_command
+#### `[x]` T11 — status_command
 - **Owner:** builder
 - **Depends on:** T9, T10
 - **Blocks:** —
