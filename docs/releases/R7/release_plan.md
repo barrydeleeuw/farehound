@@ -520,111 +520,136 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Digest per-route keyboard mirrors row 1 plus row 2 with Details.
   - The `route:snooze:7:*` handler MUST: (a) call `db.snooze_route(route_id, 7)`, (b) call `db.bulk_dismiss_route_deals(route_id, user_id)` so pending deals on that route disappear from the next digest.
 
-#### **T9 — snooze_infra**
+#### `[ ]` T9 — snooze_infra
 - **Owner:** builder
-- **Files:** `src/storage/db.py` (helpers + extend `get_active_routes`/`get_routes_with_pending_deals`), `src/orchestrator.py` (no-op if helpers do the filtering), `src/bot/commands.py` (`/snooze`, `/unsnooze`, auto-snooze hook)
 - **Depends on:** T1, T2
-- **Blocks:** T11
-- **Acceptance:**
-  - `db.snooze_route(route_id, days)` and `db.unsnooze_route(route_id)` exist.
-  - `db.get_active_routes(user_id)` filters snoozed routes (with optional `include_snoozed=True`).
-  - `db.get_routes_with_pending_deals(user_id)` filters snoozed.
-  - `/snooze {route_substring} [days]` and `/unsnooze {route_substring}` commands work; auto-snooze fires 30d on `feedback='booked'` from BOTH new and legacy callback paths (Condition C9).
-- **Status:** _pending_
+- **Blocks:** T11, T17
+- **Files:**
+  - `src/storage/db.py:305` (extend `get_active_routes`), `:548` (extend `get_routes_with_pending_deals`), append `snooze_route` / `unsnooze_route` helpers
+  - `src/orchestrator.py:392` and `:1170` (callers — should be no-op once db helpers filter)
+  - `src/bot/commands.py:377` (slash dispatch — add `/snooze`, `/unsnooze`), `:793–814` (extend `book` / `booked` / `digest_booked` callback paths to call auto-snooze helper)
+- **Acceptance (one-line):** Snooze respected in poll loop and digest; `/snooze` / `/unsnooze` slash commands work; auto-snooze 30d fires on `feedback='booked'` from BOTH new and legacy callback paths (Condition C9).
+- **Detail:**
+  - `db.snooze_route(route_id, days)` and `db.unsnooze_route(route_id)` (§10.2).
+  - Extend `get_active_routes(user_id, include_snoozed=False)`: SQL filter `WHERE snoozed_until IS NULL OR snoozed_until <= datetime('now')` unless flag set.
+  - Extend `get_routes_with_pending_deals` SQL to JOIN routes and apply same filter.
+  - Wire auto-snooze: introduce `_apply_booked_feedback(deal_id)` helper in `commands.py` that does `update_deal_feedback + UPDATE deals SET booked=1 + db.snooze_route(route_id, 30)`. Every callback path that marks `feedback='booked'` calls this helper.
+  - `/snooze {route_id_or_destination_substring} [days=7]` resolves via case-insensitive match against `origin/destination/route_id`; reply includes sibling-route note (§1.4 OQ#2).
 
-#### **T10 — digest_fingerprint_gating**
+#### `[ ]` T10 — digest_fingerprint_gating
 - **Owner:** builder
-- **Files:** `src/storage/db.py` (helpers for fingerprint read/write + `last_digest_sent_at`), `src/orchestrator.py` (`send_daily_digest`)
 - **Depends on:** T1
-- **Blocks:** T11
-- **Acceptance:**
-  - Skip predicate (§11.2) implemented; logs `"Digest skipped for user {} — fingerprint unchanged"`.
-  - When NOT skipping: header replaced with concrete `"FareHound Daily — N routes, M prices moved"` + per-route delta lines (§11.4).
-  - `users.last_digest_fingerprint`, `last_digest_sent_at`, `digest_skip_count_7d` updated on send.
-- **Status:** _pending_
+- **Blocks:** T11, T17
+- **Files:**
+  - `src/storage/db.py` (append helpers `get_user_digest_state`, `update_user_digest_state`)
+  - `src/orchestrator.py:1155` (`send_daily_digest` — predicate + concrete header)
+- **Acceptance (one-line):** Skip predicate (§11.2) implemented; concrete "what moved" header rendered when sending (§11.4); fingerprint + last_digest_sent_at + skip count updated.
+- **Detail:**
+  - Compute fingerprint per §11.1.
+  - All four conditions in §11.2 must hold to skip. On skip: log INFO, increment `digest_skip_count_7d`, do NOT update `last_digest_sent_at`.
+  - On send: build delta lines from `db.get_recent_snapshots(route_id, limit=2)`; render `"Daily — N routes, M prices moved"` header per §11.4.
+  - Reset `digest_skip_count_7d` to 0 when last_digest_sent_at is older than 7 days (rolling window approximation — sufficient for `/status` display).
 
-#### **T11 — status_command**
+#### `[ ]` T11 — status_command
 - **Owner:** builder
-- **Files:** `src/bot/commands.py` (new `_handle_status` + dispatcher entry)
 - **Depends on:** T9, T10
-- **Blocks:** none
-- **Acceptance:** `/status` produces a message containing: monitoring count + snoozed count, last poll time, alerts this week with feedback breakdown, SerpAPI usage `{N}/{HARD_CAP}`, savings line `"Saved you €{X} across {N} trips (/savings)"`, and digest skip count `"Digest skipped {N} of last 7 days"`.
-- **Status:** _pending_
+- **Blocks:** —
+- **Files:** `src/bot/commands.py:401` (extend slash dispatch — add `/status` branch); append `_handle_status` near `_handle_savings:1246`
+- **Acceptance (one-line):** `/status` produces the formatted block from §1's spec — snoozed count, last poll, alert breakdown, SerpAPI usage, savings link, digest skip telemetry.
+- **Detail:**
+  - Pull data: `db.get_active_routes(include_snoozed=True)` then count snoozed; last poll time from most recent snapshot; alerts-this-week from `db.get_deals_since(since=now-7d)` grouped by feedback; SerpAPI usage from `orchestrator.serpapi._calls_this_month` (need to expose via TripBot — pass at construction OR query DB count of snapshots in current month as proxy if injection is too invasive); savings via `db.get_total_savings(user_id)`; digest skip via `users.digest_skip_count_7d`.
+  - If injecting the SerpAPI counter is too invasive, use snapshot-count-this-month as a documented proxy and add a TODO comment referencing Architect-Lead.
 
-#### **T12 — scorer_json_contract**
+#### `[ ]` T12 — scorer_json_contract
 - **Owner:** builder
-- **Files:** `src/analysis/scorer.py`
 - **Depends on:** T1, T2
-- **Blocks:** T7
-- **Acceptance:** `_SCORE_PROMPT` rewritten to require structured `reasoning` object (§6.1). `DealScore.reasoning` is now `dict[str, str]` (3 fields). `_parse_response` validates all 3 sub-fields; falls back to synthetic 3-field object on malformed (§6.5). Orchestrator stores `reasoning_json` AND a flattened bullet-string in `reasoning` (Condition C7).
-- **Status:** _pending_
+- **Blocks:** T7, T18
+- **Files:**
+  - `src/analysis/scorer.py:14–47` (rewrite `_SYSTEM_PROMPT`), `:49–86` (rewrite `_SCORE_PROMPT`'s response section), `:96` (`DealScore` dataclass), `:332` (`_parse_response`)
+  - `src/orchestrator.py:1002` (Deal construction — also write `reasoning_json`), `:1577` (`_static_fallback`)
+- **Acceptance (one-line):** Scorer returns structured 3-field `reasoning` object per §6.1; `DealScore.reasoning` is `dict[str, str]`; falls back to synthetic 3-field on malformed (§6.5); orchestrator persists both `reasoning_json` and a flattened bullet-string in `reasoning` (Condition C7).
+- **Detail:**
+  - Update prompt to instruct Claude to return JSON shape from §6.1 with all 3 reasoning sub-fields.
+  - `DealScore.reasoning: dict[str, str]` (was `str`).
+  - `_parse_response` validates all 3 keys present; on missing/malformed, return synthetic 3-field per §6.5.
+  - Where orchestrator constructs `Deal(...)`: `Deal.reasoning_json = score_result.reasoning` (the dict), `Deal.reasoning = "\n".join(f"✓ {v}" for v in score_result.reasoning.values())` (flattened).
+  - Update `_static_fallback` to also produce synthetic 3-field reasoning.
 
-#### **T13 — callback_prefix_consolidation**
+#### `[x]` T13 — callback_prefix_consolidation
 - **Owner:** builder
-- **Files:** `src/bot/commands.py` (`_handle_callback`)
-- **Depends on:** none (independent)
-- **Blocks:** T8 (consumer)
-- **Acceptance:**
-  - `data.split(":", 2)` plus `_LEGACY_ALIAS` map per §7.2.
-  - All new prefixes work: `deal:book`, `deal:watch`, `deal:dismiss`, `route:snooze:{days}:{id}`, `route:unsnooze:{id}`, `route:dismiss:{id}:{user_id}`.
-  - All legacy prefixes still work (Condition C2): `book:`, `wait:`, `dismiss:`, `watching:`, `booked:`, `digest_booked:`, `digest_dismiss:`.
-- **Status:** _pending_
+- **Depends on:** —
+- **Blocks:** T8
+- **Files:** `src/bot/commands.py:674` (`_handle_callback`), `:679` (the split)
+- **Acceptance (one-line):** `data.split(":", 2)` + `_LEGACY_ALIAS` map; all new prefixes (§7.1) work; all legacy prefixes still work as aliases (Condition C2).
+- **Detail:**
+  - Add `_LEGACY_ALIAS` dict at module level per §7.2.
+  - Refactor dispatcher to split on `":"` with maxsplit=2, then dispatch via `(domain, action)` tuple. Legacy single-segment prefixes route through the alias map.
+  - For `route:snooze:{days}:{route_id}` (4 segments), use a sub-split inside the `route:` branch: `payload.split(":", 1)` → `(days, route_id)`.
+  - Confirm callback flows for: `confirm_route`, `confirm_modify`, `confirm_remove`, `edit_route`, `cancel_*`, `approve_user`, `reject_user`, `confirm_airports`, `change_airports` — all of these are non-deal/non-route prefixes and pass through unchanged.
 
 ### Tester tasks
 
-#### **T14 — tests_telegram (each of 4 message types)**
+#### `[ ]` T14 — tests_telegram (4 message types)
 - **Owner:** tester
+- **Depends on (Builder):** T7
+- **Blocks:** —
 - **Files:** `tests/test_telegram.py`
-- **Picks up after:** T7
-- **Acceptance:** for each of `send_deal_alert`, `send_error_fare_alert`, `send_follow_up`, `send_daily_digest`:
-  - Assert cost breakdown line present.
-  - Assert baggage line included when `baggage_estimate.total > 0`; absent when total = 0 OR `source == 'unknown'`.
-  - Assert "we checked" footer in all 3 cases (all-saved / none-saved / mixed).
-  - Assert 3-button row (Book / Watching / Skip route) present on deal alert AND daily digest.
-  - Assert "📊 Details" button present.
-  - Assert reasoning rendered as 3 bullet lines from `reasoning_json`, with fallback to single-line `reasoning` string.
+- **Acceptance (one-line):** For each of `send_deal_alert`, `send_error_fare_alert`, `send_follow_up`, `send_daily_digest`: cost breakdown present, baggage line correctly suppressed-when-zero, transparency footer in all 3 cases, 3-button row + Details button on deal+digest, reasoning rendered as 3 bullets.
+- **Detail:**
+  - Build a parametrized fixture matrix: (msg_type) × (baggage zero / nonzero / unknown) × (competitive empty / non-empty / mixed).
+  - Use `respx` or stdlib `unittest.mock.AsyncMock` to capture the JSON payload sent to `_send_message`.
+  - Assert the Markdown body contains the expected substrings; assert keyboard structure is exactly the documented row layout.
+  - For follow-up: cost breakdown is the new addition — verify it's there.
 
-#### **T15 — tests_serpapi_baggage**
+#### `[ ]` T15 — tests_serpapi_baggage *(highest-risk test — Finding #1)*
 - **Owner:** tester
+- **Depends on (Builder):** T3
+- **Blocks:** —
 - **Files:** `tests/test_serpapi_baggage.py` (NEW)
-- **Picks up after:** T3
-- **Acceptance:**
-  - **Synthetic fixtures** for: (a) booking_options with baggage strings, (b) flight-leg extensions with baggage strings, (c) zero data.
-  - Assert parser extracts baggage from (a) and (b), and falls back from (c).
-  - Assert fallback table behaviour for KL (long-haul free), FR (LCC fees), HV (LCC fees), unknown airline (`_DEFAULT`).
-  - Assert preference matrix: `carry_on_only` × KL = €0; `one_checked` × FR short-haul = €40 each direction.
-  - The 25 cached SerpAPI responses (which lack baggage data) are used as integration smoke — assert they go through the parser without throwing.
-- **Notes:** This is the **highest-risk test** in R7 — Finding #1.
+- **Acceptance (one-line):** Parser extracts baggage from synthetic fixtures (booking_options + flight-leg extensions), falls back to airline table when no data, applies user preference correctly, and tolerates the 25 cached responses without raising.
+- **Detail:**
+  - **Synthetic fixtures** (Tester writes inline as Python dicts; do NOT add to `data/serpapi_cache/` — that directory is for live captures):
+    - (a) `booking_options[].together.extensions` containing strings like `"Carry-on bag €25"`, `"Checked bag €40"`.
+    - (b) `best_flights[].flights[].extensions` containing same baggage strings.
+    - (c) Empty / no-baggage extensions → forces fallback path.
+  - Assert parser returns `source="serpapi"` for (a) and (b), `source="fallback_table"` for (c) with known airline, `source="unknown"` for (c) with airline not in table AND no SerpAPI data.
+  - Fallback table: KL × `one_checked` × long-haul = €0; FR × `one_checked` × short-haul = €(carry_on + checked_short_haul) per direction; HV × `carry_on_only` = €(carry_on) per direction; unknown airline → `_DEFAULT`.
+  - Smoke: load all 25 cached responses from `data/serpapi_cache/` and assert parser doesn't raise on any of them; document that all 25 produce `source="unknown"` per Finding #1.
 
-#### **T16 — tests_db_migrations** [x] DONE
+#### `[x]` T16 — tests_db_migrations
 - **Owner:** tester
+- **Depends on (Builder):** T1
+- **Blocks:** —
 - **Files:** `tests/test_db.py`
-- **Picks up after:** T1
-- **Acceptance:**
-  - Assert all 5 columns exist after `init_schema()`.
-  - Assert idempotency: second `init_schema()` call doesn't error.
-  - Round-trip test: `snooze_route` + `get_active_routes` excludes; `unsnooze_route` re-includes. *(Helper-based round-trip deferred to T17 — column-level round-trip via raw SQL covered here.)*
-  - Round-trip test: `users.last_digest_fingerprint`, `users.baggage_needs`, `price_snapshots.baggage_estimate`, `deals.reasoning_json`.
+- **Acceptance (one-line):** All 5 new columns present after `init_schema`; second call is a no-op; round-trip helpers (snooze, fingerprint, baggage_estimate, reasoning_json, baggage_needs) work.
+- **Detail:**
+  - Use a tmp-path SQLite DB.
+  - `init_schema()` × 2 — second call must not raise.
+  - For each new column: insert / read / update / read pattern.
+  - Helper-based snooze round-trip deferred to T17 (`get_active_routes` filtering); column-level round-trip via raw SQL is sufficient here.
 
-#### **T17 — tests_orchestrator (digest skip + snooze + auto-snooze)**
+#### `[ ]` T17 — tests_orchestrator (digest skip + snooze + auto-snooze)
 - **Owner:** tester
+- **Depends on (Builder):** T9, T10
+- **Blocks:** T19
 - **Files:** `tests/test_orchestrator.py`
-- **Picks up after:** T9, T10
-- **Acceptance:**
-  - Digest skip predicate test — fingerprint unchanged + <3d → skipped; fingerprint changed → sent; >3d since last digest → sent regardless.
-  - Snooze respected in `poll_routes` — snoozed route NOT polled.
-  - Snooze respected in `send_daily_digest` — snoozed route NOT in summaries.
-  - Auto-snooze on `booked` feedback fires for both new (`deal:book:*`) AND legacy (`book:*`, `booked:*`, `digest_booked:*`) callback paths.
+- **Acceptance (one-line):** Digest skip predicate fires when fingerprint unchanged + <3d; snooze respected in `poll_routes` AND `send_daily_digest`; auto-snooze 30d fires on `feedback='booked'` from new AND legacy callback paths.
+- **Detail:**
+  - Skip predicate matrix: (fingerprint same/different) × (days_since_last <3 / >=3) × (new_deals 0 / >0). Verify all 8 cells produce documented behaviour.
+  - Snooze in `poll_routes`: pre-populate a snoozed route, call `poll_routes`, assert that route was NOT in `search_requests`.
+  - Snooze in `send_daily_digest`: pre-populate a snoozed route with pending deals, call `send_daily_digest`, assert no message sent for that route.
+  - Auto-snooze: invoke each callback path (`deal:book`, `book:`, `booked:`, `digest_booked:`) and assert `routes.snoozed_until` ≈ now+30d.
 
-#### **T18 — tests_scorer (structured reasoning)**
+#### `[ ]` T18 — tests_scorer (structured reasoning)
 - **Owner:** tester
+- **Depends on (Builder):** T12
+- **Blocks:** T19
 - **Files:** `tests/test_scorer.py`
-- **Picks up after:** T12
-- **Acceptance:**
-  - Mock Claude returns valid 3-field `reasoning` object → asserted on returned `DealScore`.
-  - Mock Claude returns malformed JSON → fallback to synthetic 3-field object (per §6.5).
-  - Mock Claude returns missing `vs_nearby` → fallback fires.
-  - Renderer test (in test_telegram covered by T14, but unit-level here) — flattening to bullet-string for `deals.reasoning` legacy column produces 3 lines.
+- **Acceptance (one-line):** Valid 3-field response parsed correctly; malformed JSON → fallback synthetic 3-field; missing field → fallback fires; bullet-string flattening produces 3 lines.
+- **Detail:**
+  - Mock `_client.messages.create` to return a fixed text body.
+  - Cases: (a) valid full 3-field — assert `DealScore.reasoning` is dict with 3 keys; (b) malformed JSON — assert synthetic fallback object; (c) missing `vs_nearby` — assert synthetic fallback fires; (d) `urgency` outside enum — assert defaults safely.
+  - Helper test: given a 3-field `reasoning` dict, the flatten-to-bullet logic produces exactly 3 lines starting with `✓ `.
 
 #### **T19 — integration_test_end_to_end** (NON-NEGOTIABLE per /release Phase 4 step 6b)
 - **Owner:** tester

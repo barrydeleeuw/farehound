@@ -39,6 +39,20 @@
   - Digest summary (`orchestrator:1261`) populates `nearby_prices` (competitive) and `nearby_evaluated` similarly.
 - Tests: full suite 325/325 passing.
 
+## T13 callback_prefix_consolidation
+- `_handle_callback` (`src/bot/commands.py:687`) now first attempts `data.split(":", 2)` and dispatches `deal:*` / `route:*` via new `_handle_new_callback` helper. Falls back to legacy `split(":", 1)` for all other callbacks (`approve_user`, `confirm_airports`, `confirm_route`, `digest_booked`, `digest_dismiss`, etc.) — Condition C2.
+- New domain handlers:
+  - `deal:book:{deal_id}` → `feedback='booked'` + `booked=1` + auto-snooze 30d.
+  - `deal:watch:{deal_id}` → `feedback='watching'`.
+  - `deal:dismiss:{deal_id}` → `feedback='dismissed'`.
+  - `route:snooze:{days}:{route_id}` → calls `db.snooze_route` (T9 helper) AND bulk-dismisses pending deals on that route.
+  - `route:unsnooze:{route_id}` → calls `db.unsnooze_route`.
+  - `route:dismiss:{route_id}:{user_id}` → bulk-dismiss (mirrors legacy `digest_dismiss`).
+- Auto-snooze helper `_auto_snooze_route_for_deal(deal_id, days=30)` looks up `deal.route_id` and snoozes — used by new `deal:book` AND legacy `book:` / `booked:` / `digest_booked:` paths (Condition C9).
+- Defensive `getattr(self._db, 'snooze_route', None)` guards so this doesn't crash if T9 hasn't landed; T9 fills the helper.
+- Confirmed callback flows for non-deal/non-route prefixes pass through unchanged.
+- Tests: full suite 325/325 passing.
+
 
 ## Pre-staging
 - Created `tests/fixtures/serpapi_with_baggage/` with 3 synthetic fixtures matching SerpAPI response shape per release_plan.md §8:

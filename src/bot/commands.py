@@ -671,11 +671,147 @@ class TripBot:
         except Exception:
             logger.exception("Failed to answer callback query")
 
+    def _auto_snooze_route_for_deal(self, deal_id: str, days: int = 30) -> None:
+        """Auto-snooze the deal's route on `feedback='booked'` (Condition C9).
+
+        Looks up the deal's route_id and snoozes it. Silent on missing data — the
+        feedback path that called us already records the booking.
+        """
+        try:
+            row = self._db._conn.execute(
+                "SELECT route_id FROM deals WHERE deal_id = ?", [deal_id]
+            ).fetchone()
+            if not row:
+                return
+            route_id = row[0]
+            snooze = getattr(self._db, "snooze_route", None)
+            if snooze is None:
+                return
+            snooze(route_id, days)
+        except Exception:
+            logger.exception("Auto-snooze failed for deal %s", deal_id)
+
+    async def _handle_new_callback(
+        self,
+        domain: str,
+        action: str,
+        payload: str,
+        callback_id: str | None,
+        chat_id: str,
+        message_id: int | None,
+        message: dict,
+        client: httpx.AsyncClient,
+    ) -> bool:
+        """Dispatch new R7 callback prefixes (`deal:*`, `route:*`).
+
+        Returns True if handled (caller returns), False if unrecognised.
+        """
+        loop = asyncio.get_running_loop()
+        if domain == "deal":
+            deal_id = payload
+            if action == "book":
+                await loop.run_in_executor(None, self._db.update_deal_feedback, deal_id, "booked")
+                try:
+                    self._db._conn.execute(
+                        "UPDATE deals SET booked = 1 WHERE deal_id = ?", [deal_id]
+                    )
+                    self._db._conn.commit()
+                except Exception:
+                    logger.exception("Failed to mark deal %s booked", deal_id)
+                await loop.run_in_executor(None, self._auto_snooze_route_for_deal, deal_id, 30)
+                await self._answer_callback(client, callback_id, "Marked as booked!")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Marked as booked!")
+                return True
+            if action == "watch":
+                await loop.run_in_executor(None, self._db.update_deal_feedback, deal_id, "watching")
+                await self._answer_callback(client, callback_id, "Still watching")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "👀 Still watching this route")
+                return True
+            if action == "dismiss":
+                await loop.run_in_executor(None, self._db.update_deal_feedback, deal_id, "dismissed")
+                await self._answer_callback(client, callback_id, "Dismissed")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "👎 Dismissed")
+                return True
+            return False
+        if domain == "route":
+            if action == "snooze":
+                # payload = "{days}:{route_id}"
+                sub = payload.split(":", 1)
+                if len(sub) != 2:
+                    return False
+                try:
+                    days = int(sub[0])
+                except ValueError:
+                    return False
+                route_id = sub[1]
+                snooze = getattr(self._db, "snooze_route", None)
+                if snooze is not None:
+                    await loop.run_in_executor(None, snooze, route_id, days)
+                # Bulk-dismiss any pending deals for this route+user too (T8 behaviour
+                # spec: "Skip route" suppresses pending alerts in addition to snoozing).
+                user = self._get_user(chat_id) if chat_id else None
+                if user and hasattr(self._db, "bulk_dismiss_route_deals"):
+                    try:
+                        await loop.run_in_executor(
+                            None, self._db.bulk_dismiss_route_deals, route_id, user["user_id"],
+                        )
+                    except Exception:
+                        logger.debug("Bulk dismiss failed for route %s", route_id)
+                await self._answer_callback(client, callback_id, f"Snoozed {days}d")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, f"🔕 Snoozed {days}d")
+                return True
+            if action == "unsnooze":
+                route_id = payload
+                unsnooze = getattr(self._db, "unsnooze_route", None)
+                if unsnooze is not None:
+                    await loop.run_in_executor(None, unsnooze, route_id)
+                await self._answer_callback(client, callback_id, "Unsnoozed")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "🔔 Resumed")
+                return True
+            if action == "dismiss":
+                # payload = "{route_id}:{user_id}"
+                sub = payload.split(":", 1)
+                if len(sub) != 2:
+                    return False
+                route_id, target_user_id = sub
+                if hasattr(self._db, "bulk_dismiss_route_deals"):
+                    await loop.run_in_executor(
+                        None, self._db.bulk_dismiss_route_deals, route_id, target_user_id,
+                    )
+                await self._answer_callback(client, callback_id, "Dismissed")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "👋 Dismissed")
+                return True
+            return False
+        return False
+
     async def _handle_callback(self, callback: dict, client: httpx.AsyncClient) -> None:
         callback_id = callback.get("id")
         data = callback.get("data", "")
         message = callback.get("message", {})
 
+        # R7 callback dispatch (§7 of release plan):
+        #  • New format: `deal:{action}:{deal_id}` or `route:{action}:{payload...}`.
+        #  • Legacy aliases (single-segment prefix like `book:{deal_id}`) keep working
+        #    until 2026-06-08 so unread Telegram messages from before R7 don't break.
+        parts = data.split(":", 2)
+        if len(parts) == 3 and parts[0] in ("deal", "route"):
+            domain, action, payload = parts
+            chat_id = str(message.get("chat", {}).get("id", ""))
+            message_id = message.get("message_id")
+            handled = await self._handle_new_callback(
+                domain, action, payload, callback_id, chat_id, message_id, message, client,
+            )
+            if handled:
+                return
+            # Fall through if unhandled — nothing else to do for new-domain misses.
+            return
+        # Legacy two-segment fallback used by every callback below.
         parts = data.split(":", 1)
         if len(parts) != 2:
             return
@@ -747,6 +883,8 @@ class TripBot:
                 "UPDATE deals SET booked = 1 WHERE deal_id = ?", [deal_id]
             )
             self._db._conn.commit()
+            # Condition C9: auto-snooze the route for 30d on legacy booked path.
+            await loop.run_in_executor(None, self._auto_snooze_route_for_deal, deal_id, 30)
             await self._answer_callback(client, callback_id, "Marked as booked!")
             if chat_id and message_id:
                 await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Marked as booked!")
@@ -794,6 +932,7 @@ class TripBot:
 
         if action == "book":
             self._db.update_deal_feedback(deal_id, "booked")
+            self._auto_snooze_route_for_deal(deal_id, 30)
             answer_text = "Marked as booked!"
             suffix = "\n\n✅ Marked as booked!"
         elif action == "dismiss":
@@ -806,6 +945,7 @@ class TripBot:
             suffix = "\n\n🕐 Noted — still watching this route"
         elif action == "booked":
             self._db.update_deal_feedback(deal_id, "booked")
+            self._auto_snooze_route_for_deal(deal_id, 30)
             answer_text = "Marked as booked!"
             suffix = "\n\n✅ Marked as booked!"
         elif action == "watching":
