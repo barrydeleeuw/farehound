@@ -401,6 +401,15 @@ class TripBot:
             elif cmd == "/savings":
                 await self._handle_savings(chat_id, user_id, client)
                 return
+            elif cmd == "/snooze":
+                await self._handle_snooze(text[7:].strip(), chat_id, user_id, client)
+                return
+            elif cmd == "/unsnooze":
+                await self._handle_unsnooze(text[9:].strip(), chat_id, user_id, client)
+                return
+            elif cmd == "/status":
+                await self._handle_status(chat_id, user_id, client)
+                return
 
         # Guard: casual affirmatives after informational responses should NOT
         # trigger pending confirmations — re-interpret them instead.
@@ -671,11 +680,137 @@ class TripBot:
         except Exception:
             logger.exception("Failed to answer callback query")
 
+    def _auto_snooze_route_for_deal(self, deal_id: str, days: int = 30) -> None:
+        """Auto-snooze the deal's route on `feedback='booked'` (Condition C9).
+
+        Looks up the deal's route_id and snoozes it. Silent on missing data — the
+        feedback path that called us already records the booking.
+        """
+        try:
+            row = self._db._conn.execute(
+                "SELECT route_id FROM deals WHERE deal_id = ?", [deal_id]
+            ).fetchone()
+            if not row:
+                return
+            route_id = row[0]
+            self._db.snooze_route(route_id, days)
+        except Exception:
+            logger.exception("Auto-snooze failed for deal %s", deal_id)
+
+    async def _handle_new_callback(
+        self,
+        domain: str,
+        action: str,
+        payload: str,
+        callback_id: str | None,
+        chat_id: str,
+        message_id: int | None,
+        message: dict,
+        client: httpx.AsyncClient,
+    ) -> bool:
+        """Dispatch new R7 callback prefixes (`deal:*`, `route:*`).
+
+        Returns True if handled (caller returns), False if unrecognised.
+        """
+        loop = asyncio.get_running_loop()
+        if domain == "deal":
+            deal_id = payload
+            if action == "book":
+                await loop.run_in_executor(None, self._db.update_deal_feedback, deal_id, "booked")
+                try:
+                    self._db._conn.execute(
+                        "UPDATE deals SET booked = 1 WHERE deal_id = ?", [deal_id]
+                    )
+                    self._db._conn.commit()
+                except Exception:
+                    logger.exception("Failed to mark deal %s booked", deal_id)
+                await loop.run_in_executor(None, self._auto_snooze_route_for_deal, deal_id, 30)
+                await self._answer_callback(client, callback_id, "Marked as booked!")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Marked as booked!")
+                return True
+            if action == "watch":
+                await loop.run_in_executor(None, self._db.update_deal_feedback, deal_id, "watching")
+                await self._answer_callback(client, callback_id, "Still watching")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "👀 Still watching this route")
+                return True
+            if action == "dismiss":
+                await loop.run_in_executor(None, self._db.update_deal_feedback, deal_id, "dismissed")
+                await self._answer_callback(client, callback_id, "Dismissed")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "👎 Dismissed")
+                return True
+            return False
+        if domain == "route":
+            if action == "snooze":
+                # payload = "{days}:{route_id}"
+                sub = payload.split(":", 1)
+                if len(sub) != 2:
+                    return False
+                try:
+                    days = max(1, min(int(sub[0]), 365))
+                except ValueError:
+                    return False
+                route_id = sub[1]
+                await loop.run_in_executor(None, self._db.snooze_route, route_id, days)
+                user = self._get_user(chat_id) if chat_id else None
+                if user:
+                    try:
+                        await loop.run_in_executor(
+                            None, self._db.bulk_dismiss_route_deals, route_id, user["user_id"],
+                        )
+                    except Exception:
+                        logger.debug("Bulk dismiss failed for route %s", route_id)
+                await self._answer_callback(client, callback_id, f"Snoozed {days}d")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, f"🔕 Snoozed {days}d")
+                return True
+            if action == "unsnooze":
+                route_id = payload
+                await loop.run_in_executor(None, self._db.unsnooze_route, route_id)
+                await self._answer_callback(client, callback_id, "Unsnoozed")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "🔔 Resumed")
+                return True
+            if action == "dismiss":
+                # payload = "{route_id}:{user_id}"
+                sub = payload.split(":", 1)
+                if len(sub) != 2:
+                    return False
+                route_id, target_user_id = sub
+                await loop.run_in_executor(
+                    None, self._db.bulk_dismiss_route_deals, route_id, target_user_id,
+                )
+                await self._answer_callback(client, callback_id, "Dismissed")
+                if chat_id and message_id:
+                    await self._edit_remove_buttons(client, chat_id, message_id, message, "👋 Dismissed")
+                return True
+            return False
+        return False
+
     async def _handle_callback(self, callback: dict, client: httpx.AsyncClient) -> None:
         callback_id = callback.get("id")
         data = callback.get("data", "")
         message = callback.get("message", {})
 
+        # R7 callback dispatch (§7 of release plan):
+        #  • New format: `deal:{action}:{deal_id}` or `route:{action}:{payload...}`.
+        #  • Legacy aliases (single-segment prefix like `book:{deal_id}`) keep working
+        #    until 2026-06-08 so unread Telegram messages from before R7 don't break.
+        parts = data.split(":", 2)
+        if len(parts) == 3 and parts[0] in ("deal", "route"):
+            domain, action, payload = parts
+            chat_id = str(message.get("chat", {}).get("id", ""))
+            message_id = message.get("message_id")
+            handled = await self._handle_new_callback(
+                domain, action, payload, callback_id, chat_id, message_id, message, client,
+            )
+            if handled:
+                return
+            # Fall through if unhandled — nothing else to do for new-domain misses.
+            return
+        # Legacy two-segment fallback used by every callback below.
         parts = data.split(":", 1)
         if len(parts) != 2:
             return
@@ -747,6 +882,8 @@ class TripBot:
                 "UPDATE deals SET booked = 1 WHERE deal_id = ?", [deal_id]
             )
             self._db._conn.commit()
+            # Condition C9: auto-snooze the route for 30d on legacy booked path.
+            await loop.run_in_executor(None, self._auto_snooze_route_for_deal, deal_id, 30)
             await self._answer_callback(client, callback_id, "Marked as booked!")
             if chat_id and message_id:
                 await self._edit_remove_buttons(client, chat_id, message_id, message, "✅ Marked as booked!")
@@ -794,6 +931,7 @@ class TripBot:
 
         if action == "book":
             self._db.update_deal_feedback(deal_id, "booked")
+            self._auto_snooze_route_for_deal(deal_id, 30)
             answer_text = "Marked as booked!"
             suffix = "\n\n✅ Marked as booked!"
         elif action == "dismiss":
@@ -806,6 +944,7 @@ class TripBot:
             suffix = "\n\n🕐 Noted — still watching this route"
         elif action == "booked":
             self._db.update_deal_feedback(deal_id, "booked")
+            self._auto_snooze_route_for_deal(deal_id, 30)
             answer_text = "Marked as booked!"
             suffix = "\n\n✅ Marked as booked!"
         elif action == "watching":
@@ -1262,6 +1401,122 @@ class TripBot:
             alt_name = _airport_name(detail["airport_code"])
             lines.append(f"• *{name}*: save €{detail['savings']:,.0f} via {alt_name}")
         await self._send(client, chat_id, "\n".join(lines), parse_mode="Markdown")
+
+    def _resolve_route_for_user(self, user_id: str, query: str) -> "Route | None":
+        """Look up a route for user by route_id, route_id prefix, or origin/destination substring."""
+        if not query:
+            return None
+        routes = self._db.get_active_routes(user_id, include_snoozed=True)
+        q = query.strip().lower()
+        for r in routes:
+            if r.route_id.lower() == q or r.route_id.lower().startswith(q):
+                return r
+        for r in routes:
+            if q in (r.origin or "").lower() or q in (r.destination or "").lower():
+                return r
+        from src.utils.airports import route_name as _rn
+        for r in routes:
+            if q in _rn(r.origin, r.destination).lower():
+                return r
+        return None
+
+    async def _handle_status(
+        self, chat_id: str, user_id: str, client: httpx.AsyncClient
+    ) -> None:
+        """Show /status overview: monitoring count, last poll, alerts this week, savings, digest skip count."""
+        from src.apis.serpapi import MONTHLY_BUDGET_HARD_CAP
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, self._db.get_status_stats, user_id)
+        # Format last poll relative time
+        last_poll_str = "never"
+        if stats["last_poll"]:
+            try:
+                from datetime import datetime as _dt, timezone
+                lp = _dt.fromisoformat(str(stats["last_poll"]).replace(" ", "T"))
+                if lp.tzinfo is None:
+                    lp = lp.replace(tzinfo=timezone.utc)
+                delta = datetime.now(UTC) - lp
+                hours = int(delta.total_seconds() / 3600)
+                last_poll_str = "less than 1h ago" if hours < 1 else f"{hours}h ago"
+            except Exception:
+                last_poll_str = str(stats["last_poll"])
+        # Feedback breakdown
+        fb = stats["feedback_breakdown"]
+        booked = fb.get("booked", 0)
+        watching = fb.get("watching", 0) + fb.get("waiting", 0)
+        dismissed = fb.get("dismissed", 0)
+        no_response = fb.get("no_response", 0)
+        fb_parts = []
+        if booked: fb_parts.append(f"{booked} booked")
+        if watching: fb_parts.append(f"{watching} watching")
+        if dismissed: fb_parts.append(f"{dismissed} dismissed")
+        if no_response: fb_parts.append(f"{no_response} no-response")
+        fb_text = f" ({', '.join(fb_parts)})" if fb_parts else ""
+
+        lines = [
+            "📊 *FareHound Status*",
+            f"• Monitoring: *{stats['monitoring']}* route{'s' if stats['monitoring'] != 1 else ''}"
+            + (f" ({stats['snoozed']} snoozed)" if stats['snoozed'] else ""),
+            f"• Last poll: {last_poll_str}",
+            f"• Alerts this week: *{stats['alerts_this_week']}*{fb_text}",
+            f"• SerpAPI usage: {stats['snapshots_30d']}/{MONTHLY_BUDGET_HARD_CAP} (last 30d)",
+        ]
+        if stats["savings_total"] > 0:
+            lines.append(
+                f"• Saved you *€{stats['savings_total']:,.0f}* across {stats['savings_route_count']} trip{'s' if stats['savings_route_count'] != 1 else ''} (/savings)"
+            )
+        if stats["digest_skip_count"] > 0:
+            lines.append(
+                f"• Digest skipped {stats['digest_skip_count']} of last 7 days (no significant price moves)"
+            )
+        await self._send(client, chat_id, "\n".join(lines), parse_mode="Markdown")
+
+    async def _handle_snooze(
+        self, args: str, chat_id: str, user_id: str, client: httpx.AsyncClient
+    ) -> None:
+        from src.utils.airports import route_name as _rn
+        if not args:
+            await self._send(client, chat_id,
+                "Usage: `/snooze {route} [days]` — defaults to 7 days.\n"
+                "Examples: `/snooze AMS-NRT 14` or `/snooze Tokyo`.",
+                parse_mode="Markdown")
+            return
+        parts = args.split()
+        days = 7
+        if parts and parts[-1].isdigit():
+            days = max(1, min(int(parts[-1]), 365))
+            query = " ".join(parts[:-1])
+        else:
+            query = " ".join(parts)
+        loop = asyncio.get_running_loop()
+        route = await loop.run_in_executor(None, self._resolve_route_for_user, user_id, query)
+        if not route:
+            await self._send(client, chat_id, f"No matching active route for `{query}`.", parse_mode="Markdown")
+            return
+        await loop.run_in_executor(None, self._db.snooze_route, route.route_id, days)
+        await self._send(client, chat_id,
+            f"🔕 Snoozed *{_rn(route.origin, route.destination)}* for {days} days. "
+            f"`/unsnooze {route.origin}-{route.destination}` to resume.",
+            parse_mode="Markdown")
+
+    async def _handle_unsnooze(
+        self, args: str, chat_id: str, user_id: str, client: httpx.AsyncClient
+    ) -> None:
+        from src.utils.airports import route_name as _rn
+        if not args:
+            await self._send(client, chat_id,
+                "Usage: `/unsnooze {route}`",
+                parse_mode="Markdown")
+            return
+        loop = asyncio.get_running_loop()
+        route = await loop.run_in_executor(None, self._resolve_route_for_user, user_id, args.strip())
+        if not route:
+            await self._send(client, chat_id, f"No matching route for `{args}`.", parse_mode="Markdown")
+            return
+        await loop.run_in_executor(None, self._db.unsnooze_route, route.route_id)
+        await self._send(client, chat_id,
+            f"🔔 Resumed monitoring *{_rn(route.origin, route.destination)}*.",
+            parse_mode="Markdown")
 
     async def _handle_trip(
         self, user_text: str, chat_id: str, user_id: str, home_airport: str, client: httpx.AsyncClient
@@ -1753,7 +2008,7 @@ class TripBot:
 
                 alternatives = compare_airports(
                     primary_for_compare, secondary_results, route.passengers,
-                )
+                )["competitive"]
 
                 if alternatives:
                     lines.append("")

@@ -205,6 +205,33 @@ class Database:
             self._conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
             self._conn.execute("UPDATE users SET approved = 1 WHERE onboarded = 1")
             self._conn.commit()
+        # R7 ITEM-051 migrations
+        # A1: routes.snoozed_until — per-route snooze
+        if not _has_column(self._conn, "routes", "snoozed_until"):
+            self._conn.execute("ALTER TABLE routes ADD COLUMN snoozed_until TEXT")
+        # A2: users.baggage_needs — preference (default 'one_checked')
+        if not _has_column(self._conn, "users", "baggage_needs"):
+            self._conn.execute(
+                "ALTER TABLE users ADD COLUMN baggage_needs TEXT DEFAULT 'one_checked'"
+            )
+        # A3: users digest fingerprint + skip-tracking
+        if not _has_column(self._conn, "users", "last_digest_fingerprint"):
+            self._conn.execute("ALTER TABLE users ADD COLUMN last_digest_fingerprint TEXT")
+        if not _has_column(self._conn, "users", "last_digest_sent_at"):
+            self._conn.execute("ALTER TABLE users ADD COLUMN last_digest_sent_at TEXT")
+        if not _has_column(self._conn, "users", "digest_skip_count_7d"):
+            self._conn.execute(
+                "ALTER TABLE users ADD COLUMN digest_skip_count_7d INTEGER DEFAULT 0"
+            )
+        # A4: price_snapshots.baggage_estimate — JSON blob
+        if not _has_column(self._conn, "price_snapshots", "baggage_estimate"):
+            self._conn.execute(
+                "ALTER TABLE price_snapshots ADD COLUMN baggage_estimate TEXT"
+            )
+        # A5: deals.reasoning_json — structured scorer output
+        if not _has_column(self._conn, "deals", "reasoning_json"):
+            self._conn.execute("ALTER TABLE deals ADD COLUMN reasoning_json TEXT")
+        self._conn.commit()
         # Migrate existing data: create default user if needed
         self._migrate_default_user()
 
@@ -268,7 +295,12 @@ class Database:
         return result
 
     def update_user(self, user_id: str, **fields) -> bool:
-        allowed = {"name", "home_location", "home_airport", "preferences", "onboarded", "approved", "active"}
+        allowed = {
+            "name", "home_location", "home_airport", "preferences",
+            "onboarded", "approved", "active",
+            "baggage_needs",
+            "last_digest_fingerprint", "last_digest_sent_at", "digest_skip_count_7d",
+        }
         to_update = {k: v for k, v in fields.items() if k in allowed}
         if not to_update:
             return False
@@ -302,13 +334,92 @@ class Database:
 
     # --- Routes ---
 
-    def get_active_routes(self, user_id: str | None = None) -> list[Route]:
+    def get_active_routes(
+        self, user_id: str | None = None, include_snoozed: bool = False
+    ) -> list[Route]:
         params: list = []
         sql = "SELECT * FROM routes WHERE active = 1"
         sql += _user_filter(user_id, params)
+        if not include_snoozed:
+            # Filter routes whose snooze has not expired. NULL snoozed_until means active.
+            now_iso = _to_isoformat(datetime.now(UTC))
+            sql += " AND (snoozed_until IS NULL OR snoozed_until <= ?)"
+            params.append(now_iso)
         cursor = self._conn.execute(sql, params)
         columns = [desc[0] for desc in cursor.description]
         return [Route.from_row(row, columns) for row in cursor.fetchall()]
+
+    def snooze_route(self, route_id: str, days: int) -> None:
+        """Set `snoozed_until = now + days` on a route. Used by /snooze and auto-snooze on book."""
+        until = datetime.now(UTC) + timedelta(days=int(days))
+        self._conn.execute(
+            "UPDATE routes SET snoozed_until = ? WHERE route_id = ?",
+            [_to_isoformat(until), route_id],
+        )
+        self._conn.commit()
+
+    def unsnooze_route(self, route_id: str) -> None:
+        """Clear snoozed_until on a route. Used by /unsnooze."""
+        self._conn.execute(
+            "UPDATE routes SET snoozed_until = NULL WHERE route_id = ?",
+            [route_id],
+        )
+        self._conn.commit()
+
+    def get_status_stats(self, user_id: str) -> dict:
+        """Aggregate stats for /status — counts and timestamps for the user-facing dashboard."""
+        now = datetime.now(UTC)
+        now_iso = _to_isoformat(now)
+        # Total + snoozed routes (active=1, regardless of snooze).
+        total_active = self._conn.execute(
+            "SELECT COUNT(*) FROM routes WHERE active = 1 AND user_id = ?", [user_id],
+        ).fetchone()[0]
+        snoozed = self._conn.execute(
+            "SELECT COUNT(*) FROM routes WHERE active = 1 AND user_id = ? "
+            "AND snoozed_until IS NOT NULL AND snoozed_until > ?",
+            [user_id, now_iso],
+        ).fetchone()[0]
+        # Last poll = max observed_at across this user's snapshots.
+        last_poll_row = self._conn.execute(
+            "SELECT MAX(observed_at) FROM price_snapshots WHERE user_id = ?", [user_id],
+        ).fetchone()
+        last_poll = last_poll_row[0] if last_poll_row else None
+        # Alerts this week with feedback breakdown.
+        week_ago = _to_isoformat(now - timedelta(days=7))
+        alert_rows = self._conn.execute(
+            "SELECT feedback, COUNT(*) FROM deals WHERE user_id = ? AND alert_sent = 1 "
+            "AND alert_sent_at IS NOT NULL AND alert_sent_at >= ? GROUP BY feedback",
+            [user_id, week_ago],
+        ).fetchall()
+        feedback_breakdown: dict[str, int] = {}
+        total_alerts_week = 0
+        for fb, cnt in alert_rows:
+            label = fb or "no_response"
+            feedback_breakdown[label] = cnt
+            total_alerts_week += cnt
+        # SerpAPI calls this month — proxy by counting unique snapshots in last 30 days
+        # across this user. Approximate; the precise counter lives in-memory on SerpAPIClient.
+        thirty_days_ago = _to_isoformat(now - timedelta(days=30))
+        snapshots_30d = self._conn.execute(
+            "SELECT COUNT(*) FROM price_snapshots WHERE user_id = ? AND observed_at >= ?",
+            [user_id, thirty_days_ago],
+        ).fetchone()[0]
+        # Digest skip count + total savings come from existing helpers.
+        user = self.get_user(user_id)
+        digest_skip_count = (user or {}).get("digest_skip_count_7d") or 0
+        savings = self.get_total_savings(user_id)
+        return {
+            "total_active": total_active,
+            "snoozed": snoozed,
+            "monitoring": total_active - snoozed,
+            "last_poll": last_poll,
+            "alerts_this_week": total_alerts_week,
+            "feedback_breakdown": feedback_breakdown,
+            "snapshots_30d": snapshots_30d,
+            "digest_skip_count": digest_skip_count,
+            "savings_total": savings.get("total", 0),
+            "savings_route_count": savings.get("route_count", 0),
+        }
 
     def upsert_route(self, route: Route, user_id: str | None = None) -> None:
         uid = user_id or route.user_id
@@ -408,8 +519,9 @@ class Database:
                 snapshot_id, route_id, window_id, observed_at, source,
                 outbound_date, return_date, passengers, lowest_price,
                 currency, best_flight, all_flights, price_level,
-                typical_low, typical_high, price_history, search_params, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                typical_low, typical_high, price_history, search_params,
+                baggage_estimate, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 snapshot.snapshot_id,
@@ -429,6 +541,7 @@ class Database:
                 float(snapshot.typical_high) if snapshot.typical_high is not None else None,
                 _to_json(snapshot.price_history),
                 _to_json(snapshot.search_params),
+                _to_json(snapshot.baggage_estimate),
                 uid,
             ],
         )
@@ -480,8 +593,9 @@ class Database:
             """
             INSERT INTO deals (
                 deal_id, snapshot_id, route_id, score, urgency,
-                reasoning, booking_url, alert_sent, alert_sent_at, booked, feedback, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reasoning, reasoning_json, booking_url, alert_sent, alert_sent_at,
+                booked, feedback, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 deal.deal_id,
@@ -490,6 +604,7 @@ class Database:
                 float(deal.score) if deal.score is not None else None,
                 deal.urgency,
                 deal.reasoning,
+                _to_json(deal.reasoning_json),
                 deal.booking_url,
                 1 if deal.alert_sent else 0,
                 _to_isoformat(deal.alert_sent_at),
@@ -549,15 +664,20 @@ class Database:
         """Return route_ids where deals exist with alert_sent=1 and feedback IS NULL.
 
         Returns dict of route_id -> {"price": float|None, "deal_ids": list[str]}.
+        Snoozed routes are excluded (Condition C8 — digest must respect snoozes).
         """
         params: list = []
+        now_iso = _to_isoformat(datetime.now(UTC))
         sql = """
             SELECT d.route_id, ps.lowest_price, d.deal_id
             FROM deals d
             LEFT JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
+            JOIN routes r ON d.route_id = r.route_id
             WHERE d.alert_sent = 1
               AND d.feedback IS NULL
+              AND (r.snoozed_until IS NULL OR r.snoozed_until <= ?)
         """
+        params.append(now_iso)
         if user_id is not None:
             params.append(user_id)
             sql += " AND d.user_id = ?"
