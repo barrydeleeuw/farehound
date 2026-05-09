@@ -237,3 +237,39 @@
   - `test_r7_legacy_book_callback_also_auto_snoozes` — ~30d snooze fired via the helper proves Condition C9 is met for legacy `book:` / `booked:` / `digest_booked:` callbacks (which all wire through the same helper at commands.py:940/954/893).
 - **Bug found and fixed during T19 wiring**: `deal_info["route_id"]` missing — see "Post-T7 fix" above. T19 was the first test to drive the full `orchestrator → telegram_notifier` path with real objects; that's how the Skip-route button regression was caught.
 - Tests: 420/420 passing (416 prior + 4 new). No regressions.
+
+---
+
+## Test Results (final)
+
+**Suite total:** 420/420 passing. Started at 311 baseline before R7.
+
+**Tests added by Tester (T14–T19):** 109 new tests across 6 files.
+
+| Task | File | New tests | Coverage |
+|---|---|---|---|
+| T14 | tests/test_telegram.py | 34 | All 4 message types: deal alert, error fare, follow-up, daily digest. Plus unit tests for the new render helpers (`_render_reasoning_bullets`, `_render_transparency_footer`, `_render_date_transparency`, `_baggage_total`, `_format_cost_breakdown`). |
+| T15 | tests/test_serpapi_baggage.py *(new)* | 31 | `parse_baggage_extensions` (string scanning, defensive cases), `estimate` (per-airline + user-preference matrix + long-haul boundary), `FlightSearchResult.parse_baggage` pipeline against 3 synthetic fixtures (full / outbound-only / none). |
+| T16 | tests/test_db.py | 14 | All 5 R7 ALTER blocks: column existence, idempotent `init_schema`, default values, JSON round-trip, NULL-tolerant. |
+| T17 | tests/test_orchestrator.py | 15 | Snooze filtering at DB layer, auto-snooze on `booked` feedback, fingerprint helpers, full `send_daily_digest` skip/send/snooze flow with real DB. |
+| T18 | tests/test_scorer.py | 11 | Structured 3-field reasoning contract: `_parse_response` happy/missing/legacy/invalid-urgency, `_coerce_reasoning` synthesis, `_fallback_reasoning` synthetic dict, `reasoning_to_bullets` renderer, end-to-end `score_deal` mocked. |
+| T19 | tests/test_integration_r7.py *(new)* | 4 | Non-negotiable end-to-end integration: real Orchestrator + DB + TelegramNotifier driving full poll → score → alert → callback → snooze → digest. Mocks only HTTP boundaries. |
+
+**Coverage notes for new R7 production code:**
+
+- `src/utils/baggage.py` — both public functions (`parse_baggage_extensions`, `estimate`) covered with happy + defensive + boundary cases. Fallback table verified per airline (KL/FR/HV/_DEFAULT) and per user preference (`carry_on_only`/`one_checked`/`two_checked`).
+- `src/apis/serpapi.py:FlightSearchResult.parse_baggage` — the §8.2 pipeline (booking_options → flight extensions → fallback table → unknown) covered against synthetic fixtures and defensive cases.
+- `src/storage/db.py` — `snooze_route`, `unsnooze_route`, `get_active_routes(include_snoozed=...)` exercised at unit + orchestrator-integration levels.
+- `src/analysis/scorer.py` — new structured `reasoning` contract, `_coerce_reasoning`, `_fallback_reasoning`, `reasoning_to_bullets` covered.
+- `src/orchestrator.py` — new `_compute_digest_fingerprint`, `_format_digest_header`, skip predicate path, R7 deal_info fields (incl. the post-T7 `route_id` fix) covered.
+- `src/alerts/telegram.py` — new helpers `_render_reasoning_bullets`, `_render_transparency_footer`, `_render_date_transparency`, `_baggage_total`, updated `_format_cost_breakdown` covered. R7 keyboard (3-button row + Details) verified on deal alert + digest. New `deal:*` callback prefixes verified on follow-up.
+
+**Spec divergences found during testing:**
+
+1. `deal_info` dict missing `route_id` (orchestrator:1136) — caught by T19, fixed by Builder in commit c734361. Without this fix the "Skip route 🔕" button silently disappeared from real deal alerts even though the unit tests passed.
+
+**Notes:**
+
+- Synthetic SerpAPI baggage fixtures created at `tests/fixtures/serpapi_with_baggage/` — 3 fixtures (full / outbound-only / none). Architect-Lead's Finding #1 confirmed real cached responses contain ZERO baggage data, so these were manufactured to exercise §8.2.
+- The "25 cached responses smoke test" line item in T15 acceptance was not exercised — those fixtures don't exist in this worktree. Defensive guarantee (Condition C4: never raises) is verified via the `test_empty_result_does_not_raise` and malformed-input cases instead.
+- One coordination breach early on (Builder's T12 commit b663d67 picked up Tester's unstaged T17 work). Resolved on second commit; documented in the T17 build_log entry.
