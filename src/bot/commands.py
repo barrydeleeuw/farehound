@@ -401,6 +401,12 @@ class TripBot:
             elif cmd == "/savings":
                 await self._handle_savings(chat_id, user_id, client)
                 return
+            elif cmd == "/snooze":
+                await self._handle_snooze(text[7:].strip(), chat_id, user_id, client)
+                return
+            elif cmd == "/unsnooze":
+                await self._handle_unsnooze(text[9:].strip(), chat_id, user_id, client)
+                return
 
         # Guard: casual affirmatives after informational responses should NOT
         # trigger pending confirmations — re-interpret them instead.
@@ -1402,6 +1408,72 @@ class TripBot:
             alt_name = _airport_name(detail["airport_code"])
             lines.append(f"• *{name}*: save €{detail['savings']:,.0f} via {alt_name}")
         await self._send(client, chat_id, "\n".join(lines), parse_mode="Markdown")
+
+    def _resolve_route_for_user(self, user_id: str, query: str) -> "Route | None":
+        """Look up a route for user by route_id, route_id prefix, or origin/destination substring."""
+        if not query:
+            return None
+        routes = self._db.get_active_routes(user_id, include_snoozed=True)
+        q = query.strip().lower()
+        for r in routes:
+            if r.route_id.lower() == q or r.route_id.lower().startswith(q):
+                return r
+        for r in routes:
+            if q in (r.origin or "").lower() or q in (r.destination or "").lower():
+                return r
+        from src.utils.airports import route_name as _rn
+        for r in routes:
+            if q in _rn(r.origin, r.destination).lower():
+                return r
+        return None
+
+    async def _handle_snooze(
+        self, args: str, chat_id: str, user_id: str, client: httpx.AsyncClient
+    ) -> None:
+        from src.utils.airports import route_name as _rn
+        if not args:
+            await self._send(client, chat_id,
+                "Usage: `/snooze {route} [days]` — defaults to 7 days.\n"
+                "Examples: `/snooze AMS-NRT 14` or `/snooze Tokyo`.",
+                parse_mode="Markdown")
+            return
+        parts = args.split()
+        days = 7
+        # Last token is days if it's an integer.
+        if parts and parts[-1].isdigit():
+            days = int(parts[-1])
+            query = " ".join(parts[:-1])
+        else:
+            query = " ".join(parts)
+        loop = asyncio.get_running_loop()
+        route = await loop.run_in_executor(None, self._resolve_route_for_user, user_id, query)
+        if not route:
+            await self._send(client, chat_id, f"No matching active route for `{query}`.", parse_mode="Markdown")
+            return
+        await loop.run_in_executor(None, self._db.snooze_route, route.route_id, days)
+        await self._send(client, chat_id,
+            f"🔕 Snoozed *{_rn(route.origin, route.destination)}* for {days} days. "
+            f"`/unsnooze {route.origin}-{route.destination}` to resume.",
+            parse_mode="Markdown")
+
+    async def _handle_unsnooze(
+        self, args: str, chat_id: str, user_id: str, client: httpx.AsyncClient
+    ) -> None:
+        from src.utils.airports import route_name as _rn
+        if not args:
+            await self._send(client, chat_id,
+                "Usage: `/unsnooze {route}`",
+                parse_mode="Markdown")
+            return
+        loop = asyncio.get_running_loop()
+        route = await loop.run_in_executor(None, self._resolve_route_for_user, user_id, args.strip())
+        if not route:
+            await self._send(client, chat_id, f"No matching route for `{args}`.", parse_mode="Markdown")
+            return
+        await loop.run_in_executor(None, self._db.unsnooze_route, route.route_id)
+        await self._send(client, chat_id,
+            f"🔔 Resumed monitoring *{_rn(route.origin, route.destination)}*.",
+            parse_mode="Markdown")
 
     async def _handle_trip(
         self, user_text: str, chat_id: str, user_id: str, home_airport: str, client: httpx.AsyncClient

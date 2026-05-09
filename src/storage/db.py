@@ -329,13 +329,37 @@ class Database:
 
     # --- Routes ---
 
-    def get_active_routes(self, user_id: str | None = None) -> list[Route]:
+    def get_active_routes(
+        self, user_id: str | None = None, include_snoozed: bool = False
+    ) -> list[Route]:
         params: list = []
         sql = "SELECT * FROM routes WHERE active = 1"
         sql += _user_filter(user_id, params)
+        if not include_snoozed:
+            # Filter routes whose snooze has not expired. NULL snoozed_until means active.
+            now_iso = _to_isoformat(datetime.now(UTC))
+            sql += " AND (snoozed_until IS NULL OR snoozed_until <= ?)"
+            params.append(now_iso)
         cursor = self._conn.execute(sql, params)
         columns = [desc[0] for desc in cursor.description]
         return [Route.from_row(row, columns) for row in cursor.fetchall()]
+
+    def snooze_route(self, route_id: str, days: int) -> None:
+        """Set `snoozed_until = now + days` on a route. Used by /snooze and auto-snooze on book."""
+        until = datetime.now(UTC) + timedelta(days=int(days))
+        self._conn.execute(
+            "UPDATE routes SET snoozed_until = ? WHERE route_id = ?",
+            [_to_isoformat(until), route_id],
+        )
+        self._conn.commit()
+
+    def unsnooze_route(self, route_id: str) -> None:
+        """Clear snoozed_until on a route. Used by /unsnooze."""
+        self._conn.execute(
+            "UPDATE routes SET snoozed_until = NULL WHERE route_id = ?",
+            [route_id],
+        )
+        self._conn.commit()
 
     def upsert_route(self, route: Route, user_id: str | None = None) -> None:
         uid = user_id or route.user_id
@@ -576,15 +600,20 @@ class Database:
         """Return route_ids where deals exist with alert_sent=1 and feedback IS NULL.
 
         Returns dict of route_id -> {"price": float|None, "deal_ids": list[str]}.
+        Snoozed routes are excluded (Condition C8 — digest must respect snoozes).
         """
         params: list = []
+        now_iso = _to_isoformat(datetime.now(UTC))
         sql = """
             SELECT d.route_id, ps.lowest_price, d.deal_id
             FROM deals d
             LEFT JOIN price_snapshots ps ON d.snapshot_id = ps.snapshot_id
+            JOIN routes r ON d.route_id = r.route_id
             WHERE d.alert_sent = 1
               AND d.feedback IS NULL
+              AND (r.snoozed_until IS NULL OR r.snoozed_until <= ?)
         """
+        params.append(now_iso)
         if user_id is not None:
             params.append(user_id)
             sql += " AND d.user_id = ?"

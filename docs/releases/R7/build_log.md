@@ -53,6 +53,20 @@
 - Confirmed callback flows for non-deal/non-route prefixes pass through unchanged.
 - Tests: full suite 325/325 passing.
 
+## T9 snooze_infra
+- DB helpers in `src/storage/db.py`:
+  - `snooze_route(route_id, days)` — sets `snoozed_until = now + days` (UTC ISO).
+  - `unsnooze_route(route_id)` — clears `snoozed_until`.
+  - `get_active_routes(user_id, include_snoozed=False)` — new kw filters routes whose `snoozed_until` is in the future. Default behaviour is to hide snoozed routes; pass `include_snoozed=True` for `/snooze` resolution and admin views.
+  - `get_routes_with_pending_deals(user_id)` — JOINs routes and excludes snoozed (Condition C8).
+- Orchestrator gets snooze enforcement for free: `poll_routes()` and `send_daily_digest()` already call `get_active_routes(user_id)` (orchestrator:392, :1177, :1308). No orchestrator-side change needed.
+- Slash commands in `src/bot/commands.py`:
+  - `/snooze {route|substring} [days]` — defaults to 7 days. `_resolve_route_for_user` matches by route_id, prefix, origin/dest IATA, or city name.
+  - `/unsnooze {route|substring}` — symmetric.
+- Auto-snooze hook (Condition C9) was already wired in T13's `_auto_snooze_route_for_deal` — it now resolves `db.snooze_route` successfully (was no-op before T9).
+- Smoke test: snooze→get_active→empty; unsnooze→back to one.
+- Tests: full suite 325/325 passing; Tester writes T17 against this.
+
 
 ## Pre-staging
 - Created `tests/fixtures/serpapi_with_baggage/` with 3 synthetic fixtures matching SerpAPI response shape per release_plan.md §8:

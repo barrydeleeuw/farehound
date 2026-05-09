@@ -520,7 +520,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Digest per-route keyboard mirrors row 1 plus row 2 with Details.
   - The `route:snooze:7:*` handler MUST: (a) call `db.snooze_route(route_id, 7)`, (b) call `db.bulk_dismiss_route_deals(route_id, user_id)` so pending deals on that route disappear from the next digest.
 
-#### `[ ]` T9 — snooze_infra
+#### `[x]` T9 — snooze_infra
 - **Owner:** builder
 - **Depends on:** T1, T2
 - **Blocks:** T11, T17
@@ -651,18 +651,20 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Cases: (a) valid full 3-field — assert `DealScore.reasoning` is dict with 3 keys; (b) malformed JSON — assert synthetic fallback object; (c) missing `vs_nearby` — assert synthetic fallback fires; (d) `urgency` outside enum — assert defaults safely.
   - Helper test: given a 3-field `reasoning` dict, the flatten-to-bullet logic produces exactly 3 lines starting with `✓ `.
 
-#### **T19 — integration_test_end_to_end** (NON-NEGOTIABLE per /release Phase 4 step 6b)
+#### `[ ]` T19 — integration_test_end_to_end *(NON-NEGOTIABLE — /release Phase 4 step 6b)*
 - **Owner:** tester
-- **Files:** `tests/test_v07_release.py` (NEW; follows v0.7/v0.8 pattern)
-- **Picks up after:** T7, T8, T17
-- **Acceptance:** end-to-end flow with mocked HTTP only:
-  - 1 user, 1 route AMS→TYO, primary AMS + secondary EIN/BRU configured.
-  - Mock SerpAPI primary response (with synthetic baggage in extensions), 2 secondaries.
-  - Mock Claude scorer to return structured 3-field reasoning.
-  - Run `orchestrator.poll_routes()`.
-  - Assert: deal alert sent with cost breakdown including baggage line, 3 reasoning bullets, "we checked 2 airports" footer (because EIN/BRU don't beat €75 threshold), 3-button keyboard, "📊 Details" button, callback data uses NEW `deal:*` / `route:*` prefixes.
-  - Assert: clicking `deal:book:{id}` callback marks deal booked AND auto-snoozes route 30d.
-  - Assert: subsequent `send_daily_digest` skips that user (route is snoozed).
+- **Depends on (Builder):** T7, T8, T17, T18
+- **Blocks:** —
+- **Files:** `tests/test_v07_release.py` (NEW; follows v0.7/v0.8 fixture style)
+- **Acceptance (one-line):** End-to-end deal-alert path with mocked HTTP only — alert renders all R7 surfaces, `deal:book` callback marks booked + auto-snoozes, next digest skips that user.
+- **Detail:**
+  - Single user, 1 route AMS→TYO, primary AMS + secondaries EIN/BRU configured in `airport_transport`.
+  - Mock HTTP at `httpx.AsyncClient` boundary: SerpAPI returns synthetic response with baggage in extensions, secondary searches return higher prices (so EIN/BRU don't beat €75 threshold — exercises "we checked" footer).
+  - Mock `anthropic.AsyncAnthropic` to return structured 3-field reasoning JSON.
+  - Run `await orchestrator.poll_routes()`.
+  - Assert Telegram payload contains: cost breakdown line including `+ €N bags`, 3 reasoning bullets (`✓ ...`), `✓ Checked 2 airports — your airport is best by €...` footer, 3-button row (Book / Watching / Skip route), `📊 Details` button, `deal:watch:` and `route:snooze:7:` callback data.
+  - Simulate user clicking `deal:book:{deal_id}` → assert `deal.feedback='booked'`, `deal.booked=1`, `route.snoozed_until` ≈ now+30d.
+  - Run `await orchestrator.send_daily_digest()` immediately after → assert NO Telegram message sent (route snoozed).
 
 ---
 
