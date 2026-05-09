@@ -27,6 +27,15 @@ def _parse_datetime(val) -> datetime | None:
     return datetime.fromisoformat(str(val))
 
 
+def _parse_datetime_utc(val) -> datetime | None:
+    """Parse a datetime stored as naive UTC string (sqlite default) and tag it as UTC."""
+    from datetime import UTC, timezone
+    dt = _parse_datetime(val)
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
 def _parse_bool(val) -> bool:
     if isinstance(val, bool):
         return val
@@ -117,7 +126,7 @@ class Route:
             preferred_departure_days=pdd,
             preferred_return_days=prd,
             user_id=d.get("user_id"),
-            snoozed_until=_parse_datetime(d.get("snoozed_until")),
+            snoozed_until=_parse_datetime_utc(d.get("snoozed_until")),
         )
 
 

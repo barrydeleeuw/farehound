@@ -560,7 +560,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Pull data: `db.get_active_routes(include_snoozed=True)` then count snoozed; last poll time from most recent snapshot; alerts-this-week from `db.get_deals_since(since=now-7d)` grouped by feedback; SerpAPI usage from `orchestrator.serpapi._calls_this_month` (need to expose via TripBot — pass at construction OR query DB count of snapshots in current month as proxy if injection is too invasive); savings via `db.get_total_savings(user_id)`; digest skip via `users.digest_skip_count_7d`.
   - If injecting the SerpAPI counter is too invasive, use snapshot-count-this-month as a documented proxy and add a TODO comment referencing Architect-Lead.
 
-#### `[ ]` T12 — scorer_json_contract
+#### `[x]` T12 — scorer_json_contract
 - **Owner:** builder
 - **Depends on:** T1, T2
 - **Blocks:** T7, T18

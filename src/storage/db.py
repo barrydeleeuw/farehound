@@ -536,8 +536,9 @@ class Database:
             """
             INSERT INTO deals (
                 deal_id, snapshot_id, route_id, score, urgency,
-                reasoning, booking_url, alert_sent, alert_sent_at, booked, feedback, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reasoning, reasoning_json, booking_url, alert_sent, alert_sent_at,
+                booked, feedback, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 deal.deal_id,
@@ -546,6 +547,7 @@ class Database:
                 float(deal.score) if deal.score is not None else None,
                 deal.urgency,
                 deal.reasoning,
+                _to_json(deal.reasoning_json),
                 deal.booking_url,
                 1 if deal.alert_sent else 0,
                 _to_isoformat(deal.alert_sent_at),

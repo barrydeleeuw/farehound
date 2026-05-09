@@ -14,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts.telegram import TelegramNotifier
 from src.analysis.nearby_airports import compare_airports
-from src.analysis.scorer import DealScorer
+from src.analysis.scorer import DealScorer, reasoning_to_bullets
 from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows
 from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
@@ -993,22 +993,25 @@ class Orchestrator:
                 nearby_comparison=(self._latest_nearby_comparison.get(route.route_id) or {}).get("competitive"),
             )
             logger.info(
-                "Route %s scored: %.2f (%s) — %s",
-                route.route_id, score_result.score, score_result.urgency, score_result.reasoning,
+                "Route %s scored: %.2f (%s)",
+                route.route_id, score_result.score, score_result.urgency,
             )
         except Exception:
             logger.exception("Claude scoring failed for route %s, falling back to static threshold", route.route_id)
             score_result = self._static_fallback(price, avg_price)
 
-        # Store deal record
+        # Store deal record. T12: write structured `reasoning_json` AND a flattened
+        # bullet-string in `reasoning` so legacy reads (follow-up renderer) keep working.
         now = datetime.now(UTC)
+        reasoning_dict = score_result.reasoning if isinstance(score_result.reasoning, dict) else None
         deal = Deal(
             deal_id=uuid4().hex,
             snapshot_id=snapshot.snapshot_id,
             route_id=route.route_id,
             score=Decimal(str(round(score_result.score, 2))),
             urgency=score_result.urgency,
-            reasoning=score_result.reasoning,
+            reasoning=reasoning_to_bullets(score_result.reasoning),
+            reasoning_json=reasoning_dict,
         )
 
         # Smart dedup: decide whether this alert is meaningful
@@ -1139,7 +1142,10 @@ class Orchestrator:
             "passengers": route.passengers,
             "score": score_result.score,
             "urgency": score_result.urgency,
-            "reasoning": inflection_msg or score_result.reasoning,
+            "reasoning": inflection_msg or reasoning_to_bullets(score_result.reasoning),
+            "reasoning_json": (
+                score_result.reasoning if isinstance(score_result.reasoning, dict) else None
+            ),
             "nearby_comparison": (self._latest_nearby_comparison.get(route.route_id) or {}).get("competitive", []),
             "nearby_evaluated": (self._latest_nearby_comparison.get(route.route_id) or {}).get("evaluated", []),
             "google_flights_url": gf_url,
@@ -1228,6 +1234,16 @@ class Orchestrator:
                     None, self.db.get_deals_since, route.route_id, since, user_id
                 )
                 watch_deals = [d for d in recent_deals if d.urgency == "watch"]
+                # Deals whose alert fired since the user's last digest — feeds the skip predicate.
+                # We use `alert_sent_at`, not `created_at`, so a deal that was inserted earlier
+                # but only just had its alert sent counts as "new" for digest purposes.
+                last_digest_dt = self._parse_iso_dt(user.get("last_digest_sent_at"))
+                deals_alerted_since_last_digest: list = []
+                if last_digest_dt is not None:
+                    for d in recent_deals:
+                        sent_at = self._parse_iso_dt(d.alert_sent_at)
+                        if sent_at is not None and sent_at > last_digest_dt:
+                            deals_alerted_since_last_digest.append(d)
 
                 # Use cheapest recent snapshot for dates
                 cheapest = await loop.run_in_executor(
@@ -1288,8 +1304,8 @@ class Orchestrator:
                 delta = None
                 if prev_price is not None and history_now is not None:
                     delta = history_now - prev_price
-                # New-deal flag = a recent_deals entry created since previous digest.
-                is_new = bool(recent_deals)
+                # New-deal flag = an alert fired for this route since the previous digest.
+                is_new = bool(deals_alerted_since_last_digest)
                 if is_new:
                     new_deal_count += 1
                 route_deltas.append({
@@ -1591,8 +1607,8 @@ class Orchestrator:
                 past_feedback=community_feedback or None,
             )
             logger.info(
-                "Community deal scored: %.2f (%s) — %s",
-                score_result.score, score_result.urgency, score_result.reasoning,
+                "Community deal scored: %.2f (%s)",
+                score_result.score, score_result.urgency,
             )
         except Exception:
             logger.exception("Claude scoring failed for community deal, sending price-only alert")
@@ -1641,13 +1657,15 @@ class Orchestrator:
 
         # Store deal record
         booking_url = verification.booking_url
+        reasoning_dict = score_result.reasoning if isinstance(score_result.reasoning, dict) else None
         deal = Deal(
             deal_id=uuid4().hex,
             snapshot_id=snapshot.snapshot_id,
             route_id=route.route_id,
             score=Decimal(str(round(score_result.score, 2))),
             urgency=score_result.urgency,
-            reasoning=score_result.reasoning,
+            reasoning=reasoning_to_bullets(score_result.reasoning),
+            reasoning_json=reasoning_dict,
             booking_url=booking_url,
         )
 
@@ -1684,7 +1702,8 @@ class Orchestrator:
                 "passengers": route.passengers,
                 "score": score_result.score,
                 "urgency": score_result.urgency,
-                "reasoning": score_result.reasoning,
+                "reasoning": reasoning_to_bullets(score_result.reasoning),
+                "reasoning_json": reasoning_dict,
                 "booking_url": booking_url,
             }
 
@@ -1703,7 +1722,7 @@ class Orchestrator:
 
     @staticmethod
     def _static_fallback(price: float, avg_price: Decimal | None):
-        """Fallback scoring when Claude API is unavailable."""
+        """Fallback scoring when Claude API is unavailable. Produces structured 3-field reasoning."""
         from src.analysis.scorer import DealScore
 
         if avg_price is not None and float(avg_price) > 0:
@@ -1712,13 +1731,21 @@ class Orchestrator:
                 return DealScore(
                     score=0.80,
                     urgency="book_now",
-                    reasoning=f"Static fallback: price is {drop_pct:.0%} below 90-day average (Claude unavailable)",
+                    reasoning={
+                        "vs_dates": "Date comparison unavailable",
+                        "vs_range": f"Price is {drop_pct:.0%} below 90-day average",
+                        "vs_nearby": "Static fallback — Claude unavailable",
+                    },
                     booking_window_hours=48,
                 )
         return DealScore(
             score=0.40,
             urgency="watch",
-            reasoning="Static fallback: price below average but not exceptional (Claude unavailable)",
+            reasoning={
+                "vs_dates": "Date comparison unavailable",
+                "vs_range": "Below average but not exceptional",
+                "vs_nearby": "Static fallback — Claude unavailable",
+            },
             booking_window_hours=72,
         )
 

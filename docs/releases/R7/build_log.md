@@ -77,6 +77,19 @@
 - Per-route delta uses `db.get_recent_snapshots(route_id, limit=2)` (no schema change, per Finding #7).
 - Tests: full suite 325/325 passing; Tester's T17 (orchestrator digest skip / snooze / auto-snooze) is now fully unblocked — depends on T9+T10 both done.
 
+## T12 scorer_json_contract
+- `_SCORE_PROMPT` JSON template (`src/analysis/scorer.py`) now requires structured `reasoning: {vs_dates, vs_range, vs_nearby}` per §6.1.
+- `DealScore.reasoning` typed as `dict` (was `str`). New module-level `reasoning_to_bullets(dict|str|None) -> str` flattens to `\n`-joined bullets.
+- `_parse_response` validates urgency enum and runs `_coerce_reasoning` — accepts dict, falls back gracefully on string (legacy capture replays) or missing fields. Synthetic 3-field fallback in `_fallback_reasoning` per §6.5.
+- Orchestrator stores both columns (Condition C7):
+  - `Deal.reasoning_json = score_result.reasoning` (the dict).
+  - `Deal.reasoning = reasoning_to_bullets(score_result.reasoning)` (`✓ {v}\n…` for legacy reads).
+- `db.insert_deal` extended to write `reasoning_json` column.
+- `_static_fallback` produces synthetic 3-field reasoning so the dataclass is always consistent.
+- `Route.snoozed_until` parser now tags datetimes as UTC (new `_parse_datetime_utc` in models.py) so timezone-aware comparisons work.
+- New `deal_info["reasoning_json"]` and updated `reasoning` (now bullet-string) on both alert paths and follow-up.
+- Tests: full suite 340/340 passing (Tester added 15 tests covering snooze/auto-snooze/digest skip/header).
+
 
 ## Pre-staging
 - Created `tests/fixtures/serpapi_with_baggage/` with 3 synthetic fixtures matching SerpAPI response shape per release_plan.md §8:
