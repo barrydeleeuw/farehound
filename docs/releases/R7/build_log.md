@@ -12,3 +12,10 @@
 - All three deserialized via `_parse_datetime` / `_parse_json` in `from_row`; included in `to_dict` outputs.
 - Updated `tests/test_models.py:54` (test_route_to_dict_roundtrip key set) to include `snoozed_until`.
 - Tests: full suite 311/311 passing.
+
+## T4 cost_breakdown_helper
+- New helpers `_format_cost_breakdown(price, transport, parking, mode, baggage, passengers) -> (str, float)` and `_baggage_total(baggage, passengers)` in `src/alerts/telegram.py`.
+- Replaced 4 inline duplications: primary breakdown in `send_deal_alert`, primary in `send_daily_digest`, nearby alt in `send_deal_alert`, nearby alt in `send_daily_digest`.
+- Baggage handled defensively per Condition C5: zero suppressed, `source == 'unknown'` suppressed, missing fields treated as 0.
+- Output identical to current behaviour when `baggage_estimate` absent (existing snapshots have no baggage). Matches `calculate_net_cost` formula in `nearby_airports.py:35` for the alt path.
+- Tests: full suite 311/311 passing; T14 (Tester) will assert per-message-type baggage rendering.

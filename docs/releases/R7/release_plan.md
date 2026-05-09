@@ -449,7 +449,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
 - **Blocks:** T7
 - **Acceptance:** new module-level `_format_cost_breakdown(price, transport, parking, mode, baggage, passengers) -> tuple[str, float]` returns (display_string, total_eur). All 4 inline cost-breakdown sites in `telegram.py` replaced. Unit test (T14) green. Output identical to current behaviour for zero-baggage case.
 - **Notes:** Land THIS before T7 to avoid 4 inconsistent variants (Condition C3).
-- **Status:** _pending_
+- **Status:** _done_ [x]
 
 #### **T5 — nearby_airports_two_lists**
 - **Owner:** builder

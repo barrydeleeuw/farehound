@@ -90,6 +90,48 @@ def _deal_label(score: float | None, urgency: str | None = None) -> str:
     return "Not Great"
 
 
+def _baggage_total(baggage: dict | None, passengers: int) -> float:
+    """Sum baggage cost across both directions and passengers. Zero when missing or 'unknown'."""
+    if not baggage or not isinstance(baggage, dict):
+        return 0.0
+    if baggage.get("source") == "unknown":
+        return 0.0
+    total = 0.0
+    for direction in ("outbound", "return"):
+        leg = baggage.get(direction) or {}
+        try:
+            total += float(leg.get("carry_on", 0) or 0)
+            total += float(leg.get("checked", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total * max(int(passengers or 1), 1)
+
+
+def _format_cost_breakdown(
+    price: float,
+    transport: float,
+    parking: float,
+    mode: str,
+    baggage: dict | None,
+    passengers: int,
+) -> tuple[str, float]:
+    """Return (display_string, total_eur) — single line, e.g. '€500 flights + €40 train + €30 bags = *€570 total*'.
+
+    Suppresses zero-cost segments. Baggage line omitted when source == 'unknown' or total == 0.
+    """
+    transport_t = transport_total(transport, mode, passengers)
+    bags = _baggage_total(baggage, passengers)
+    total = float(price) + transport_t + (parking or 0) + bags
+    parts = [f"€{float(price):,.0f} flights"]
+    if transport_t:
+        parts.append(f"€{transport_t:,.0f} {mode.lower()}")
+    if parking:
+        parts.append(f"€{parking:,.0f} parking")
+    if bags > 0:
+        parts.append(f"€{bags:,.0f} bags")
+    return f"{' + '.join(parts)} = *€{total:,.0f} total*", total
+
+
 def _format_flight_line(deal_info: dict) -> str:
     """Format a single line with airline, stops, and duration."""
     airline = deal_info.get("airline", "")
@@ -193,17 +235,15 @@ class TelegramNotifier:
         lines.append(f"💰 *€{price_pp:,.0f}/pp*")
 
         # Always show full cost breakdown for primary airport
-        primary_t = deal_info.get("primary_transport_cost", 0)
-        primary_p = deal_info.get("primary_parking_cost", 0)
-        primary_mode = deal_info.get("primary_transport_mode", "transport")
-        primary_t_total = transport_total(primary_t, primary_mode, passengers)
-        primary_total = float(price) + primary_t_total + primary_p
-        cost_parts = [f"€{float(price):,.0f} flights"]
-        if primary_t_total:
-            cost_parts.append(f"€{primary_t_total:,.0f} {primary_mode.lower()}")
-        if primary_p:
-            cost_parts.append(f"€{primary_p:,.0f} parking")
-        lines.append(f"{' + '.join(cost_parts)} = *€{primary_total:,.0f} total*")
+        breakdown_line, _ = _format_cost_breakdown(
+            float(price),
+            deal_info.get("primary_transport_cost", 0) or 0,
+            deal_info.get("primary_parking_cost", 0) or 0,
+            deal_info.get("primary_transport_mode", "transport"),
+            deal_info.get("baggage_estimate"),
+            passengers,
+        )
+        lines.append(breakdown_line)
 
         # Price context
         price_level = deal_info.get("price_level", "")
@@ -245,12 +285,9 @@ class TelegramNotifier:
                 hours = t_min / 60
                 alt_passengers = deal_info.get("passengers", 2)
                 fare_total = fare * alt_passengers
-                t_total = transport_total(t_cost, mode, alt_passengers)
-                alt_parts = [f"€{fare_total:,.0f} flights"]
-                if t_total:
-                    alt_parts.append(f"€{t_total:,.0f} {mode.lower()}")
-                if parking:
-                    alt_parts.append(f"€{parking:,.0f} parking")
+                alt_breakdown, _ = _format_cost_breakdown(
+                    fare_total, t_cost, parking, mode, alt.get("baggage_estimate"), alt_passengers,
+                )
                 duration_str = ""
                 flight_dur = alt.get("flight_duration_min")
                 primary_dur = alt.get("primary_flight_duration_min")
@@ -266,9 +303,7 @@ class TelegramNotifier:
                 lines.append(
                     f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f}){duration_str}"
                 )
-                lines.append(
-                    f"    {' + '.join(alt_parts)} = *€{net:,.0f} total*"
-                )
+                lines.append(f"    {alt_breakdown}")
                 lines.append(
                     f"    {mode} {hours:.1f}h to airport"
                 )
@@ -383,17 +418,15 @@ class TelegramNotifier:
                 price_pp = float(lowest) / passengers if passengers > 1 else float(lowest)
                 lines.append(f"💰 *€{price_pp:,.0f}/pp*")
                 # Always show full cost breakdown
-                d_transport = route_data.get("primary_transport_cost", 0)
-                d_parking = route_data.get("primary_parking_cost", 0)
-                d_mode = route_data.get("primary_transport_mode", "transport")
-                d_t_total = transport_total(d_transport, d_mode, passengers)
-                d_total = float(lowest) + d_t_total + d_parking
-                d_parts = [f"€{float(lowest):,.0f} flights"]
-                if d_t_total:
-                    d_parts.append(f"€{d_t_total:,.0f} {d_mode.lower()}")
-                if d_parking:
-                    d_parts.append(f"€{d_parking:,.0f} parking")
-                lines.append(f"{' + '.join(d_parts)} = *€{d_total:,.0f} total*")
+                d_breakdown, _ = _format_cost_breakdown(
+                    float(lowest),
+                    route_data.get("primary_transport_cost", 0) or 0,
+                    route_data.get("primary_parking_cost", 0) or 0,
+                    route_data.get("primary_transport_mode", "transport"),
+                    route_data.get("baggage_estimate"),
+                    passengers,
+                )
+                lines.append(d_breakdown)
                 # Show price change since alert
                 alert_price = route_data.get("alert_price")
                 if alert_price is not None:
@@ -431,13 +464,9 @@ class TelegramNotifier:
                     hours = t_min / 60
                     alt_pax = route_data.get("passengers", 2)
                     alt_fare_total = fare * alt_pax
-                    alt_pax_count = route_data.get("passengers", 2)
-                    t_total_alt = transport_total(t_cost, mode, alt_pax_count)
-                    alt_parts = [f"€{alt_fare_total:,.0f} flights"]
-                    if t_total_alt:
-                        alt_parts.append(f"€{t_total_alt:,.0f} {mode.lower()}")
-                    if parking:
-                        alt_parts.append(f"€{parking:,.0f} parking")
+                    alt_breakdown, _ = _format_cost_breakdown(
+                        alt_fare_total, t_cost, parking, mode, alt.get("baggage_estimate"), alt_pax,
+                    )
                     duration_str = ""
                     flight_dur = alt.get("flight_duration_min")
                     primary_dur = alt.get("primary_flight_duration_min")
@@ -453,9 +482,7 @@ class TelegramNotifier:
                     lines.append(
                         f"{icon} *{name}*: €{fare:,.0f}/pp (save €{savings:,.0f}){duration_str}"
                     )
-                    lines.append(
-                        f"    {' + '.join(alt_parts)} = *€{net:,.0f} total*"
-                    )
+                    lines.append(f"    {alt_breakdown}")
                     lines.append(
                         f"    {mode} {hours:.1f}h to airport"
                     )
