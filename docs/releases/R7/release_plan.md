@@ -601,7 +601,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Assert the Markdown body contains the expected substrings; assert keyboard structure is exactly the documented row layout.
   - For follow-up: cost breakdown is the new addition — verify it's there.
 
-#### `[ ]` T15 — tests_serpapi_baggage *(highest-risk test — Finding #1)*
+#### `[x]` T15 — tests_serpapi_baggage *(highest-risk test — Finding #1)*
 - **Owner:** tester
 - **Depends on (Builder):** T3
 - **Blocks:** —

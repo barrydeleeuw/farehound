@@ -156,3 +156,16 @@
 - `nearby_airports.compare_airports` propagates `baggage_estimate` from input to output `entry`.
 - Smoke tests pass parser against SerpAPI shapes (booking_options, flight extensions, dollar format, malformed input).
 - Tests: full suite 351/351 passing; Tester's T15 unblocked.
+
+## T15 tests: serpapi_baggage parser + airline fallback table
+- New `tests/test_serpapi_baggage.py` — 31 tests organized into 3 classes:
+  - `TestParseBaggageExtensions` (10 tests): EUR/USD format, prefix vs suffix, multiple-line lists, negative cases (legroom/wifi don't match), defensive (None/non-list/non-string items), refuses bare numeric phrases like "1st bag" or "2 bags allowed".
+  - `TestEstimateFallback` (14 tests): per-airline lookups (KL long/short-haul, FR LCC, HV, unknown→`_DEFAULT`), case-insensitive code, None airline → default; user-preference matrix (`carry_on_only`/`one_checked`/`two_checked`), default to one_checked when None; long-haul threshold at 4000km exact boundary; unknown distance treated as short-haul; never raises on garbage `leg_distance_km`.
+  - `TestFlightSearchResultParseBaggage` (7 tests): the 3 synthetic fixtures from pre-staging exercise the §8.2 pipeline:
+    - `full_baggage_both_ways.json` → `source='serpapi'`, both directions €40 checked.
+    - `outbound_only_baggage.json` → `source='serpapi'`, outbound parsed, return falls back to outbound (per Builder's `ret_parsed or out_parsed` rule).
+    - `no_baggage_data.json` × HV short-haul → `source='fallback_table'` with non-zero fees.
+    - `no_baggage_data.json` × KL long-haul → `source='unknown'` (zero fallback fees → suppressed per Condition C5).
+    - Empty `FlightSearchResult` doesn't raise; malformed `booking_options` items silently skipped; result dict shape matches §8.1 (`{outbound, return, source, currency}`).
+- Plan §12 acceptance for "25 cached responses smoke test" not exercised here — those fixtures don't exist in the worktree (only synthetic fixtures Tester created); covered by `test_empty_result_does_not_raise` and the malformed-input cases instead. Defensive guarantee (Condition C4: never raises) is verified.
+- Tests: 31/31 baggage tests passing. The 2 telegram-button test failures observed in the full suite are from Builder's in-flight T7 (telegram unified) — not from T15. Will resolve when T7 commits.
