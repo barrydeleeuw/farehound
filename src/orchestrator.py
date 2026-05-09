@@ -1135,6 +1135,7 @@ class Orchestrator:
 
         deal_info = {
             "deal_id": deal.deal_id,
+            "route_id": route.route_id,
             "origin": route.origin,
             "destination": route.destination,
             "price": price,
@@ -1631,6 +1632,7 @@ class Orchestrator:
             fb_best_legs = fb_best.get("flights", [])
             fallback_info = {
                 "deal_id": fallback_deal_id,
+                "route_id": route.route_id,
                 "origin": route.origin,
                 "destination": route.destination,
                 "price": actual_price,
@@ -1697,6 +1699,7 @@ class Orchestrator:
             comm_best_legs = comm_best.get("flights", [])
             alert_info = {
                 "deal_id": deal.deal_id,
+                "route_id": route.route_id,
                 "origin": route.origin,
                 "destination": route.destination,
                 "price": actual_price,

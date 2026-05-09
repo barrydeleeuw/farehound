@@ -220,3 +220,11 @@
   - 4 tests on `send_daily_digest`: 3-button row + Details row per route; concrete header override beats generic "haven't decided" text; baggage line in route summary; transparency footer on digest.
 - All 11 pre-existing telegram tests still pass (Builder hardened them earlier when T7 reshaped the keyboard).
 - Tests: 416/416 passing (382 prior + 34 new). No regressions.
+
+## Post-T7 fix: deal_info missing route_id
+- T19 caught a real bug: `_send_deferred_alert` deal_info dict was missing `"route_id"`, so `_build_deal_keyboard` saw `route_id=None` and dropped the "Skip route 🔕" button on real alerts. T14 unit tests didn't catch it because they passed route_id directly.
+- Added `"route_id": route.route_id` to three orchestrator deal-info dicts:
+  - `_send_deferred_alert` deal_info (orchestrator:1138)
+  - `on_community_deal` alert_info (orchestrator:~1701)
+  - `on_community_deal` fallback_info (orchestrator:~1635)
+- Tests: full suite 420/420 passing.
