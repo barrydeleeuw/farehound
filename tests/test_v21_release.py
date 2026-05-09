@@ -368,9 +368,9 @@ class TestFollowUp:
             keyboard = payload["reply_markup"]["inline_keyboard"]
             row = keyboard[0]
             assert row[0]["text"] == "Yes, booked ✅"
-            assert row[0]["callback_data"] == "booked:deal_789"
+            assert row[0]["callback_data"] == "deal:book:deal_789"
             assert row[1]["text"] == "Still watching 👀"
-            assert row[1]["callback_data"] == "watching:deal_789"
+            assert row[1]["callback_data"] == "deal:watch:deal_789"
 
     @pytest.mark.asyncio
     async def test_check_pending_feedback_sends_follow_ups(self):

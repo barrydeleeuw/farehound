@@ -169,3 +169,17 @@
     - Empty `FlightSearchResult` doesn't raise; malformed `booking_options` items silently skipped; result dict shape matches §8.1 (`{outbound, return, source, currency}`).
 - Plan §12 acceptance for "25 cached responses smoke test" not exercised here — those fixtures don't exist in the worktree (only synthetic fixtures Tester created); covered by `test_empty_result_does_not_raise` and the malformed-input cases instead. Defensive guarantee (Condition C4: never raises) is verified.
 - Tests: 31/31 baggage tests passing. The 2 telegram-button test failures observed in the full suite are from Builder's in-flight T7 (telegram unified) — not from T15. Will resolve when T7 commits.
+
+## T7 telegram_4_messages_unified
+- New telegram-side helpers in `src/alerts/telegram.py`:
+  - `_render_reasoning_bullets(reasoning_json, reasoning_legacy)` — 3-bullet structured reasoning per §6.3; gracefully falls back to legacy single-line italic when only the string column is present.
+  - `_render_transparency_footer(competitive, evaluated)` — §9.2 cases: all-saved (no footer), none-saved ("Checked N airports — yours best by €X–€Y"), mixed ("…also checked N (€X+ more, skipped)"), or both empty (None).
+  - `_render_date_transparency(price_history)` — §9.3: "Polled N dates — Mar 12 is cheapest".
+  - `_build_deal_keyboard(deal_id, route_id, search_url, deal_info)` — 3-button row + Details row used by both deal alerts and error fares.
+- All 4 message types now share the `_format_cost_breakdown` helper (T4) AND the new helpers above:
+  - `send_deal_alert`: cost line, 3 reasoning bullets, date transparency, nearby block, "we checked X" footer, R7 keyboard with Details (sub-item 7) — Condition C10 satisfied (Google Flights deep link).
+  - `send_error_fare_alert`: cost line + breakdown, 3 reasoning bullets, R7 keyboard.
+  - `send_follow_up`: cost line + breakdown, switched callbacks to new prefixes.
+  - `send_daily_digest`: per-route 3-button row + Details, transparency footer, date transparency.
+- Updated 3 existing v0.7/v0.8/v2.1 release tests to assert the new R7 keyboard shape (test_send_deal_alert_buttons, test_send_error_fare_alert_buttons, test_send_follow_up, test_digest_route_has_book_and_action_buttons, test_digest_route_without_deals_has_no_action_buttons, test_send_follow_up_format).
+- Tests: full suite 382/382 passing; Tester's T14 (per-message-type assertions) unblocked.

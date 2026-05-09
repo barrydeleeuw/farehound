@@ -63,6 +63,94 @@ def find_cheapest_date(
 
 TELEGRAM_API = "https://api.telegram.org"
 
+_REASONING_KEYS = ("vs_dates", "vs_range", "vs_nearby")
+
+
+def _render_reasoning_bullets(reasoning_json: dict | None, reasoning_legacy: str | None) -> list[str]:
+    """Render structured `reasoning_json` (3 fields) as 3 bullet lines.
+
+    Falls back to the legacy single-line string when only `reasoning_legacy` is present —
+    older deal records (pre-T12) still flow through this path.
+    """
+    if isinstance(reasoning_json, dict):
+        return [f"✓ {reasoning_json[k]}" for k in _REASONING_KEYS if reasoning_json.get(k)]
+    if reasoning_legacy:
+        # Legacy already-flattened bullet-string (newline-separated), or free text.
+        text = str(reasoning_legacy).strip()
+        if "\n" in text:
+            return [line for line in text.splitlines() if line.strip()]
+        return [f"_{text}_"]
+    return []
+
+
+def _render_transparency_footer(competitive: list, evaluated: list) -> str | None:
+    """Footer text per §9.2 — informs user which airports were checked.
+
+    Returns None when no footer is needed (i.e. competitive non-empty with nothing else evaluated,
+    or both lists empty).
+    """
+    competitive = competitive or []
+    evaluated = evaluated or []
+    competitive_codes = {a.get("airport_code") for a in competitive}
+    non_competitive = [a for a in evaluated if a.get("airport_code") not in competitive_codes]
+
+    if not competitive and not evaluated:
+        return None
+    if competitive and not non_competitive:
+        return None  # Existing nearby block is sufficient.
+    if not competitive and evaluated:
+        deltas = [a.get("delta_vs_primary", 0) for a in evaluated if a.get("delta_vs_primary") is not None]
+        if not deltas:
+            return f"✓ Checked {len(evaluated)} airport{'s' if len(evaluated) != 1 else ''} — your airport is best"
+        min_delta = min(deltas)
+        max_delta = max(deltas)
+        if min_delta == max_delta:
+            return (
+                f"✓ Checked {len(evaluated)} airport{'s' if len(evaluated) != 1 else ''} — "
+                f"your airport is best by €{min_delta:,.0f}"
+            )
+        return (
+            f"✓ Checked {len(evaluated)} airport{'s' if len(evaluated) != 1 else ''} — "
+            f"your airport is best by €{min_delta:,.0f}–€{max_delta:,.0f}"
+        )
+    # Mixed: some competitive, some not.
+    names = ", ".join(a.get("airport_name") or a.get("airport_code", "?") for a in non_competitive)
+    deltas = [a.get("delta_vs_primary", 0) for a in non_competitive if a.get("delta_vs_primary") is not None]
+    if deltas:
+        return f"…also checked {names} (€{min(deltas):,.0f}+ more, skipped)"
+    return f"…also checked {names}"
+
+
+def _render_date_transparency(price_history) -> str | None:
+    """One-liner showing date polling per §9.3: 'Polled N dates — Mar 12 is cheapest'."""
+    if not price_history:
+        return None
+    from datetime import date as date_type
+    dates_seen: list = []
+    cheapest_date = None
+    cheapest_price = None
+    for entry in price_history:
+        try:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                d_str, price = entry[0], entry[1]
+            elif isinstance(entry, dict):
+                d_str, price = entry.get("date", ""), entry.get("price")
+            else:
+                continue
+            if price is None:
+                continue
+            d = date_type.fromisoformat(str(d_str)[:10])
+            dates_seen.append(d)
+            price = float(price)
+            if cheapest_price is None or price < cheapest_price:
+                cheapest_price = price
+                cheapest_date = d
+        except (ValueError, TypeError, IndexError):
+            continue
+    if not dates_seen or cheapest_date is None:
+        return None
+    return f"✓ Polled {len(dates_seen)} dates — {cheapest_date.strftime('%b %d')} is cheapest"
+
 
 def _deal_emoji(score: float | None, urgency: str | None = None) -> str:
     """Return an emoji indicating deal quality."""
@@ -266,8 +354,17 @@ class TelegramNotifier:
         if cheapest_hint:
             lines.append(cheapest_hint)
 
-        if reasoning:
-            lines.append(f"_{reasoning}_")
+        # T7 §6.3: render structured 3-bullet reasoning if present, else fall back to legacy.
+        reasoning_bullets = _render_reasoning_bullets(
+            deal_info.get("reasoning_json"), reasoning,
+        )
+        if reasoning_bullets:
+            lines.extend(reasoning_bullets)
+
+        # T7 §9.3: date transparency (sits below cost / above nearby).
+        date_line = _render_date_transparency(deal_info.get("price_history"))
+        if date_line:
+            lines.append(date_line)
 
         nearby = deal_info.get("nearby_comparison") or []
         if nearby:
@@ -308,17 +405,42 @@ class TelegramNotifier:
                     f"    {mode} {hours:.1f}h to airport"
                 )
 
+        # T7 §9.2: "we checked X" transparency footer.
+        evaluated = deal_info.get("nearby_evaluated") or []
+        footer = _render_transparency_footer(nearby, evaluated)
+        if footer:
+            lines.append(footer)
+
         deal_id = deal_info.get("deal_id")
-        reply_markup = None
-        if deal_id:
-            reply_markup = {
-                "inline_keyboard": [[
-                    {"text": "Book Now ✈️", "url": search_url},
-                    {"text": "Wait 🕐", "callback_data": f"wait:{deal_id}"},
-                ]]
-            }
+        route_id = deal_info.get("route_id")
+        reply_markup = self._build_deal_keyboard(deal_id, route_id, search_url, deal_info)
 
         await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
+
+    def _build_deal_keyboard(
+        self, deal_id: str | None, route_id: str | None, search_url: str, deal_info: dict,
+    ) -> dict | None:
+        """Three-button row + Details row per T7 / T8.
+
+        Row 1: Book Now (URL) / Watching 👀 (deal:watch) / Skip route 🔕 (route:snooze:7).
+        Row 2: 📊 Details (URL — Google Flights deep link, sub-item 7 placeholder per Condition C10).
+
+        Falls back to two-button row if route_id is missing (older payloads).
+        """
+        if not deal_id:
+            return None
+        keyboard: list[list[dict]] = []
+        primary_row: list[dict] = [{"text": "Book Now ✈️", "url": search_url}]
+        primary_row.append({"text": "Watching 👀", "callback_data": f"deal:watch:{deal_id}"})
+        if route_id:
+            primary_row.append(
+                {"text": "Skip route 🔕", "callback_data": f"route:snooze:7:{route_id}"}
+            )
+        keyboard.append(primary_row)
+        # Row 2: Details (placeholder Google Flights deep link).
+        details_url = self._google_flights_url(deal_info)
+        keyboard.append([{"text": "📊 Details", "url": details_url}])
+        return {"inline_keyboard": keyboard}
 
     async def send_error_fare_alert(self, deal_info: dict, chat_id: str | None = None) -> None:
         origin = deal_info.get("origin", "???")
@@ -344,20 +466,29 @@ class TelegramNotifier:
         if dates:
             lines.append(f"📅 {dates}")
         lines.append(f"💰 *€{float(price):,.0f}*")
+        # Show full cost breakdown (with baggage if present) for error fares too.
+        passengers = deal_info.get("passengers", 2)
+        ef_breakdown, _ = _format_cost_breakdown(
+            float(price),
+            deal_info.get("primary_transport_cost", 0) or 0,
+            deal_info.get("primary_parking_cost", 0) or 0,
+            deal_info.get("primary_transport_mode", "transport"),
+            deal_info.get("baggage_estimate"),
+            passengers,
+        )
+        lines.append(ef_breakdown)
         lines.append("⚡ BOOK NOW — these usually disappear fast!")
-        if reasoning:
-            lines.append(f"_{reasoning}_")
+        # Structured reasoning bullets (T7).
+        reasoning_bullets = _render_reasoning_bullets(
+            deal_info.get("reasoning_json"), reasoning,
+        )
+        if reasoning_bullets:
+            lines.extend(reasoning_bullets)
         lines.append(f"[Book Now]({booking_url})")
 
         deal_id = deal_info.get("deal_id")
-        reply_markup = None
-        if deal_id:
-            reply_markup = {
-                "inline_keyboard": [[
-                    {"text": "Book Now ✈️", "url": booking_url},
-                    {"text": "Wait 🕐", "callback_data": f"wait:{deal_id}"},
-                ]]
-            }
+        route_id = deal_info.get("route_id")
+        reply_markup = self._build_deal_keyboard(deal_id, route_id, booking_url, deal_info)
 
         await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
 
@@ -366,20 +497,32 @@ class TelegramNotifier:
         route = route_name(deal_info.get("origin", "???"), deal_info.get("destination", "???"))
         price = deal_info.get("price", "?")
         deal_id = deal_info.get("deal_id")
+        passengers = deal_info.get("passengers", 2)
 
-        text = (
+        lines = [
             f"You saw the {route} deal at €{float(price):,.0f} three days ago. "
-            "Did you book it?"
+            "Did you book it?",
+        ]
+        # Re-show cost breakdown so the user sees the full picture in the follow-up too.
+        breakdown, _ = _format_cost_breakdown(
+            float(price),
+            deal_info.get("primary_transport_cost", 0) or 0,
+            deal_info.get("primary_parking_cost", 0) or 0,
+            deal_info.get("primary_transport_mode", "transport"),
+            deal_info.get("baggage_estimate"),
+            passengers,
         )
+        lines.append(breakdown)
         reply_markup = None
         if deal_id:
+            # Use new prefixes; legacy aliases are still routed by the dispatcher (Condition C2).
             reply_markup = {
                 "inline_keyboard": [[
-                    {"text": "Yes, booked ✅", "callback_data": f"booked:{deal_id}"},
-                    {"text": "Still watching 👀", "callback_data": f"watching:{deal_id}"},
+                    {"text": "Yes, booked ✅", "callback_data": f"deal:book:{deal_id}"},
+                    {"text": "Still watching 👀", "callback_data": f"deal:watch:{deal_id}"},
                 ]]
             }
-        await self._send_message(chat_id, text, reply_markup=reply_markup)
+        await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
 
     async def send_daily_digest(self, routes_summary: list[dict], chat_id: str | None = None) -> None:
         if not routes_summary:
@@ -491,6 +634,16 @@ class TelegramNotifier:
                         f"    {mode} {hours:.1f}h to airport"
                     )
 
+            # T7 §9.2: transparency footer for digest too.
+            evaluated_d = route_data.get("nearby_evaluated") or []
+            footer_d = _render_transparency_footer(nearby_prices, evaluated_d)
+            if footer_d:
+                lines.append(footer_d)
+            # T7 §9.3: date transparency.
+            date_line_d = _render_date_transparency(route_data.get("price_history"))
+            if date_line_d:
+                lines.append(date_line_d)
+
             search_url = self._google_flights_url({
                 "origin": origin, "destination": dest, "passengers": passengers,
                 "outbound_date": route_data.get("outbound_date", ""),
@@ -499,12 +652,18 @@ class TelegramNotifier:
             deal_ids = route_data.get("deal_ids", [])
             route_id = route_data.get("route_id", "")
             user_id = route_data.get("user_id", "")
-            keyboard = [[{"text": "Book Now ✈️", "url": search_url}]]
-            if deal_ids and route_id:
-                keyboard.append([
-                    {"text": "Booked ✅", "callback_data": f"digest_booked:{deal_ids[0]}"},
-                    {"text": "Not interested", "callback_data": f"digest_dismiss:{route_id}:{user_id}"},
-                ])
+            # New 3-button row + Details row (T7/T8). When no deal_ids/route_id (early state)
+            # fall back to a single Book button.
+            keyboard: list[list[dict]] = []
+            primary_row: list[dict] = [{"text": "Book Now ✈️", "url": search_url}]
+            if deal_ids:
+                primary_row.append({"text": "Watching 👀", "callback_data": f"deal:watch:{deal_ids[0]}"})
+            if route_id:
+                primary_row.append(
+                    {"text": "Skip route 🔕", "callback_data": f"route:snooze:7:{route_id}"}
+                )
+            keyboard.append(primary_row)
+            keyboard.append([{"text": "📊 Details", "url": search_url}])
             reply_markup = {"inline_keyboard": keyboard}
 
             await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)

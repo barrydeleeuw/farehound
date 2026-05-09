@@ -493,7 +493,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - In `_send_deferred_alert`, pass `nearby_comparison=self._latest_nearby_comparison.get(route.route_id, {"competitive": [], "evaluated": []})` to `deal_info`.
   - In `send_daily_digest`, populate `summary["nearby"]` with the same dict shape (rename existing `"nearby_prices"` → `"nearby"` so telegram.py reads consistently).
 
-#### `[ ]` T7 — telegram_4_messages_unified
+#### `[x]` T7 — telegram_4_messages_unified
 - **Owner:** builder
 - **Depends on:** T3, T4, T6, T12
 - **Blocks:** T8, T14

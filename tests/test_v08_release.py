@@ -257,15 +257,15 @@ class TestDigestInlineButtons:
             route_payload = mock_client.post.call_args_list[1].kwargs.get("json") or mock_client.post.call_args_list[1][1]["json"]
             keyboard = route_payload["reply_markup"]["inline_keyboard"]
 
-            # First row: Book Now button
+            # R7 row 1: Book Now + Watching + Skip route
             assert keyboard[0][0]["text"] == "Book Now ✈️"
             assert "url" in keyboard[0][0]
-
-            # Second row: Booked + Not interested
-            assert keyboard[1][0]["text"] == "Booked ✅"
-            assert keyboard[1][0]["callback_data"] == "digest_booked:d1"
-            assert keyboard[1][1]["text"] == "Not interested"
-            assert keyboard[1][1]["callback_data"] == "digest_dismiss:ams-nrt:u1"
+            assert keyboard[0][1]["text"] == "Watching 👀"
+            assert keyboard[0][1]["callback_data"] == "deal:watch:d1"
+            assert keyboard[0][2]["text"] == "Skip route 🔕"
+            assert keyboard[0][2]["callback_data"] == "route:snooze:7:ams-nrt"
+            # Row 2: Details placeholder (Google Flights URL).
+            assert keyboard[1][0]["text"] == "📊 Details"
 
     @pytest.mark.asyncio
     async def test_digest_route_without_deals_has_no_action_buttons(self, notifier):
@@ -291,9 +291,12 @@ class TestDigestInlineButtons:
 
             route_payload = mock_client.post.call_args_list[1].kwargs.get("json") or mock_client.post.call_args_list[1][1]["json"]
             keyboard = route_payload["reply_markup"]["inline_keyboard"]
-            # Only Book Now row, no Booked/Dismiss row
-            assert len(keyboard) == 1
+            # R7: row 1 is Book Now only (no deal_ids → no Watching, no route_id → no Skip);
+            # row 2 is Details placeholder.
+            assert len(keyboard) == 2
             assert keyboard[0][0]["text"] == "Book Now ✈️"
+            assert len(keyboard[0]) == 1  # No Watching/Skip without deal_ids/route_id
+            assert keyboard[1][0]["text"] == "📊 Details"
 
 
 # =============================================================================

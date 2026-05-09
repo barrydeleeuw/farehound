@@ -261,7 +261,7 @@ def test_google_flights_url(notifier):
 
 @pytest.mark.asyncio
 async def test_send_deal_alert_buttons(notifier):
-    """Deal alert buttons: Search Flights (URL) + Wait (callback)."""
+    """Deal alert R7 keyboard: Book Now (URL) + Watching (callback) + Skip route + Details row."""
     deal_info = {
         "origin": "AMS",
         "destination": "NRT",
@@ -270,6 +270,7 @@ async def test_send_deal_alert_buttons(notifier):
         "airline": "KLM",
         "dates": "2026-10-01 to 2026-10-15",
         "deal_id": "deal_123",
+        "route_id": "route_abc",
     }
 
     with patch("src.alerts.telegram.httpx.AsyncClient") as mock_cls:
@@ -285,20 +286,23 @@ async def test_send_deal_alert_buttons(notifier):
 
         payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1]["json"]
         keyboard = payload["reply_markup"]["inline_keyboard"]
-        assert len(keyboard) == 1
+        assert len(keyboard) == 2
         row = keyboard[0]
         assert row[0]["text"] == "Book Now ✈️"
-        assert "url" in row[0]
         assert row[0]["url"].startswith("https://www.google.com/travel/flights")
-        assert row[1]["text"] == "Wait 🕐"
-        assert row[1]["callback_data"] == "wait:deal_123"
+        assert row[1]["text"] == "Watching 👀"
+        assert row[1]["callback_data"] == "deal:watch:deal_123"
+        assert row[2]["text"] == "Skip route 🔕"
+        assert row[2]["callback_data"] == "route:snooze:7:route_abc"
+        # Row 2: Details placeholder.
+        assert keyboard[1][0]["text"] == "📊 Details"
 
 
 # --- send_error_fare_alert inline keyboard ---
 
 @pytest.mark.asyncio
 async def test_send_error_fare_alert_buttons(notifier):
-    """Error fare alert buttons: Search Flights (URL) + Wait (callback)."""
+    """Error fare R7 keyboard: Book Now (URL) + Watching (callback) + Skip route."""
     deal_info = {
         "origin": "AMS",
         "destination": "NRT",
@@ -307,6 +311,7 @@ async def test_send_error_fare_alert_buttons(notifier):
         "airline": "QR",
         "dates": "2026-10-01 to 2026-10-15",
         "deal_id": "deal_456",
+        "route_id": "route_xyz",
     }
 
     with patch("src.alerts.telegram.httpx.AsyncClient") as mock_cls:
@@ -324,9 +329,9 @@ async def test_send_error_fare_alert_buttons(notifier):
         keyboard = payload["reply_markup"]["inline_keyboard"]
         row = keyboard[0]
         assert row[0]["text"] == "Book Now ✈️"
-        assert "url" in row[0]
-        assert row[1]["text"] == "Wait 🕐"
-        assert row[1]["callback_data"] == "wait:deal_456"
+        assert row[1]["text"] == "Watching 👀"
+        assert row[1]["callback_data"] == "deal:watch:deal_456"
+        assert row[2]["callback_data"] == "route:snooze:7:route_xyz"
 
 
 # --- send_follow_up ---
@@ -361,6 +366,6 @@ async def test_send_follow_up(notifier):
         keyboard = payload["reply_markup"]["inline_keyboard"]
         row = keyboard[0]
         assert row[0]["text"] == "Yes, booked ✅"
-        assert row[0]["callback_data"] == "booked:deal_789"
+        assert row[0]["callback_data"] == "deal:book:deal_789"
         assert row[1]["text"] == "Still watching 👀"
-        assert row[1]["callback_data"] == "watching:deal_789"
+        assert row[1]["callback_data"] == "deal:watch:deal_789"
