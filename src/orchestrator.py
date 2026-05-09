@@ -546,6 +546,8 @@ class Orchestrator:
         typical_range = insights.get("typical_price_range", [])
         best_flight = result.best_flights[0] if result.best_flights else None
 
+        baggage_estimate = self._compute_baggage_for_result(result, best_flight, user)
+
         snapshot = PriceSnapshot(
             snapshot_id=uuid4().hex,
             route_id=route.route_id,
@@ -566,6 +568,7 @@ class Orchestrator:
                 **(result.search_params or {}),
                 "google_flights_url": result.raw_response.get("search_metadata", {}).get("google_flights_url", ""),
             },
+            baggage_estimate=baggage_estimate,
         )
 
         await loop.run_in_executor(None, self.db.insert_snapshot, snapshot, user_id)
@@ -885,6 +888,7 @@ class Orchestrator:
                 now = datetime.now(UTC)
                 best_flight = result.best_flights[0] if result.best_flights else None
                 typical_range = result.price_insights.get("typical_price_range", [])
+                sec_baggage = self._compute_baggage_for_result(result, best_flight, user)
                 sec_snapshot = PriceSnapshot(
                     snapshot_id=uuid4().hex,
                     route_id=route.route_id,
@@ -902,6 +906,7 @@ class Orchestrator:
                     typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
                     price_history=result.price_insights.get("price_history"),
                     search_params={**(result.search_params or {}), "origin": airport["airport_code"]},
+                    baggage_estimate=sec_baggage,
                 )
                 await loop.run_in_executor(None, self.db.insert_snapshot, sec_snapshot, user_id)
 
@@ -913,6 +918,7 @@ class Orchestrator:
                     "transport_mode": airport.get("transport_mode", ""),
                     "transport_time_min": airport.get("transport_time_min", 0),
                     "flight_duration_min": sec_duration,
+                    "baggage_estimate": sec_baggage,
                 })
             except SerpAPIError as e:
                 logger.error("SerpAPI error for secondary %s→%s: %s", airport["airport_code"], route.destination, e)
@@ -1152,6 +1158,7 @@ class Orchestrator:
             "primary_transport_cost": primary_t_cost,
             "primary_parking_cost": primary_parking or 0,
             "primary_transport_mode": primary_mode,
+            "baggage_estimate": snapshot.baggage_estimate,
             "price_level": snapshot.price_level,
             "typical_low": snapshot.typical_low,
             "typical_high": snapshot.typical_high,
@@ -1279,6 +1286,7 @@ class Orchestrator:
                     "price_history": best.price_history if best else None,
                     "earliest_departure": str(route.earliest_departure) if route.earliest_departure else "",
                     "latest_return": str(route.latest_return) if route.latest_return else "",
+                    "baggage_estimate": best.baggage_estimate if best else None,
                 }
 
                 if watch_deals:
@@ -1719,6 +1727,42 @@ class Orchestrator:
             )
 
         await loop.run_in_executor(None, self.db.insert_deal, deal, user_id)
+
+    def _compute_baggage_for_result(
+        self,
+        result,
+        best_flight: dict | None,
+        user: dict,
+    ) -> dict | None:
+        """Extract baggage estimate from a SerpAPI result, falling back to airline policy.
+
+        Always returns a dict (never None) so the snapshot has a consistent shape.
+        Defensive — never raises on missing fields.
+        """
+        try:
+            airline_code = ""
+            distance_km = None
+            if best_flight and isinstance(best_flight, dict):
+                legs = best_flight.get("flights") or []
+                if legs:
+                    airline_code = (legs[0].get("airline") or "").upper().strip()
+                # Crude distance proxy: avg cruise speed ~800 km/h.
+                duration = best_flight.get("total_duration")
+                if duration:
+                    try:
+                        distance_km = float(duration) / 60.0 * 800.0
+                    except (TypeError, ValueError):
+                        distance_km = None
+            baggage_needs = (user.get("baggage_needs") or "one_checked")
+            return result.parse_baggage(
+                airline_code=airline_code or None,
+                leg_distance_km=distance_km,
+                baggage_needs=baggage_needs,
+                currency=self.config.serpapi.currency,
+            )
+        except Exception:
+            logger.exception("Baggage estimate computation failed; storing None")
+            return None
 
     @staticmethod
     def _static_fallback(price: float, avg_price: Decimal | None):

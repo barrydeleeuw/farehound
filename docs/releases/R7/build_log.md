@@ -135,3 +135,24 @@
   - End-to-end `score_deal` (mocked Anthropic): structured response → `DealScore.reasoning` is dict; malformed response → conservative defaults `(score=0.3, urgency='watch', reasoning=fallback_dict)`.
 - All 14 pre-existing scorer tests still pass thanks to back-compat coercion in `_coerce_reasoning`.
 - Tests: 351/351 passing (340 prior + 11 new). No regressions.
+
+## T3 serpapi_baggage_parsing
+- New module `src/utils/baggage.py`:
+  - `FALLBACK` table keyed by IATA airline code (KL, AF, LH, BA, HV, FR, U2, W6, _DEFAULT) with `carry_on` / `checked_long_haul` / `checked_short_haul` per direction (§8.3).
+  - `LONG_HAUL_KM = 4000` cutoff.
+  - `parse_baggage_extensions(extensions)` — defensive scan via two regexes, picks max amounts when multiple matches. Returns None when nothing recognisable; never raises (Condition C4).
+  - `estimate(airline_code, leg_distance_km, baggage_needs)` — honors user preference matrix (`carry_on_only` / `one_checked` / `two_checked`). Always succeeds.
+- `FlightSearchResult.parse_baggage(...)` in `src/apis/serpapi.py` (§8.2 pipeline):
+  1. Primary scan: `booking_options[].together.extensions`.
+  2. Secondary scan: `flights[].extensions` (outbound + return legs separately).
+  3. Fallback: `baggage.estimate(...)`.
+  4. Mark `source = "unknown"` when both primary path AND fallback yield zero — renderer suppresses the line per Condition C5.
+- Orchestrator wiring (`src/orchestrator.py`):
+  - New `_compute_baggage_for_result(result, best_flight, user)` — derives `airline_code` from `best_flight.flights[0].airline`, distance from `total_duration` (~800 km/h proxy), `baggage_needs` from `user`.
+  - Primary snapshot construction (orchestrator:549) and secondary on-demand snapshot (orchestrator:888) both store `baggage_estimate`.
+  - `secondary_results.append(...)` includes `baggage_estimate` so it propagates through `compare_airports` into `nearby_comparison[i]["baggage_estimate"]`, exposing baggage on alt cost breakdown lines.
+  - `deal_info` and digest `summary` now expose `baggage_estimate` so `telegram._format_cost_breakdown` reads it.
+- `db.insert_snapshot` extended to write `baggage_estimate` column.
+- `nearby_airports.compare_airports` propagates `baggage_estimate` from input to output `entry`.
+- Smoke tests pass parser against SerpAPI shapes (booking_options, flight extensions, dollar format, malformed input).
+- Tests: full suite 351/351 passing; Tester's T15 unblocked.

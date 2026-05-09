@@ -443,7 +443,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - `PriceSnapshot.baggage_estimate: dict | None = None` (parse JSON in `from_row`).
   - `Deal.reasoning_json: dict | None = None` (parse JSON in `from_row`).
 
-#### `[ ]` T3 — serpapi_baggage_parsing
+#### `[x]` T3 — serpapi_baggage_parsing
 - **Owner:** builder
 - **Depends on:** T2
 - **Blocks:** T7, T15

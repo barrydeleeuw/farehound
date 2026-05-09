@@ -464,8 +464,9 @@ class Database:
                 snapshot_id, route_id, window_id, observed_at, source,
                 outbound_date, return_date, passengers, lowest_price,
                 currency, best_flight, all_flights, price_level,
-                typical_low, typical_high, price_history, search_params, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                typical_low, typical_high, price_history, search_params,
+                baggage_estimate, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 snapshot.snapshot_id,
@@ -485,6 +486,7 @@ class Database:
                 float(snapshot.typical_high) if snapshot.typical_high is not None else None,
                 _to_json(snapshot.price_history),
                 _to_json(snapshot.search_params),
+                _to_json(snapshot.baggage_estimate),
                 uid,
             ],
         )

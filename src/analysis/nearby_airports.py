@@ -87,6 +87,7 @@ def compare_airports(
             "transport_time_min": sec.get("transport_time_min", 0),
             "flight_duration_min": sec.get("flight_duration_min"),
             "primary_flight_duration_min": primary_flight_duration,
+            "baggage_estimate": sec.get("baggage_estimate"),
         }
         evaluated.append(entry)
         if savings > savings_threshold:
