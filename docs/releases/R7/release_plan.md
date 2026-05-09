@@ -413,25 +413,35 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
 
 ## 12. Atomic Task List (Phase C)
 
-> Builder works tasks T1–T13 sequentially within their dependency chain (§4). Tester picks up T14–T19 as the corresponding Builder tasks land. Both should set their current task as `in_progress` and only one task `in_progress` per agent at a time. Use the Builder/Tester `# Status` field below to coordinate (Builder updates Status when starting/completing; Tester monitors).
+> **How to claim a task.** Each task header carries a checkbox: `[ ]` available, `[~]` in_progress, `[x]` done. To claim: change `[ ]` → `[~]` in the **header** line and add your handle to `Owner:` if not already set. To complete: change `[~]` → `[x]` and post a one-line "T{N} done" message to team-lead. **Only one task `[~]` per agent at a time.** The legacy `Status:` line at the bottom of each task is being phased out — the header checkbox is authoritative.
+>
+> **Reading order.** Each task is self-contained: header (owner / depends-on / blocks / files with line refs) → one-line acceptance → detail bullets. Builder reads T1 → T13 in dependency order; Tester reads T14 → T19 and starts the test scaffold for any task whose Builder dependency has reached `[~]`.
+>
+> **Line refs** are anchor points to navigate the codebase — exact numbers may drift as edits land; use them to locate, not to assume code there is unchanged.
 
 ### Builder tasks
 
-#### **T1 — db_migrations**
+#### `[x]` T1 — db_migrations
 - **Owner:** builder
+- **Depends on:** —
+- **Blocks:** T2, T9, T10, T11, T12, T16
 - **Files:** `src/storage/db.py:189` (extend `init_schema`)
-- **Blocks:** T2, T9, T10, T11, T12 (everything that touches DB)
-- **Acceptance:** all 5 ALTER blocks (A1–A5 from §5) added; idempotent re-run produces no errors; pyproject test `pytest tests/test_db.py -k migration` (Tester writes T16) passes.
-- **Notes:** Builder MAY commit T1 standalone before any other code change; this de-risks downstream work.
-- **Status:** _done_ [x]
+- **Acceptance (one-line):** All 5 ALTER blocks (A1–A5 from §5) added with idempotent `_has_column` guard; `init_schema()` re-run produces no errors.
+- **Detail:**
+  - Insert the 5 ALTER blocks from §5 after the existing `_USER_ID_TABLES` migration loop and the follow-up / approved column migrations, BEFORE `_migrate_default_user()`.
+  - Tester verifies in T16.
+  - Builder MAY commit standalone before anything else lands — de-risks downstream work and lets Tester start T16 immediately.
 
-#### **T2 — models_update**
+#### `[x]` T2 — models_update
 - **Owner:** builder
-- **Files:** `src/storage/models.py`
 - **Depends on:** T1
-- **Blocks:** T3, T9
-- **Acceptance:** `Route.snoozed_until: datetime | None = None`; `PriceSnapshot.baggage_estimate: dict | None = None`; `Deal.reasoning_json: dict | None = None`. All `from_row` methods deserialize the new columns (parse JSON for baggage_estimate / reasoning_json). All existing tests pass.
-- **Status:** _done_ [x]
+- **Blocks:** T3, T9, T12
+- **Files:** `src/storage/models.py:44` (`Route`), `:159` (`PriceSnapshot`), `:230` (`Deal`)
+- **Acceptance (one-line):** Three new dataclass fields added, `from_row` deserializes them via existing `_parse_json` helper, existing tests still pass.
+- **Detail:**
+  - `Route.snoozed_until: datetime | None = None` (added to dataclass, `to_dict`, `from_row`).
+  - `PriceSnapshot.baggage_estimate: dict | None = None` (parse JSON in `from_row`).
+  - `Deal.reasoning_json: dict | None = None` (parse JSON in `from_row`).
 
 #### **T3 — serpapi_baggage_parsing**
 - **Owner:** builder
@@ -568,14 +578,14 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - The 25 cached SerpAPI responses (which lack baggage data) are used as integration smoke — assert they go through the parser without throwing.
 - **Notes:** This is the **highest-risk test** in R7 — Finding #1.
 
-#### **T16 — tests_db_migrations**
+#### **T16 — tests_db_migrations** [x] DONE
 - **Owner:** tester
 - **Files:** `tests/test_db.py`
 - **Picks up after:** T1
 - **Acceptance:**
   - Assert all 5 columns exist after `init_schema()`.
   - Assert idempotency: second `init_schema()` call doesn't error.
-  - Round-trip test: `snooze_route` + `get_active_routes` excludes; `unsnooze_route` re-includes.
+  - Round-trip test: `snooze_route` + `get_active_routes` excludes; `unsnooze_route` re-includes. *(Helper-based round-trip deferred to T17 — column-level round-trip via raw SQL covered here.)*
   - Round-trip test: `users.last_digest_fingerprint`, `users.baggage_needs`, `price_snapshots.baggage_estimate`, `deals.reasoning_json`.
 
 #### **T17 — tests_orchestrator (digest skip + snooze + auto-snooze)**

@@ -1,0 +1,58 @@
+{
+  "search_metadata": {
+    "google_flights_url": "https://www.google.com/travel/flights/search?test=2"
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "departure_id": "AMS",
+    "arrival_id": "BKK",
+    "outbound_date": "2026-11-01",
+    "return_date": "2026-11-15",
+    "adults": 2,
+    "currency": "EUR",
+    "type": "1"
+  },
+  "best_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {"name": "Amsterdam Schiphol", "id": "AMS", "time": "2026-11-01 11:00"},
+          "arrival_airport": {"name": "Bangkok Suvarnabhumi", "id": "BKK", "time": "2026-11-02 06:30"},
+          "duration": 690,
+          "airline": "Ryanair",
+          "airline_logo": "https://example.com/fr.png",
+          "flight_number": "FR 4521",
+          "extensions": [
+            "Below average legroom (28 in)",
+            "Carry-on baggage: 25 € fee",
+            "Checked baggage: 1st bag 50 €",
+            "No power outlets"
+          ]
+        },
+        {
+          "departure_airport": {"name": "Bangkok Suvarnabhumi", "id": "BKK", "time": "2026-11-15 22:30"},
+          "arrival_airport": {"name": "Amsterdam Schiphol", "id": "AMS", "time": "2026-11-16 06:30"},
+          "duration": 720,
+          "airline": "Ryanair",
+          "airline_logo": "https://example.com/fr.png",
+          "flight_number": "FR 4522",
+          "extensions": [
+            "Below average legroom (28 in)",
+            "No power outlets"
+          ]
+        }
+      ],
+      "total_duration": 1410,
+      "price": 540,
+      "type": "Round trip",
+      "airline_logo": "https://example.com/fr.png"
+    }
+  ],
+  "other_flights": [],
+  "price_insights": {
+    "lowest_price": 540,
+    "price_level": "low",
+    "typical_price_range": [620, 780]
+  },
+  "booking_options": []
+}
