@@ -1,6 +1,6 @@
 # FareHound Roadmap
 
-> Last updated: 2026-04-06
+> Last updated: 2026-05-09
 
 ## Mission
 
@@ -17,6 +17,34 @@ Every feature we build serves this mission: reduce the gap between what people p
 <!-- No items currently in progress -->
 
 ## Ready
+
+### [ITEM-051] Value-Prop Restoration & UX Overhaul
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** L
+- **Dependencies:** None — supersedes/folds in [ITEM-037]
+- **Summary:** FareHound's mission is "lowest REAL cost to fly" but today the value prop leaks across all 4 Telegram message types. Cost breakdown is inconsistent (missing on error fares and follow-ups), baggage is never parsed (real cost is wrong by €40–€100/trip), nearby airports are silently dropped when savings <€75 (user can't tell if we even checked), there's no "Watching" button on alerts/digest (only on the 3-day follow-up), no route snooze, daily digest fires every day with no "what changed" gating, and scorer reasoning is unstructured free text. This item is **one coherent release** because the fixes are tightly coupled — shipping them piecemeal would leave the user with half-broken alerts.
+- **Detail:** [roadmap/value-prop-restoration.md](roadmap/value-prop-restoration.md)
+- **Includes (all in one release):**
+  1. Unified cost-breakdown helper across all 4 Telegram message types (deal alert, error fare, follow-up, daily digest)
+  2. Baggage parsing from SerpAPI + display in cost breakdown (subsumes [ITEM-037])
+  3. "We checked X airports / Y dates" transparency — kills silent omission below €75 threshold
+  4. "Watching 👀" button on deal alerts AND daily digest (currently only on 3-day follow-up)
+  5. Per-route snooze + auto-snooze on `booked` (DB column `routes.snoozed_until`)
+  6. Structured scorer reasoning — 3 bullet lines (vs dates checked / vs Google range / vs nearby)
+  7. "📊 Details" button placeholder for [ITEM-049] Mini Web App
+  8. Smarter daily digest — fingerprint-gated skip + concrete "what moved" header
+  9. Callback prefix consolidation (`deal:*` / `route:*`) with legacy aliases
+  10. `/status` command surfacing routes, last poll, alerts this week, SerpAPI usage, savings
+- **Acceptance Criteria:**
+  - [ ] All 4 message types include cost breakdown and baggage line when data available
+  - [ ] Watching button on deal alerts AND digest, not just follow-up
+  - [ ] Route snooze respected in poll loop and digest; auto-snooze fires on booked feedback
+  - [ ] Daily digest skipped when no route price moved >€10 since last digest AND <3 days
+  - [ ] Scorer reasoning returns structured JSON with 3 bullet fields
+  - [ ] `/status` command works
+  - [ ] Tests added: `test_telegram` (4 message types), `test_serpapi_baggage` (new), `test_db` (migrations), `test_orchestrator` (digest skip + snooze), `test_scorer` (structured)
+  - [ ] Deployed to HA per [CLAUDE.md](CLAUDE.md) sync flow
 
 ### [ITEM-011] Weekend/short trip date windowing
 - **Status:** Ready
@@ -37,10 +65,40 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Works conversationally (one natural language message, not N separate questions)
   - [ ] Fallback: if user skips, transport costs remain NULL (already handled gracefully)
 
+### [ITEM-049] Telegram Mini Web App
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** L
+- **Dependencies:** [ITEM-051] must ship first — its "📊 Details" button is the entry point
+- **Summary:** Rich detail views launched from a button on each Telegram alert. Telegram WebApp `web_app` button hands off signed `initData` (no separate auth). Replaces parts of the parked [ITEM-P02] (Lovelace dashboard) — Telegram WebApp is a better fit than HA Lovelace for a multi-user direction.
+- **Pages:**
+  - `/deal/{id}` — price-history sparkline (90d), full alternatives table including <€75-savings ones, baggage policy by airline, structured why-best, booking deep links
+  - `/routes` — list, snooze toggles, edit dates
+  - `/settings` — baggage preference, transport overrides, notification quiet hours
+- **Stack suggestion:** FastAPI + HTMX deployed alongside the bot on the Pi (or on Railway later when [ARCHITECTURE.md](ARCHITECTURE.md) Phase A migration happens). Matches the codebase's Python skill set, no JS build step.
+- **Why this matters:** [ITEM-051] fixes the message-fits-in-chat parts of the value prop. Anything richer (price charts, side-by-side comparisons, full alternatives view) needs a real surface — and Telegram Mini Apps give us that without giving up Telegram's auth/push benefits.
+- **Acceptance Criteria:**
+  - [ ] WebApp button added to deal alerts pointing to `/deal/{id}` page
+  - [ ] `initData` validation server-side (HMAC against bot token)
+  - [ ] Deal detail page shows: price history chart, full alternatives table, baggage by airline, structured why-best, booking deep link
+  - [ ] Routes page shows snooze toggles wired to existing snooze logic from [ITEM-051]
+  - [ ] Settings page persists preferences to DB
+  - [ ] HTTPS configured (Cloudflare Tunnel or Caddy on the Pi)
+  - [ ] Tests for `initData` validation and route handlers
+
 ## Proposed
 
-### [ITEM-037] Luggage-aware total cost calculation
+### [ITEM-050] Full custom web dashboard
 - **Status:** Proposed
+- **Priority:** P3 (Low)
+- **Effort:** XL
+- **Dependencies:** [ARCHITECTURE.md](ARCHITECTURE.md) Phase A (cloud migration to Railway+Postgres), validated multi-user demand, [ITEM-049] deployed
+- **Summary:** A proper standalone web app for account management, billing, route management, history, analytics. Telegram becomes notification-only. Revisits the decision in [ARCHITECTURE.md §4](ARCHITECTURE.md) ("Why not a web app") once there's a paying user base.
+- **Why this is on the roadmap (not parked):** Kept visible as the long-term answer for a real product. [ITEM-049] (Telegram Mini Web App) covers ~90% of the rich-detail use cases at <10% the effort, so this stays Proposed/P3 until a paying user base validates the investment.
+- **Review notes:** Premature today. Revisit once: (1) ARCHITECTURE.md Phase A is complete (Railway + Postgres), (2) [ITEM-049] is shipped and we know what users actually use it for, (3) there's evidence of demand for features that don't fit in a Mini Web App (e.g. multi-user team accounts, complex analytics, B2B integrations).
+
+### [ITEM-037] Luggage-aware total cost calculation
+- **Status:** Proposed *(Subsumed by [ITEM-051] — do not pick up as standalone work; will be marked Done when [ITEM-051] ships)*
 - **Priority:** P1 (High)
 - **Effort:** M
 - **Dependencies:** None
@@ -248,7 +306,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Parked:** No affordable API. Revisit if budget increases.
 
 ### [ITEM-P02] HA Lovelace dashboard
-- **Parked:** Removed from consideration. Telegram is the sole interface. HA is the deployment platform only.
+- **Parked:** Superseded by [ITEM-049] (Telegram Mini Web App). Lovelace was the wrong surface for a multi-user product — Telegram WebApp gives us rich detail views with built-in auth and push, without a second platform to maintain. HA remains the deployment platform only.
 
 ### [ITEM-P03] 1Password / passport checks
 - **Parked:** Over-engineered for current stage.
