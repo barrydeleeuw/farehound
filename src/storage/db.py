@@ -205,6 +205,33 @@ class Database:
             self._conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
             self._conn.execute("UPDATE users SET approved = 1 WHERE onboarded = 1")
             self._conn.commit()
+        # R7 ITEM-051 migrations
+        # A1: routes.snoozed_until — per-route snooze
+        if not _has_column(self._conn, "routes", "snoozed_until"):
+            self._conn.execute("ALTER TABLE routes ADD COLUMN snoozed_until TEXT")
+        # A2: users.baggage_needs — preference (default 'one_checked')
+        if not _has_column(self._conn, "users", "baggage_needs"):
+            self._conn.execute(
+                "ALTER TABLE users ADD COLUMN baggage_needs TEXT DEFAULT 'one_checked'"
+            )
+        # A3: users digest fingerprint + skip-tracking
+        if not _has_column(self._conn, "users", "last_digest_fingerprint"):
+            self._conn.execute("ALTER TABLE users ADD COLUMN last_digest_fingerprint TEXT")
+        if not _has_column(self._conn, "users", "last_digest_sent_at"):
+            self._conn.execute("ALTER TABLE users ADD COLUMN last_digest_sent_at TEXT")
+        if not _has_column(self._conn, "users", "digest_skip_count_7d"):
+            self._conn.execute(
+                "ALTER TABLE users ADD COLUMN digest_skip_count_7d INTEGER DEFAULT 0"
+            )
+        # A4: price_snapshots.baggage_estimate — JSON blob
+        if not _has_column(self._conn, "price_snapshots", "baggage_estimate"):
+            self._conn.execute(
+                "ALTER TABLE price_snapshots ADD COLUMN baggage_estimate TEXT"
+            )
+        # A5: deals.reasoning_json — structured scorer output
+        if not _has_column(self._conn, "deals", "reasoning_json"):
+            self._conn.execute("ALTER TABLE deals ADD COLUMN reasoning_json TEXT")
+        self._conn.commit()
         # Migrate existing data: create default user if needed
         self._migrate_default_user()
 
