@@ -123,3 +123,15 @@
 - Notes: caught two NameErrors in Builder's in-flight T12 working-tree (`reasoning_dict`, `deals_since_last_digest`) — flagged via DM, fixed before commit.
 - Tests: 340/340 passing (325 prior + 15 new). No regressions.
 - Code landed in commit b663d67 (bundled with Builder's T12 — ack from Builder; future Tester commits will be standalone).
+
+## T18 scorer: structured 3-field reasoning contract
+- Added 11 new tests to `tests/test_scorer.py` covering §6.1 + §6.5:
+  - `_parse_response` returns 3-field reasoning dict for valid Claude response.
+  - Malformed JSON → `_fallback_reasoning` produces synthetic 3-field dict (`Static fallback — Claude unavailable`).
+  - Missing `vs_nearby` sub-field is replaced with documented placeholder `"No nearby airports configured"` per `_coerce_reasoning`.
+  - Legacy free-text string reasoning is gracefully coerced into a 3-field dict (older response replays don't break).
+  - Invalid urgency value (not in enum `book_now|watch|skip`) coerces to `"watch"`.
+  - `reasoning_to_bullets` renderer: 3-field dict → 3 lines prefixed with `✓ `; string passes through; None → empty; empty fields skipped.
+  - End-to-end `score_deal` (mocked Anthropic): structured response → `DealScore.reasoning` is dict; malformed response → conservative defaults `(score=0.3, urgency='watch', reasoning=fallback_dict)`.
+- All 14 pre-existing scorer tests still pass thanks to back-compat coercion in `_coerce_reasoning`.
+- Tests: 351/351 passing (340 prior + 11 new). No regressions.

@@ -640,7 +640,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Snooze in `send_daily_digest`: pre-populate a snoozed route with pending deals, call `send_daily_digest`, assert no message sent for that route.
   - Auto-snooze: invoke each callback path (`deal:book`, `book:`, `booked:`, `digest_booked:`) and assert `routes.snoozed_until` ≈ now+30d.
 
-#### `[ ]` T18 — tests_scorer (structured reasoning)
+#### `[x]` T18 — tests_scorer (structured reasoning)
 - **Owner:** tester
 - **Depends on (Builder):** T12
 - **Blocks:** T19
