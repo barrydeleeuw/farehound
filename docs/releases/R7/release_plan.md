@@ -651,7 +651,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Cases: (a) valid full 3-field — assert `DealScore.reasoning` is dict with 3 keys; (b) malformed JSON — assert synthetic fallback object; (c) missing `vs_nearby` — assert synthetic fallback fires; (d) `urgency` outside enum — assert defaults safely.
   - Helper test: given a 3-field `reasoning` dict, the flatten-to-bullet logic produces exactly 3 lines starting with `✓ `.
 
-#### `[ ]` T19 — integration_test_end_to_end *(NON-NEGOTIABLE — /release Phase 4 step 6b)*
+#### `[x]` T19 — integration_test_end_to_end *(NON-NEGOTIABLE — /release Phase 4 step 6b)*
 - **Owner:** tester
 - **Depends on (Builder):** T7, T8, T17, T18
 - **Blocks:** —

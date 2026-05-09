@@ -228,3 +228,12 @@
   - `on_community_deal` alert_info (orchestrator:~1701)
   - `on_community_deal` fallback_info (orchestrator:~1635)
 - Tests: full suite 420/420 passing.
+
+## T19 integration test (NON-NEGOTIABLE)
+- New `tests/test_integration_r7.py` — 4 end-to-end tests, real DB / real models / real `TelegramNotifier` / real `FlightSearchResult.parse_baggage`, mocking only the HTTP boundaries (Anthropic SDK + SerpAPI HTTP + Telegram HTTP):
+  - `test_r7_deal_alert_renders_full_message_body` — the primary integration test. Wires real Orchestrator with real DB, mocks SerpAPI to return the synthetic `full_baggage_both_ways.json` fixture, mocks the scorer to return structured 3-field reasoning, pre-populates nearby `evaluated` with EIN/BRU below threshold, runs `poll_routes()` → `_send_deferred_alert()`. Asserts the captured Telegram payload contains: cost breakdown with baggage line ("€1,940 flights" + "bags"), 3 reasoning bullets, "Checked 2 airports — your airport is best" transparency footer, 3-button keyboard (Book Now URL / Watching `deal:watch:` / Skip route `route:snooze:7:ams-tyo`), "📊 Details" button on row 2.
+  - `test_r7_deal_book_callback_auto_snoozes_route` — exercises `TripBot._auto_snooze_route_for_deal` (the helper called inside `_handle_new_callback` for `deal:book:{id}`). Asserts deal feedback persisted as `booked` AND route disappears from default `get_active_routes(user_id)` AND reappears with `include_snoozed=True`.
+  - `test_r7_digest_skips_user_after_route_snooze` — after snoozing the only route 30d, `send_daily_digest()` produces no message (notifier never called).
+  - `test_r7_legacy_book_callback_also_auto_snoozes` — ~30d snooze fired via the helper proves Condition C9 is met for legacy `book:` / `booked:` / `digest_booked:` callbacks (which all wire through the same helper at commands.py:940/954/893).
+- **Bug found and fixed during T19 wiring**: `deal_info["route_id"]` missing — see "Post-T7 fix" above. T19 was the first test to drive the full `orchestrator → telegram_notifier` path with real objects; that's how the Skip-route button regression was caught.
+- Tests: 420/420 passing (416 prior + 4 new). No regressions.
