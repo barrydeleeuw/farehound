@@ -82,10 +82,13 @@ def test_compare_airports_finds_savings():
         _make_secondary("BRU", 350, 35),  # net = 350*2 + train €35*2pax*2trips = 840, savings = 250
     ]
     result = compare_airports(primary, secondaries, passengers=2)
-    assert len(result) == 1
-    assert result[0]["airport_code"] == "BRU"
-    assert result[0]["savings"] == 250.0
-    assert result[0]["net_cost"] == 840.0
+    competitive = result["competitive"]
+    assert len(competitive) == 1
+    assert competitive[0]["airport_code"] == "BRU"
+    assert competitive[0]["savings"] == 250.0
+    assert competitive[0]["net_cost"] == 840.0
+    # evaluated includes the same secondary regardless of threshold
+    assert len(result["evaluated"]) == 1
 
 
 def test_compare_airports_excludes_below_threshold():
@@ -94,7 +97,11 @@ def test_compare_airports_excludes_below_threshold():
         _make_secondary("DUS", 480, 35),  # net = 480*2 + train €35*2*2 = 1100, savings = -10
     ]
     result = compare_airports(primary, secondaries, passengers=2)
-    assert len(result) == 0
+    assert len(result["competitive"]) == 0
+    # evaluated still records it with delta_vs_primary positive (more expensive)
+    assert len(result["evaluated"]) == 1
+    assert result["evaluated"][0]["airport_code"] == "DUS"
+    assert result["evaluated"][0]["delta_vs_primary"] == 10.0
 
 
 def test_compare_airports_sorted_by_savings():
@@ -105,9 +112,10 @@ def test_compare_airports_sorted_by_savings():
         _make_secondary("EIN", 380, 15, 50, "car", 50),  # net = 760 + 30 + 50 = 840, savings = 250
     ]
     result = compare_airports(primary, secondaries, passengers=2)
-    assert len(result) == 3
+    competitive = result["competitive"]
+    assert len(competitive) == 3
     # CGN and EIN tied at 250, BRU at 150
-    assert result[2]["airport_code"] == "BRU"
+    assert competitive[2]["airport_code"] == "BRU"
 
 
 def test_compare_airports_custom_threshold():
@@ -115,14 +123,18 @@ def test_compare_airports_custom_threshold():
     secondaries = [
         _make_secondary("BRU", 470, 35),  # net = 940 + 140 = 1080, savings = 10
     ]
-    assert len(compare_airports(primary, secondaries, passengers=2)) == 0
-    assert len(compare_airports(primary, secondaries, passengers=2, savings_threshold=5)) == 1
+    assert len(compare_airports(primary, secondaries, passengers=2)["competitive"]) == 0
+    assert (
+        len(compare_airports(primary, secondaries, passengers=2, savings_threshold=5)["competitive"])
+        == 1
+    )
 
 
 def test_compare_airports_empty_secondaries():
     primary = _make_primary()
     result = compare_airports(primary, [], passengers=2)
-    assert result == []
+    assert result["competitive"] == []
+    assert result["evaluated"] == []
 
 
 def test_compare_airports_with_parking():
@@ -130,10 +142,10 @@ def test_compare_airports_with_parking():
     secondaries = [
         _make_secondary("EIN", 350, 25, 50, "car", 50),  # net = 700 + 50 + 50 = 800, savings = 290
     ]
-    result = compare_airports(primary, secondaries, passengers=2)
-    assert len(result) == 1
-    assert result[0]["net_cost"] == 800.0
-    assert result[0]["transport_mode"] == "car"
+    competitive = compare_airports(primary, secondaries, passengers=2)["competitive"]
+    assert len(competitive) == 1
+    assert competitive[0]["net_cost"] == 800.0
+    assert competitive[0]["transport_mode"] == "car"
 
 
 def test_compare_airports_includes_airport_name():
@@ -141,8 +153,8 @@ def test_compare_airports_includes_airport_name():
     secondaries = [
         _make_secondary("CGN", 350, 35, transport_mode="train", time_min=180),
     ]
-    result = compare_airports(primary, secondaries, passengers=2)
-    assert result[0]["airport_name"] == "Cologne"
+    competitive = compare_airports(primary, secondaries, passengers=2)["competitive"]
+    assert competitive[0]["airport_name"] == "Cologne"
 
 
 # --- flight_duration_min passthrough ---
@@ -159,10 +171,10 @@ def test_compare_airports_passes_through_flight_duration():
         "transport_time_min": 120,
         "flight_duration_min": 680,
     }]
-    result = compare_airports(primary, secondaries, passengers=2)
-    assert len(result) == 1
-    assert result[0]["flight_duration_min"] == 680
-    assert result[0]["primary_flight_duration_min"] == 720
+    competitive = compare_airports(primary, secondaries, passengers=2)["competitive"]
+    assert len(competitive) == 1
+    assert competitive[0]["flight_duration_min"] == 680
+    assert competitive[0]["primary_flight_duration_min"] == 720
 
 
 def test_compare_airports_flight_duration_none():
@@ -171,6 +183,6 @@ def test_compare_airports_flight_duration_none():
     secondaries = [
         _make_secondary("BRU", 350, 35),
     ]
-    result = compare_airports(primary, secondaries, passengers=2)
-    assert result[0]["flight_duration_min"] is None
-    assert result[0]["primary_flight_duration_min"] is None
+    competitive = compare_airports(primary, secondaries, passengers=2)["competitive"]
+    assert competitive[0]["flight_duration_min"] is None
+    assert competitive[0]["primary_flight_duration_min"] is None

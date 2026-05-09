@@ -443,64 +443,82 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - `PriceSnapshot.baggage_estimate: dict | None = None` (parse JSON in `from_row`).
   - `Deal.reasoning_json: dict | None = None` (parse JSON in `from_row`).
 
-#### **T3 — serpapi_baggage_parsing**
+#### `[ ]` T3 — serpapi_baggage_parsing
 - **Owner:** builder
-- **Files:** `src/apis/serpapi.py` (parse), `src/utils/baggage.py` (NEW), `src/orchestrator.py` (wire snapshot creation)
 - **Depends on:** T2
-- **Blocks:** T7
-- **Acceptance:** `FlightSearchResult` exposes `parse_baggage(airline_code, leg_distance_km, baggage_needs) → dict`; orchestrator stores result on `PriceSnapshot.baggage_estimate`; new `src/utils/baggage.py` module with FALLBACK table + `estimate()` function (per §8.3). Unit test in T14 (Tester) green.
-- **Notes:** Defensive parsing only — no exceptions on missing data. See Condition C4.
-- **Status:** _pending_
+- **Blocks:** T7, T15
+- **Files:**
+  - `src/apis/serpapi.py:184` (extend `FlightSearchResult` construction in `search_flights`)
+  - `src/utils/baggage.py` (NEW; FALLBACK table + `estimate()` per §8.3)
+  - `src/orchestrator.py:547` and `:733` (snapshot creation sites — populate `baggage_estimate`)
+- **Acceptance (one-line):** Every new `PriceSnapshot` carries a `baggage_estimate` dict with `source` ∈ `{serpapi, fallback_table, unknown}`; parser never raises (Condition C4).
+- **Detail:**
+  - Add module-level helper `parse_baggage_extensions(booking_options, best_flights, other_flights) -> dict | None` in `serpapi.py` per §8.2.
+  - Create `src/utils/baggage.py` with `FALLBACK` table + `estimate(airline_code, leg_distance_km, baggage_needs) -> dict` per §8.3.
+  - In orchestrator snapshot-creation sites, derive `airline_code` from `best_flight.flights[0].airline`, `leg_distance_km` proxy from `duration × 800` (default 2000 km if unavailable), look up user's `baggage_needs` (default `"one_checked"`).
+  - Cached SerpAPI fixtures lack baggage data (Finding #1) — Tester writes synthetic fixtures in T15.
 
-#### **T4 — cost_breakdown_helper**
+#### `[x]` T4 — cost_breakdown_helper
 - **Owner:** builder
-- **Files:** `src/alerts/telegram.py` (extract helper, replace inline duplicates)
-- **Depends on:** T1 (optional — DB not actually touched, but order helps)
+- **Depends on:** —
 - **Blocks:** T7
-- **Acceptance:** new module-level `_format_cost_breakdown(price, transport, parking, mode, baggage, passengers) -> tuple[str, float]` returns (display_string, total_eur). All 4 inline cost-breakdown sites in `telegram.py` replaced. Unit test (T14) green. Output identical to current behaviour for zero-baggage case.
-- **Notes:** Land THIS before T7 to avoid 4 inconsistent variants (Condition C3).
-- **Status:** _done_ [x]
+- **Files:** `src/alerts/telegram.py:195–206` (deal alert inline), `:385–396` (digest inline). Helper sits at module level near `_format_flight_line` (`:93`).
+- **Acceptance (one-line):** Single `_format_cost_breakdown(price, transport, parking, mode, baggage, passengers) -> tuple[str, float]` consumed by all 4 message types; zero-baggage output identical to current behaviour.
+- **Detail:**
+  - Replace inline duplicates at `:195–206` and `:385–396`.
+  - Error-fare and follow-up paths get the helper added in T7 (they have no breakdown today).
+  - Land BEFORE T7 (Condition C3) so Builder doesn't fork 4 inconsistent variants.
 
-#### **T5 — nearby_airports_two_lists**
+#### `[x]` T5 — nearby_airports_two_lists
 - **Owner:** builder
-- **Files:** `src/analysis/nearby_airports.py`
-- **Depends on:** none
+- **Depends on:** —
 - **Blocks:** T6
-- **Acceptance:** `compare_airports(...) -> dict` returns `{"competitive": [...], "evaluated": [...]}` per §9.1. All callers in orchestrator updated. Existing nearby tests still green.
-- **Status:** _pending_
+- **Files:** `src/analysis/nearby_airports.py:38` (`compare_airports`)
+- **Acceptance (one-line):** `compare_airports(...) -> dict` returns `{"competitive": [...], "evaluated": [...]}` per §9.1; existing nearby tests still green.
+- **Detail:**
+  - Today returns `list[dict]` filtered by `savings_threshold` (`:71`). Change to dict shape.
+  - `evaluated` includes ALL secondaries that were costed (incl. negative-savings) with new `delta_vs_primary` field; `competitive` is the existing >€75 list.
+  - Keep `savings_threshold` parameter — used to split the two lists, not to hide entries.
+  - Existing `tests/test_nearby_airports.py` updated in this task.
 
-#### **T6 — transparency_data_assembly**
+#### `[x]` T6 — transparency_data_assembly
 - **Owner:** builder
-- **Files:** `src/orchestrator.py` (`_poll_secondary_airports`, `_poll_secondary_airports_for_snapshot`, `_send_deferred_alert`, `send_daily_digest`)
 - **Depends on:** T5
 - **Blocks:** T7
-- **Acceptance:** `_latest_nearby_comparison[route_id]` is now a dict with `competitive` and `evaluated` keys. **Never `pop()` on empty evaluated.** `deal_info` and digest summaries pass both lists to telegram.py. Existing alert-flow tests still pass.
-- **Notes:** Condition C6.
-- **Status:** _pending_
+- **Files:** `src/orchestrator.py:799–820` (in `_poll_secondary_airports`), `:917–936` (in `_poll_secondary_airports_for_snapshot`), `:1136` (`deal_info` assembly), `:1261–1264` (digest summary nearby block); type annotation at `:122`
+- **Acceptance (one-line):** `_latest_nearby_comparison[route_id]` becomes `{"competitive": [...], "evaluated": [...]}`; both lists flow into `deal_info` and digest summaries; never `pop()` on empty `evaluated` (Condition C6).
+- **Detail:**
+  - `_latest_nearby_comparison: dict[str, dict]`.
+  - At both secondary-poll sites, store the dict returned by T5's new `compare_airports` shape — keep the entry even when `competitive` is empty so the renderer can show "we checked but found nothing competitive".
+  - In `_send_deferred_alert`, pass `nearby_comparison=self._latest_nearby_comparison.get(route.route_id, {"competitive": [], "evaluated": []})` to `deal_info`.
+  - In `send_daily_digest`, populate `summary["nearby"]` with the same dict shape (rename existing `"nearby_prices"` → `"nearby"` so telegram.py reads consistently).
 
-#### **T7 — telegram_4_messages_unified**
+#### `[ ]` T7 — telegram_4_messages_unified
 - **Owner:** builder
-- **Files:** `src/alerts/telegram.py`
 - **Depends on:** T3, T4, T6, T12
-- **Blocks:** T8
-- **Acceptance:**
-  - `send_deal_alert`, `send_error_fare_alert`, `send_follow_up`, `send_daily_digest` all call `_format_cost_breakdown(...)` including `baggage` arg.
-  - 3 reasoning bullets rendered (from new structured `reasoning_json` if present, else fall back to `reasoning` string).
-  - Transparency footer rendered per §9.2.
-  - Date-transparency line per §9.3.
-  - "📊 Details" placeholder button (sub-item 7) added to deal alert keyboard, pointing to `_google_flights_url(deal_info)`.
-- **Status:** _pending_
+- **Blocks:** T8, T14
+- **Files:** `src/alerts/telegram.py:165` (`send_deal_alert`), `:288` (`send_error_fare_alert`), `:329` (`send_follow_up`), `:349` (`send_daily_digest`)
+- **Acceptance (one-line):** All 4 message types render: cost-breakdown helper output (incl. baggage line when total>0), 3-bullet structured reasoning, "we checked X" footer per §9.2, date-transparency line per §9.3, "📊 Details" button.
+- **Detail:**
+  - Wire `_format_cost_breakdown` (T4) into all 4 paths — error-fare and follow-up get a breakdown for the first time.
+  - Render `reasoning_json` (T12) as 3 bullet lines (`✓ ...`); fall back to single-line `_reasoning_` only when `reasoning_json` is missing (legacy deal records).
+  - Implement footer cases from §9.2 using the `competitive` / `evaluated` lists from T6.
+  - Add date-transparency line under the deal alert when `price_history` is present (§9.3).
+  - Add "📊 Details" button as second keyboard row, URL = `_google_flights_url(deal_info)` (Condition C10 — placeholder only).
+  - Keyboard row 1 modifications (3-button row) come in T8.
 
-#### **T8 — watching_skip_buttons**
+#### `[ ]` T8 — watching_skip_buttons
 - **Owner:** builder
-- **Files:** `src/alerts/telegram.py` (3-button row), `src/bot/commands.py` (handlers)
 - **Depends on:** T7, T13
-- **Blocks:** none
-- **Acceptance:**
-  - Deal alert keyboard has 3-button row: `[Book Now ✈️ (URL)] [Watching 👀 (callback deal:watch:{id})] [Skip route 🔕 (callback route:snooze:7:{route_id})]`. "📊 Details" sits on row 2.
-  - Daily digest per-route keyboard has the same 3-button row plus "📊 Details" row 2.
-  - `route:snooze:7` callback snoozes the route 7d AND bulk-dismisses pending deals on that route.
-- **Status:** _pending_
+- **Blocks:** T19
+- **Files:**
+  - `src/alerts/telegram.py:276–284` (deal alert keyboard), `:471–477` (digest keyboard)
+  - `src/bot/commands.py:674` (callback dispatcher — extend the `deal:*` / `route:*` branches added by T13)
+- **Acceptance (one-line):** Three-button row (Book / Watching / Skip route) on deal alerts AND digest; `route:snooze:7:{route_id}` snoozes route 7d AND bulk-dismisses pending deals.
+- **Detail:**
+  - Deal alert keyboard row 1: `[Book Now ✈️ (URL)] [Watching 👀 (callback deal:watch:{deal_id})] [Skip route 🔕 (callback route:snooze:7:{route_id})]`. Row 2: `[📊 Details (URL)]` (added by T7).
+  - Digest per-route keyboard mirrors row 1 plus row 2 with Details.
+  - The `route:snooze:7:*` handler MUST: (a) call `db.snooze_route(route_id, 7)`, (b) call `db.bulk_dismiss_route_deals(route_id, user_id)` so pending deals on that route disappear from the next digest.
 
 #### **T9 — snooze_infra**
 - **Owner:** builder

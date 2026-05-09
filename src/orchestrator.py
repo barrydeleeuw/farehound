@@ -119,7 +119,7 @@ class Orchestrator:
         self._first_run = True
         self._last_full_rescan: datetime | None = None
         self._secondary_poll_counter: int = 0
-        self._latest_nearby_comparison: dict[str, list[dict]] = {}
+        self._latest_nearby_comparison: dict[str, dict] = {}
         self._pending_alerts: dict[str, dict] = {}
         self._cycle_best_prices: dict[str, float] = {}
 
@@ -795,19 +795,22 @@ class Orchestrator:
                         exc_info=True,
                     )
 
-            # Store comparison for use in alerts (attached to route context)
+            # Store comparison for use in alerts (attached to route context).
+            # Always preserve the entry when secondaries were polled, even if none competitive
+            # (transparency: "we checked X, your airport is best").
             if secondary_results:
                 comparison = compare_airports(primary_result, secondary_results, route.passengers)
-                if comparison:
-                    self._latest_nearby_comparison[route.route_id] = comparison
+                self._latest_nearby_comparison[route.route_id] = comparison
+                competitive = comparison["competitive"]
+                if competitive:
                     logger.info(
                         "Route %s: best nearby saving €%.0f via %s",
                         route.route_id,
-                        comparison[0]["savings"],
-                        comparison[0]["airport_name"],
+                        competitive[0]["savings"],
+                        competitive[0]["airport_name"],
                     )
                     today = datetime.now(UTC).strftime("%Y-%m-%d")
-                    for alt in comparison:
+                    for alt in competitive:
                         try:
                             await loop.run_in_executor(
                                 None, self.db.log_saving,
@@ -916,11 +919,14 @@ class Orchestrator:
 
         if secondary_results:
             comparison = compare_airports(primary_result, secondary_results, route.passengers)
-            if comparison:
-                self._latest_nearby_comparison[route.route_id] = comparison
+            # Always store the comparison, even when no airport is competitive — the renderer needs
+            # `evaluated` to show "we checked X airports, yours is best".
+            self._latest_nearby_comparison[route.route_id] = comparison
+            competitive = comparison["competitive"]
+            if competitive:
                 user_id = user["user_id"]
                 today = datetime.now(UTC).strftime("%Y-%m-%d")
-                for alt in comparison:
+                for alt in competitive:
                     try:
                         await loop.run_in_executor(
                             None, self.db.log_saving,
@@ -930,9 +936,8 @@ class Orchestrator:
                         )
                     except Exception:
                         logger.debug("Failed to log saving for %s", alt["airport_code"])
-            else:
-                self._latest_nearby_comparison.pop(route.route_id, None)
         else:
+            # No secondary airports queried at all — drop the entry so the renderer skips the footer.
             self._latest_nearby_comparison.pop(route.route_id, None)
 
     async def _check_alerts(
@@ -983,7 +988,7 @@ class Orchestrator:
                 home_airport=user.get("home_airport") or self.config.traveller.home_airport,
                 traveller_preferences=user.get("preferences") or self.config.traveller.preferences or None,
                 past_feedback=feedback or None,
-                nearby_comparison=self._latest_nearby_comparison.get(route.route_id),
+                nearby_comparison=(self._latest_nearby_comparison.get(route.route_id) or {}).get("competitive"),
             )
             logger.info(
                 "Route %s scored: %.2f (%s) — %s",
@@ -1133,7 +1138,8 @@ class Orchestrator:
             "score": score_result.score,
             "urgency": score_result.urgency,
             "reasoning": inflection_msg or score_result.reasoning,
-            "nearby_comparison": self._latest_nearby_comparison.get(route.route_id, []),
+            "nearby_comparison": (self._latest_nearby_comparison.get(route.route_id) or {}).get("competitive", []),
+            "nearby_evaluated": (self._latest_nearby_comparison.get(route.route_id) or {}).get("evaluated", []),
             "google_flights_url": gf_url,
             "primary_transport_cost": primary_t_cost,
             "primary_parking_cost": primary_parking or 0,
@@ -1257,10 +1263,15 @@ class Orchestrator:
                 if watch_deals:
                     summary["watch_deals"] = len(watch_deals)
 
-                # Add nearby airport comparison for digest
-                nearby = self._latest_nearby_comparison.get(route.route_id)
-                if nearby:
-                    summary["nearby_prices"] = nearby
+                # Add nearby airport comparison for digest. Pass both lists so the
+                # renderer can show competitive alts AND a "we checked X" transparency footer.
+                nearby = self._latest_nearby_comparison.get(route.route_id) or {}
+                competitive = nearby.get("competitive") or []
+                evaluated = nearby.get("evaluated") or []
+                if competitive:
+                    summary["nearby_prices"] = competitive
+                if evaluated:
+                    summary["nearby_evaluated"] = evaluated
 
                 summaries.append(summary)
 

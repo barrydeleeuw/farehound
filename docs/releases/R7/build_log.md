@@ -20,9 +20,25 @@
 - Output identical to current behaviour when `baggage_estimate` absent (existing snapshots have no baggage). Matches `calculate_net_cost` formula in `nearby_airports.py:35` for the alt path.
 - Tests: full suite 311/311 passing; T14 (Tester) will assert per-message-type baggage rendering.
 
----
+## T5 nearby_airports_two_lists
+- `compare_airports(...)` in `src/analysis/nearby_airports.py:38` now returns `{"competitive": [...], "evaluated": [...]}` per §9.1.
+- `evaluated` always includes every secondary that was costed (regardless of threshold) with new `delta_vs_primary` (signed: positive = more expensive).
+- `competitive` keeps the existing >€75 filter and is sorted desc.
+- Updated `src/bot/commands.py:1754` (immediate price check) caller to use `["competitive"]`.
+- Updated all assertions in `tests/test_nearby_airports.py` to use `result["competitive"]` / `result["evaluated"]`; added negative-delta assertion in `test_compare_airports_excludes_below_threshold`.
+- Tests: 17/17 nearby + full suite 325/325 passing.
 
-# Tester section
+## T6 transparency_data_assembly
+- `_latest_nearby_comparison: dict[str, dict]` (was `dict[str, list]`).
+- Both writer call sites updated (`_poll_secondary_airports` ~ orchestrator:799, `_poll_secondary_airports_for_snapshot` ~ orchestrator:917).
+- **Per Condition C6, never `pop()` on empty `evaluated`.** Entry is preserved when secondaries were polled even if `competitive` is empty — so renderer can show "we checked X, yours is best". Only popped when no secondaries were polled at all.
+- Savings logging now iterates `comparison["competitive"]` only (correct behaviour — non-competitive alts shouldn't generate savings rows).
+- Readers updated:
+  - Scorer call (`orchestrator:986`) passes `["competitive"]` (existing list-shape API).
+  - `deal_info` (`orchestrator:1136`) populates both `nearby_comparison` (competitive list, back-compat for telegram.py) AND new `nearby_evaluated` (full list, for T7's transparency footer).
+  - Digest summary (`orchestrator:1261`) populates `nearby_prices` (competitive) and `nearby_evaluated` similarly.
+- Tests: full suite 325/325 passing.
+
 
 ## Pre-staging
 - Created `tests/fixtures/serpapi_with_baggage/` with 3 synthetic fixtures matching SerpAPI response shape per release_plan.md §8:

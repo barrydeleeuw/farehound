@@ -1753,7 +1753,7 @@ class TripBot:
 
                 alternatives = compare_airports(
                     primary_for_compare, secondary_results, route.passengers,
-                )
+                )["competitive"]
 
                 if alternatives:
                     lines.append("")

@@ -40,14 +40,19 @@ def compare_airports(
     secondary_results: list[dict],
     passengers: int,
     savings_threshold: float = 75.0,
-) -> list[dict]:
+) -> dict:
     """Compare secondary airports against primary.
 
     primary_result: {airport_code, fare_pp, transport_cost, parking_cost, transport_mode, transport_time_min}
     secondary_results: list of same shape
 
-    Returns list sorted by savings (best first), only including airports with > threshold net savings.
-    Each entry: {airport_code, airport_name, fare_pp, net_cost, savings, transport_mode, transport_cost, transport_time_min}
+    Returns:
+        {
+            "competitive": [...],  # secondaries with savings > threshold, sorted desc
+            "evaluated":   [...],  # ALL secondaries with computed totals + delta_vs_primary
+        }
+    `evaluated` always contains every secondary that was queried, even if savings are negative or
+    below threshold — so the renderer can show "we checked X airports, yours is best".
     """
     primary_net = calculate_net_cost(
         fare_pp=primary_result["fare_pp"],
@@ -58,7 +63,8 @@ def compare_airports(
     )
     primary_flight_duration = primary_result.get("flight_duration_min")
 
-    comparisons = []
+    competitive = []
+    evaluated = []
     for sec in secondary_results:
         sec_net = calculate_net_cost(
             fare_pp=sec["fare_pp"],
@@ -68,31 +74,35 @@ def compare_airports(
             transport_mode=sec.get("transport_mode", ""),
         )
         savings = primary_net - sec_net
+        entry = {
+            "airport_code": sec["airport_code"],
+            "airport_name": airport_name(sec["airport_code"]),
+            "fare_pp": sec["fare_pp"],
+            "net_cost": sec_net,
+            "savings": savings,
+            "delta_vs_primary": sec_net - primary_net,
+            "transport_mode": sec.get("transport_mode", ""),
+            "transport_cost": sec["transport_cost"],
+            "parking_cost": sec.get("parking_cost") or 0,
+            "transport_time_min": sec.get("transport_time_min", 0),
+            "flight_duration_min": sec.get("flight_duration_min"),
+            "primary_flight_duration_min": primary_flight_duration,
+        }
+        evaluated.append(entry)
         if savings > savings_threshold:
-            comparisons.append({
-                "airport_code": sec["airport_code"],
-                "airport_name": airport_name(sec["airport_code"]),
-                "fare_pp": sec["fare_pp"],
-                "net_cost": sec_net,
-                "savings": savings,
-                "transport_mode": sec.get("transport_mode", ""),
-                "transport_cost": sec["transport_cost"],
-                "parking_cost": sec.get("parking_cost") or 0,
-                "transport_time_min": sec.get("transport_time_min", 0),
-                "flight_duration_min": sec.get("flight_duration_min"),
-                "primary_flight_duration_min": primary_flight_duration,
-            })
+            competitive.append(entry)
 
-    comparisons.sort(key=lambda x: x["savings"], reverse=True)
+    competitive.sort(key=lambda x: x["savings"], reverse=True)
+    evaluated.sort(key=lambda x: x["savings"], reverse=True)
 
-    best_sec_net = comparisons[0]["net_cost"] if comparisons else None
-    best_savings = comparisons[0]["savings"] if comparisons else 0
+    best_sec_net = competitive[0]["net_cost"] if competitive else None
+    best_savings = competitive[0]["savings"] if competitive else 0
     logger.debug(
         "Airport comparison: primary_net=€%.0f, best_secondary_net=€%s, savings=€%.0f, threshold_met=%s",
         primary_net,
         f"{best_sec_net:.0f}" if best_sec_net else "N/A",
         best_savings,
-        bool(comparisons),
+        bool(competitive),
     )
 
-    return comparisons
+    return {"competitive": competitive, "evaluated": evaluated}
