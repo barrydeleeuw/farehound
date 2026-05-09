@@ -589,7 +589,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
 
 ### Tester tasks
 
-#### `[ ]` T14 — tests_telegram (4 message types)
+#### `[x]` T14 — tests_telegram (4 message types)
 - **Owner:** tester
 - **Depends on (Builder):** T7
 - **Blocks:** —

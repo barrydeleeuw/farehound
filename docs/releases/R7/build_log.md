@@ -206,3 +206,17 @@
 - `/status` slash command wired into the message dispatcher.
 - Smoke-tested: 2 active routes, 1 snoozed → stats correctly show 1 monitoring + 1 snoozed.
 - Tests: full suite 382/382 passing.
+
+## T14 tests: telegram unified — all 4 message types
+- Added 34 new tests to `tests/test_telegram.py` organized into 5 helper-unit classes + per-message-type integration tests:
+  - `TestRenderReasoningBullets` (5 tests): structured 3-field dict → 3 ✓-prefixed lines; legacy newline-separated string passes through; legacy single-line wrapped in italics; None/empty → empty list; structured dict takes precedence over legacy fallback.
+  - `TestRenderTransparencyFooter` (5 tests): all 3 §9.2 cases — competitive-only → no footer; both empty → no footer; all-saved (none competitive) → "Checked N — your airport is best by €X–€Y" with singular/plural; mixed → "…also checked X (€Y+ more, skipped)".
+  - `TestRenderDateTransparency` (3 tests): "Polled N dates — Mon DD is cheapest" with both tuple and dict formats; empty/None → None.
+  - `TestBaggageTotal` (4 tests): source='unknown' → 0; source='serpapi' sums both directions × passengers; None → 0; passengers=0 treated as 1.
+  - `TestFormatCostBreakdownBaggage` (3 tests): non-zero baggage adds "€X bags" line and updates total; zero or 'unknown' source suppresses the line per Condition C5.
+  - 7 tests on `send_deal_alert`: 3-bullet reasoning rendering, baggage line on/off, 3-button row + Details (row 2), all-saved / mixed transparency footer, legacy reasoning string fallback.
+  - 1 test on `send_error_fare_alert`: cost breakdown with baggage + 3-bullet reasoning bullets present.
+  - 2 tests on `send_follow_up`: cost breakdown with baggage; new `deal:book:` / `deal:watch:` prefixes (Condition C2 forward-compat).
+  - 4 tests on `send_daily_digest`: 3-button row + Details row per route; concrete header override beats generic "haven't decided" text; baggage line in route summary; transparency footer on digest.
+- All 11 pre-existing telegram tests still pass (Builder hardened them earlier when T7 reshaped the keyboard).
+- Tests: 416/416 passing (382 prior + 34 new). No regressions.
