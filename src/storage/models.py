@@ -61,6 +61,7 @@ class Route:
     preferred_departure_days: list[int] | None = None
     preferred_return_days: list[int] | None = None
     user_id: str | None = None
+    snoozed_until: datetime | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +83,7 @@ class Route:
             "preferred_departure_days": self.preferred_departure_days,
             "preferred_return_days": self.preferred_return_days,
             "user_id": self.user_id,
+            "snoozed_until": self.snoozed_until,
         }
 
     @classmethod
@@ -115,6 +117,7 @@ class Route:
             preferred_departure_days=pdd,
             preferred_return_days=prd,
             user_id=d.get("user_id"),
+            snoozed_until=_parse_datetime(d.get("snoozed_until")),
         )
 
 
@@ -177,6 +180,7 @@ class PriceSnapshot:
     search_params: dict | None = None
     created_at: datetime | None = None
     user_id: str | None = None
+    baggage_estimate: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -199,6 +203,7 @@ class PriceSnapshot:
             "search_params": self.search_params,
             "created_at": self.created_at,
             "user_id": self.user_id,
+            "baggage_estimate": self.baggage_estimate,
         }
 
     @classmethod
@@ -224,6 +229,7 @@ class PriceSnapshot:
             search_params=_parse_json(d.get("search_params")),
             created_at=_parse_datetime(d.get("created_at")),
             user_id=d.get("user_id"),
+            baggage_estimate=_parse_json(d.get("baggage_estimate")),
         )
 
 
@@ -242,6 +248,7 @@ class Deal:
     feedback: str | None = None
     created_at: datetime | None = None
     user_id: str | None = None
+    reasoning_json: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -258,6 +265,7 @@ class Deal:
             "feedback": self.feedback,
             "created_at": self.created_at,
             "user_id": self.user_id,
+            "reasoning_json": self.reasoning_json,
         }
 
     @classmethod
@@ -277,6 +285,7 @@ class Deal:
             feedback=d.get("feedback"),
             created_at=_parse_datetime(d.get("created_at")),
             user_id=d.get("user_id"),
+            reasoning_json=_parse_json(d.get("reasoning_json")),
         )
 
 

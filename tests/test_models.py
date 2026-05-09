@@ -58,7 +58,7 @@ def test_route_to_dict_roundtrip():
         "active", "created_at",
         "trip_duration_type", "trip_duration_days",
         "preferred_departure_days", "preferred_return_days",
-        "user_id",
+        "user_id", "snoozed_until",
     }
 
 

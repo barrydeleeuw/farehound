@@ -431,7 +431,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
 - **Depends on:** T1
 - **Blocks:** T3, T9
 - **Acceptance:** `Route.snoozed_until: datetime | None = None`; `PriceSnapshot.baggage_estimate: dict | None = None`; `Deal.reasoning_json: dict | None = None`. All `from_row` methods deserialize the new columns (parse JSON for baggage_estimate / reasoning_json). All existing tests pass.
-- **Status:** _pending_
+- **Status:** _done_ [x]
 
 #### **T3 — serpapi_baggage_parsing**
 - **Owner:** builder
