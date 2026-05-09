@@ -693,10 +693,7 @@ class TripBot:
             if not row:
                 return
             route_id = row[0]
-            snooze = getattr(self._db, "snooze_route", None)
-            if snooze is None:
-                return
-            snooze(route_id, days)
+            self._db.snooze_route(route_id, days)
         except Exception:
             logger.exception("Auto-snooze failed for deal %s", deal_id)
 
@@ -752,17 +749,13 @@ class TripBot:
                 if len(sub) != 2:
                     return False
                 try:
-                    days = int(sub[0])
+                    days = max(1, min(int(sub[0]), 365))
                 except ValueError:
                     return False
                 route_id = sub[1]
-                snooze = getattr(self._db, "snooze_route", None)
-                if snooze is not None:
-                    await loop.run_in_executor(None, snooze, route_id, days)
-                # Bulk-dismiss any pending deals for this route+user too (T8 behaviour
-                # spec: "Skip route" suppresses pending alerts in addition to snoozing).
+                await loop.run_in_executor(None, self._db.snooze_route, route_id, days)
                 user = self._get_user(chat_id) if chat_id else None
-                if user and hasattr(self._db, "bulk_dismiss_route_deals"):
+                if user:
                     try:
                         await loop.run_in_executor(
                             None, self._db.bulk_dismiss_route_deals, route_id, user["user_id"],
@@ -775,9 +768,7 @@ class TripBot:
                 return True
             if action == "unsnooze":
                 route_id = payload
-                unsnooze = getattr(self._db, "unsnooze_route", None)
-                if unsnooze is not None:
-                    await loop.run_in_executor(None, unsnooze, route_id)
+                await loop.run_in_executor(None, self._db.unsnooze_route, route_id)
                 await self._answer_callback(client, callback_id, "Unsnoozed")
                 if chat_id and message_id:
                     await self._edit_remove_buttons(client, chat_id, message_id, message, "🔔 Resumed")
@@ -788,10 +779,9 @@ class TripBot:
                 if len(sub) != 2:
                     return False
                 route_id, target_user_id = sub
-                if hasattr(self._db, "bulk_dismiss_route_deals"):
-                    await loop.run_in_executor(
-                        None, self._db.bulk_dismiss_route_deals, route_id, target_user_id,
-                    )
+                await loop.run_in_executor(
+                    None, self._db.bulk_dismiss_route_deals, route_id, target_user_id,
+                )
                 await self._answer_callback(client, callback_id, "Dismissed")
                 if chat_id and message_id:
                     await self._edit_remove_buttons(client, chat_id, message_id, message, "👋 Dismissed")
@@ -1493,9 +1483,8 @@ class TripBot:
             return
         parts = args.split()
         days = 7
-        # Last token is days if it's an integer.
         if parts and parts[-1].isdigit():
-            days = int(parts[-1])
+            days = max(1, min(int(parts[-1]), 365))
             query = " ".join(parts[:-1])
         else:
             query = " ".join(parts)
