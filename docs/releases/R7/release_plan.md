@@ -628,7 +628,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - For each new column: insert / read / update / read pattern.
   - Helper-based snooze round-trip deferred to T17 (`get_active_routes` filtering); column-level round-trip via raw SQL is sufficient here.
 
-#### `[ ]` T17 — tests_orchestrator (digest skip + snooze + auto-snooze)
+#### `[x]` T17 — tests_orchestrator (digest skip + snooze + auto-snooze)
 - **Owner:** tester
 - **Depends on (Builder):** T9, T10
 - **Blocks:** T19

@@ -108,3 +108,18 @@
   - JSON round-trip for `price_snapshots.baggage_estimate` and `deals.reasoning_json`.
   - NULL-tolerant assertion for pre-R7 rows.
 - Tests: 325/325 passing (311 baseline + 14 new). No regressions.
+
+## T17 orchestrator: snooze + digest fingerprint + auto-snooze
+- Added 15 new tests to `tests/test_orchestrator.py`, organized into 3 classes + 4 standalone async tests, using a real `Database` fixture (`real_db`) for end-to-end behaviour:
+  - `TestSnoozeFiltering` (4 tests): `get_active_routes` excludes snoozed routes by default; `include_snoozed=True` overrides; `unsnooze_route` re-includes; expired snooze (past timestamp) treated as active.
+  - `TestAutoSnoozeOnBooked` (3 tests): `TripBot._auto_snooze_route_for_deal` sets `snoozed_until` ~30d in future; route disappears from default `get_active_routes`; silent on missing deal_id.
+  - `TestDigestFingerprintHelpers` (4 tests): `_compute_digest_fingerprint` is order-independent (sorted by route_id), changes when price changes, rounds to whole euro (sub-€1 movement is invisible); `_format_digest_header` produces concrete "N routes, M prices moved" line plus per-route "dropped €X / new low / unchanged" bullets.
+  - 4 standalone async tests covering full `send_daily_digest` flow:
+    - Skip predicate fires when fingerprint matches AND <3d AND price moved <€10 AND no new deals → notifier NOT called, `digest_skip_count_7d` incremented.
+    - Digest sent when fingerprint changes (€50 price move) → notifier called once, new fingerprint persisted.
+    - Digest sent regardless of fingerprint when last digest >3d ago.
+    - Snoozed route excluded from per-user digest summary entirely.
+- Test approach: real Database, real Orchestrator (with `_make_orchestrator_with_mocks`'s mock-DB swapped for the real one), AsyncMock telegram_notifier. Mocks only the HTTP boundary, not the helpers under test.
+- Notes: caught two NameErrors in Builder's in-flight T12 working-tree (`reasoning_dict`, `deals_since_last_digest`) — flagged via DM, fixed before commit.
+- Tests: 340/340 passing (325 prior + 15 new). No regressions.
+- Code landed in commit b663d67 (bundled with Builder's T12 — ack from Builder; future Tester commits will be standalone).
