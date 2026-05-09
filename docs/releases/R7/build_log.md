@@ -67,6 +67,16 @@
 - Smoke test: snooze→get_active→empty; unsnooze→back to one.
 - Tests: full suite 325/325 passing; Tester writes T17 against this.
 
+## T10 digest_fingerprint_gating
+- Per-user fingerprint (sha256 of sorted route_id→rounded-price pairs, truncated to 16 chars) computed in `Orchestrator._compute_digest_fingerprint` (§11.1).
+- Skip predicate (§11.2 — all 4 must hold): same fingerprint AND no new deals AND biggest price move ≤ €10 AND <3 days since last digest.
+- When skipping: increment `users.digest_skip_count_7d`, log `Digest skipped for user {} — fingerprint unchanged, last digest {}d ago`. Do NOT touch `last_digest_sent_at` (so a real change tomorrow re-evaluates).
+- When NOT skipping: `_format_digest_header` produces the concrete header (§11.4) with one line per route ("dropped €40", "new low (€620/pp)", or "unchanged"). Stashed in `summaries[0]["digest_header_override"]`.
+- `telegram.py:send_daily_digest` reads the override; falls back to legacy "FareHound Daily — N route(s)" when absent.
+- Persists `users.last_digest_fingerprint` + `last_digest_sent_at` after successful send. Extended `db.update_user` allowlist with `baggage_needs`, `last_digest_fingerprint`, `last_digest_sent_at`, `digest_skip_count_7d`.
+- Per-route delta uses `db.get_recent_snapshots(route_id, limit=2)` (no schema change, per Finding #7).
+- Tests: full suite 325/325 passing; Tester's T17 (orchestrator digest skip / snooze / auto-snooze) is now fully unblocked — depends on T9+T10 both done.
+
 
 ## Pre-staging
 - Created `tests/fixtures/serpapi_with_baggage/` with 3 synthetic fixtures matching SerpAPI response shape per release_plan.md §8:

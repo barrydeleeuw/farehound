@@ -295,7 +295,12 @@ class Database:
         return result
 
     def update_user(self, user_id: str, **fields) -> bool:
-        allowed = {"name", "home_location", "home_airport", "preferences", "onboarded", "approved", "active"}
+        allowed = {
+            "name", "home_location", "home_airport", "preferences",
+            "onboarded", "approved", "active",
+            "baggage_needs",
+            "last_digest_fingerprint", "last_digest_sent_at", "digest_skip_count_7d",
+        }
         to_update = {k: v for k, v in fields.items() if k in allowed}
         if not to_update:
             return False

@@ -536,7 +536,7 @@ Compute deltas inline in `orchestrator.send_daily_digest` from `latest` snapshot
   - Wire auto-snooze: introduce `_apply_booked_feedback(deal_id)` helper in `commands.py` that does `update_deal_feedback + UPDATE deals SET booked=1 + db.snooze_route(route_id, 30)`. Every callback path that marks `feedback='booked'` calls this helper.
   - `/snooze {route_id_or_destination_substring} [days=7]` resolves via case-insensitive match against `origin/destination/route_id`; reply includes sibling-route note (§1.4 OQ#2).
 
-#### `[ ]` T10 — digest_fingerprint_gating
+#### `[x]` T10 — digest_fingerprint_gating
 - **Owner:** builder
 - **Depends on:** T1
 - **Blocks:** T11, T17

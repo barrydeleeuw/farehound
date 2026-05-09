@@ -387,12 +387,16 @@ class TelegramNotifier:
 
         from src.utils.airports import airport_name
 
-        # Send header
-        await self._send_message(
-            chat_id,
-            f"📊 *FareHound Daily* — {len(routes_summary)} route(s)\n"
-            "You haven't decided on these yet:",
-        )
+        # Concrete header (§11.4) when orchestrator computed deltas; otherwise fallback to generic.
+        override = routes_summary[0].get("digest_header_override")
+        if override:
+            await self._send_message(chat_id, override)
+        else:
+            await self._send_message(
+                chat_id,
+                f"📊 *FareHound Daily* — {len(routes_summary)} route(s)\n"
+                "You haven't decided on these yet:",
+            )
 
         # Send one message per route with full details and Search button
         for route_data in routes_summary:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import signal
@@ -1192,6 +1194,9 @@ class Orchestrator:
 
             since = datetime.now(UTC) - timedelta(days=1)
             summaries: list[dict] = []
+            # Per-route deltas for the concrete header (§11.4). Populated alongside `summaries`.
+            route_deltas: list[dict] = []
+            new_deal_count = 0
 
             for route in routes:
                 latest = await loop.run_in_executor(
@@ -1273,16 +1278,127 @@ class Orchestrator:
                 if evaluated:
                     summary["nearby_evaluated"] = evaluated
 
+                # Per-route delta for the concrete header (§11.4).
+                recent = await loop.run_in_executor(
+                    None, self.db.get_recent_snapshots, route.route_id, 2
+                )
+                prev_price = None
+                if len(recent) >= 2 and recent[1].lowest_price is not None:
+                    prev_price = float(recent[1].lowest_price)
+                delta = None
+                if prev_price is not None and history_now is not None:
+                    delta = history_now - prev_price
+                # New-deal flag = a recent_deals entry created since previous digest.
+                is_new = bool(recent_deals)
+                if is_new:
+                    new_deal_count += 1
+                route_deltas.append({
+                    "route_id": route.route_id,
+                    "origin": route.origin,
+                    "destination": route.destination,
+                    "lowest_price": history_now,
+                    "delta": delta,
+                    "is_new_deal": is_new,
+                })
+
                 summaries.append(summary)
 
             if not summaries:
                 continue
 
+            # Skip predicate (§11.2): all 4 conditions must hold for skip.
+            new_fingerprint = self._compute_digest_fingerprint(summaries)
+            last_fp = user.get("last_digest_fingerprint")
+            last_sent = self._parse_iso_dt(user.get("last_digest_sent_at"))
+            now_dt = datetime.now(UTC)
+            days_since = (now_dt - last_sent).total_seconds() / 86400 if last_sent else None
+            biggest_move = max(
+                (abs(d["delta"]) for d in route_deltas if d["delta"] is not None),
+                default=0.0,
+            )
+            should_skip = (
+                last_fp == new_fingerprint
+                and new_deal_count == 0
+                and biggest_move <= 10.0
+                and days_since is not None
+                and days_since < 3
+            )
+
+            if should_skip:
+                logger.info(
+                    "Digest skipped for user %s — fingerprint unchanged, last digest %.1fd ago",
+                    user_id, days_since,
+                )
+                # Bump skip counter; do NOT update last_digest_sent_at.
+                new_count = (user.get("digest_skip_count_7d") or 0) + 1
+                await loop.run_in_executor(
+                    None,
+                    lambda: self.db.update_user(user_id, digest_skip_count_7d=new_count),
+                )
+                continue
+
+            # Build concrete header replacing the generic "you haven't decided" text (§11.4).
+            moved_count = sum(1 for d in route_deltas if d["delta"] is not None and abs(d["delta"]) >= 10)
+            header = self._format_digest_header(route_deltas, moved_count)
+            if summaries:
+                summaries[0]["digest_header_override"] = header
+
             try:
                 if self.telegram_notifier:
                     await self.telegram_notifier.send_daily_digest(summaries, chat_id=chat_id)
+                # Persist fingerprint + sent_at; reset skip counter (or keep — simple counter, no rollover).
+                await loop.run_in_executor(
+                    None,
+                    lambda: self.db.update_user(
+                        user_id,
+                        last_digest_fingerprint=new_fingerprint,
+                        last_digest_sent_at=now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
             except Exception:
                 logger.exception("Failed to send daily digest to user %s", user_id)
+
+    @staticmethod
+    def _compute_digest_fingerprint(summaries: list[dict]) -> str:
+        """SHA256 of sorted {route_id: rounded_price} pairs, truncated to 16 chars (§11.1)."""
+        pairs = sorted(
+            ((s.get("route_id") or "", round(float(s.get("lowest_price") or 0))) for s in summaries),
+            key=lambda kv: kv[0],
+        )
+        payload = json.dumps(pairs, sort_keys=True).encode()
+        return hashlib.sha256(payload).hexdigest()[:16]
+
+    @staticmethod
+    def _parse_iso_dt(val) -> datetime | None:
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val if val.tzinfo else val.replace(tzinfo=UTC)
+        try:
+            dt = datetime.fromisoformat(str(val).replace(" ", "T"))
+        except (TypeError, ValueError):
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+    @staticmethod
+    def _format_digest_header(route_deltas: list[dict], moved_count: int) -> str:
+        """Render the concrete header per §11.4. Each route gets one line."""
+        from src.utils.airports import route_name as _rn
+        n = len(route_deltas)
+        lines = [f"📊 *FareHound Daily* — {n} route{'s' if n != 1 else ''}, {moved_count} price{'s' if moved_count != 1 else ''} moved"]
+        for d in route_deltas:
+            name = _rn(d.get("origin") or "?", d.get("destination") or "?")
+            price = d.get("lowest_price")
+            if d.get("is_new_deal") and price is not None:
+                lines.append(f"• {name} new low (€{price:,.0f}/pp)")
+            elif d.get("delta") is not None and abs(d["delta"]) >= 10 and price is not None:
+                if d["delta"] < 0:
+                    lines.append(f"• {name} dropped €{abs(d['delta']):,.0f} (€{price:,.0f}/pp)")
+                else:
+                    lines.append(f"• {name} rose €{abs(d['delta']):,.0f} (€{price:,.0f}/pp)")
+            else:
+                lines.append(f"• {name} unchanged")
+        return "\n".join(lines)
 
     async def on_community_deal(self, deal_info: dict) -> None:
         """Handle a deal detected from community channels (Layer 2).
