@@ -303,6 +303,16 @@
     renderSparkline();
     wireRouteActions();
     wireDealActions();
+
+    // Wide diagnostic: log every click on the page so we can verify clicks
+    // register at all in the Telegram WebApp. Removes after the bug is fixed.
+    document.addEventListener("click", (e) => {
+      const target = e.target;
+      const tag = target.tagName;
+      const cls = target.className || "";
+      const dataAttrs = Object.keys(target.dataset || {}).join(",") || "(none)";
+      alertOrToast(`CLICK: ${tag}.${cls} data=[${dataAttrs}]`);
+    }, { capture: true });
   }
 
   if (document.readyState === "loading") {
