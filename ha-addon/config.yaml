@@ -13,6 +13,10 @@ homeassistant_api: true
 ingress: false
 map:
   - data:rw
+ports:
+  "8081/tcp": 8081
+ports_description:
+  "8081/tcp": Mini Web App — bind via Cloudflare Tunnel for HTTPS
 options:
   serpapi_api_key: ""
   anthropic_api_key: ""

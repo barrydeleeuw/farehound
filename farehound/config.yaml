@@ -1,6 +1,6 @@
 name: FareHound
 description: Personal flight fare monitor with AI-powered deal scoring
-version: 0.10.1
+version: 0.10.2
 slug: farehound
 init: false
 url: https://github.com/barrydeleeuw/farehound
@@ -14,6 +14,10 @@ homeassistant_api: true
 ingress: false
 map:
   - data:rw
+ports:
+  "8081/tcp": 8081
+ports_description:
+  "8081/tcp": Mini Web App — bind via Cloudflare Tunnel for HTTPS
 options:
   serpapi_api_key: ""
   anthropic_api_key: ""
