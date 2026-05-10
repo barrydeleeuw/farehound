@@ -135,25 +135,30 @@ def _build_deterministic_reasoning(
     typical_low = snapshot.typical_low
     typical_high = snapshot.typical_high
 
-    # Bullet 1 — position vs. Google's typical range
+    # Bullet 1 — position vs. Google's typical range.
+    # IMPORTANT: Google's typical_price_range is fare-only (no baggage, no
+    # transport). The hero is TOTAL /pp. So we compare the FARE component of
+    # the user's price against Google's range, and label it "flight fare"
+    # explicitly so users don't try to reconcile it against the hero number.
     if typical_low is not None and typical_high is not None:
         low_pp = float(typical_low) / pax if pax > 1 else float(typical_low)
         high_pp = float(typical_high) / pax if pax > 1 else float(typical_high)
         range_str = f"€{low_pp:,.0f}–€{high_pp:,.0f}/pp"
+        fare_str = f"€{current_pp:,.0f}/pp"
         if current_pp < low_pp:
             bullets.append({
-                "headline": f"€{low_pp - current_pp:,.0f}/pp below Google's typical low.",
-                "detail": f"Their range for this route: {range_str}.",
+                "headline": f"Flight fare {fare_str} is €{low_pp - current_pp:,.0f}/pp below Google's typical low.",
+                "detail": f"Google's typical range for this route is {range_str} (ticket only — bags & transport not included).",
             })
         elif current_pp > high_pp:
             bullets.append({
-                "headline": f"€{current_pp - high_pp:,.0f}/pp above Google's typical high.",
-                "detail": f"Their range for this route: {range_str}. Above-range fares often drop — watch this one.",
+                "headline": f"Flight fare {fare_str} is €{current_pp - high_pp:,.0f}/pp above Google's typical high.",
+                "detail": f"Google's typical range is {range_str} (ticket only — bags & transport not included). Above-range fares often drop; watch this one.",
             })
         else:
             bullets.append({
-                "headline": "Within Google's typical range.",
-                "detail": f"{range_str}. Not unusually cheap or expensive yet.",
+                "headline": f"Flight fare {fare_str} is within Google's typical range.",
+                "detail": f"Google's typical range is {range_str} (ticket only — bags & transport not included). Not unusually cheap or expensive yet.",
             })
 
     # Bullet 2 — position in the user's own price history (deduped 90-day series)
@@ -207,11 +212,13 @@ def _build_deterministic_reasoning(
                     "detail": f"Was €{alerted_pp:,.0f}/pp. Now €{current_pp:,.0f}/pp.",
                 })
 
-    # Bullet 4 — nearby airports footprint (informational only when not available)
+    # Bullet 4 — nearby airports footprint (informational only when not available).
+    # The /settings page is read-only for the airport list — adding new airports
+    # goes via chat, so point users there instead of Preferences.
     if nearby_count == 0:
         bullets.append({
             "headline": "No nearby airports configured for this destination.",
-            "detail": "Add transport details in Preferences to compare door-to-door costs across airports.",
+            "detail": "Message me in chat to add airports near your destination — then FareHound can compare door-to-door cost across them.",
         })
 
     return bullets[:4]
