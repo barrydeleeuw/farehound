@@ -179,6 +179,31 @@ def _parse_directions_response(data: dict, canonical_mode: str) -> DirectionsRes
         raise SerpAPIError(f"SerpAPI directions parse failed: {e}") from e
 
 
+def pick_representative_flight(result: "FlightSearchResult") -> dict | None:
+    """Pick the most representative flight blob to attach to a snapshot.
+
+    Prefers `best_flights[0]` (SerpAPI's recommended) when present. If empty
+    (some routes return everything in `other_flights`), falls back to the
+    cheapest entry across `best_flights + other_flights`.
+
+    v0.11.8: previous code unconditionally took `best_flights[0]` and stored
+    None when empty — losing airline info needed for baggage estimation
+    (KLM/AF long-haul → checked bag included, vs Transavia → fees).
+    """
+    candidates = []
+    if result.best_flights:
+        candidates.extend(result.best_flights)
+    if result.other_flights:
+        candidates.extend(result.other_flights)
+    if not candidates:
+        return None
+    # Prefer the cheapest known-priced one; fall back to first.
+    priced = [f for f in candidates if isinstance(f, dict) and f.get("price")]
+    if priced:
+        return min(priced, key=lambda f: f["price"])
+    return candidates[0] if isinstance(candidates[0], dict) else None
+
+
 def extract_lowest_price(
     result: FlightSearchResult,
     max_stops: int | None = None,

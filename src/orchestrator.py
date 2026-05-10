@@ -15,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.alerts.telegram import TelegramNotifier
 from src.analysis.nearby_airports import compare_airports
 from src.analysis.scorer import DealScorer, reasoning_to_bullets
-from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows
+from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows, pick_representative_flight
 from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
 from src.storage.db import Database
@@ -573,7 +573,7 @@ class Orchestrator:
         insights = result.price_insights
         lowest_price = extract_lowest_price(result, max_stops=route.max_stops)
         typical_range = insights.get("typical_price_range", [])
-        best_flight = result.best_flights[0] if result.best_flights else None
+        best_flight = pick_representative_flight(result)
 
         baggage_estimate = self._compute_baggage_for_result(result, best_flight, user)
 
@@ -767,7 +767,7 @@ class Orchestrator:
                     # Store snapshot with different origin marker in search_params
                     now = datetime.now(UTC)
                     insights = result.price_insights
-                    best_flight = result.best_flights[0] if result.best_flights else None
+                    best_flight = pick_representative_flight(result)
                     typical_range = insights.get("typical_price_range", [])
 
                     snapshot = PriceSnapshot(
@@ -940,7 +940,7 @@ class Orchestrator:
                 sec_duration = extract_min_duration(result)
 
                 now = datetime.now(UTC)
-                best_flight = result.best_flights[0] if result.best_flights else None
+                best_flight = pick_representative_flight(result)
                 typical_range = result.price_insights.get("typical_price_range", [])
                 sec_baggage = self._compute_baggage_for_result(result, best_flight, user)
                 sec_snapshot = PriceSnapshot(

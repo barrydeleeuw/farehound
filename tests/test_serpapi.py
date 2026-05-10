@@ -107,6 +107,51 @@ def test_build_google_flights_url_passengers_capped_at_9():
     assert ";px:12" not in url
 
 
+def test_pick_representative_flight_prefers_best_flights():
+    from src.apis.serpapi import FlightSearchResult, pick_representative_flight
+    result = FlightSearchResult(
+        best_flights=[{"airline": "KL", "price": 800}],
+        other_flights=[{"airline": "FR", "price": 600}],
+    )
+    flight = pick_representative_flight(result)
+    # Cheapest wins regardless of which list it came from.
+    assert flight["airline"] == "FR"
+    assert flight["price"] == 600
+
+
+def test_pick_representative_flight_falls_back_to_other_flights_when_best_empty():
+    """v0.11.8: bug fix — pre-fix this returned None when best_flights was
+    empty, losing airline info needed for baggage estimation."""
+    from src.apis.serpapi import FlightSearchResult, pick_representative_flight
+    result = FlightSearchResult(
+        best_flights=[],
+        other_flights=[
+            {"airline": "AF", "price": 1964, "flights": [{"airline": "AF"}]},
+            {"airline": "KL", "price": 2100, "flights": [{"airline": "KL"}]},
+        ],
+    )
+    flight = pick_representative_flight(result)
+    assert flight is not None
+    assert flight["airline"] == "AF"  # cheapest
+
+
+def test_pick_representative_flight_returns_none_when_no_results():
+    from src.apis.serpapi import FlightSearchResult, pick_representative_flight
+    assert pick_representative_flight(FlightSearchResult()) is None
+
+
+def test_pick_representative_flight_handles_missing_prices():
+    """If no flight has a price, return the first valid dict."""
+    from src.apis.serpapi import FlightSearchResult, pick_representative_flight
+    result = FlightSearchResult(
+        best_flights=[],
+        other_flights=[{"airline": "KL"}, {"airline": "AF"}],
+    )
+    flight = pick_representative_flight(result)
+    assert flight is not None
+    assert flight["airline"] == "KL"
+
+
 def test_build_google_flights_url_solo_traveler_no_pax_param():
     url = build_google_flights_url("AMS", "NRT", "2026-10-01", "2026-10-15", passengers=1)
     assert ";px:" not in url
