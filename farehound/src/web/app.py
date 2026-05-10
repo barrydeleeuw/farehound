@@ -224,8 +224,18 @@ def _register_api_routes(app: FastAPI) -> None:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
+            logger.warning("parse: Claude returned non-JSON for text=%r raw=%r", text, raw[:200])
             raise HTTPException(status_code=502, detail="parser returned non-JSON") from None
 
+        # Log the parsed result so we can debug ambiguous inputs (Valencia/Sokcho/etc).
+        logger.info(
+            "parse: text=%r → origin=%r dest=%r needs_clarification=%r options=%r",
+            text,
+            parsed.get("origin"),
+            parsed.get("destination"),
+            parsed.get("needs_clarification"),
+            parsed.get("options"),
+        )
         return JSONResponse(parsed)
 
     @app.post("/api/routes")
