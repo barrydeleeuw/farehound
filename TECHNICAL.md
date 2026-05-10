@@ -67,12 +67,17 @@ FareHound is a personal flight fare monitoring service deployed as a Home Assist
 | Database layer | `src/storage/db.py` | SQLite queries, schema, feedback tracking |
 | Data models | `src/storage/models.py` | Dataclasses: Route, PriceSnapshot, Deal, PollWindow, AlertRule |
 | Deal scorer | `src/analysis/scorer.py` | Claude API scoring with behavioral feedback enrichment |
-| Telegram notifier | `src/alerts/telegram.py` | Telegram Bot API alerts (primary channel) |
-| Orchestrator | `src/orchestrator.py` | Event loop, scheduling, pipeline coordination, community callback |
-| Entrypoint | `ha-addon/run.sh` | Container startup, env var export, graceful shutdown |
-| HA add-on config | `ha-addon/config.yaml` | Add-on metadata, options schema |
-| Lovelace card | `ha-addon/lovelace-card.yaml` | Dashboard card configs (entities, markdown, history-graph) |
-| App config | `config.yaml` | Routes, preferences, API key refs, alert channels, community feeds |
+| Telegram notifier | `src/alerts/telegram.py` | Telegram Bot API alerts. Two formats: thin (when `MINIAPP_URL` set) + v0.9.0 rich (fallback). |
+| Orchestrator | `src/orchestrator.py` | Event loop, APScheduler jobs, polling pipeline. Boots web app via `asyncio.gather`. |
+| **Mini Web App** | `src/web/` | FastAPI service serving the Telegram WebApp UI. See "Mini Web App" section below. |
+| **Web data assembler** | `src/web/data.py` | Builds dict shapes for templates: deal, routes, settings. **All numbers deterministic** — no LLM in the page render path. |
+| **Web auth** | `src/web/auth.py` | Telegram `initData` HMAC-SHA256 validation against bot token. |
+| **Web templates** | `src/web/templates/*.html.j2` | Jinja templates: `_bootstrap`, `deal`, `routes`, `settings`. Editorial-ledger aesthetic. |
+| **Web statics** | `src/web/static/{style.css,app.js}` | Cache-busted via `?v={cache_buster}` (boot-time epoch) so Telegram WebView picks up restarts. |
+| **Bot commands** | `src/bot/commands.py` | TripBot — `/trip`, `/snooze`, `/unsnooze`, `/status`, `/savings`. Multi-turn parse + confirm flow. The ONLY surface for adding routes (web app sends users back to chat). |
+| Entrypoint | `farehound/rootfs/etc/services.d/farehound/run` | s6-overlay service that exports config-derived env vars and runs `python -m src.orchestrator`. |
+| HA add-on config | `farehound/config.yaml` | Add-on metadata + options schema. `ports: 8081/tcp` exposes the web app to the Pi host so Cloudflare Tunnel can reach it. |
+| App config | `config.yaml` | Local-dev only. Routes/preferences live in DB at runtime. |
 | Manual search | `scripts/search_once.py` | One-off SerpAPI search for testing |
 
 ## Data Flow
@@ -125,6 +130,38 @@ Next scoring call:
   → Injected as PAST DECISIONS in Claude prompt
   → Claude calibrates scores based on revealed preferences
 ```
+
+### Layer 3 — Mini Web App
+
+```
+User opens Mini Web App from a Telegram alert button OR menu button
+  → GET /<page> with no query params
+    → no `?tg=` and no dev bypass → return _bootstrap.html.j2
+       (tiny page that reads window.Telegram.WebApp.initData and reloads
+        with `?tg=<initData>` so the server can authenticate)
+  → GET /<page>?tg=<initData>
+    → validate_init_data(initData) — HMAC-SHA256 against TELEGRAM_BOT_TOKEN
+    → resolve users.user_id from Telegram user.id
+    → assemble_deal/routes/settings(db, user_id)
+       — all numbers deterministic; no Claude calls in the page path
+    → render Jinja template, return HTML
+
+Action endpoints (POST /api/...):
+  → require_user dependency validates `x-telegram-init-data` header
+  → ownership check via _route_belongs_to / _deal_belongs_to
+  → call db method via asyncio.to_thread (SQLite is sync)
+  → return JSONResponse
+```
+
+Endpoints:
+- `GET /` (→ `/routes`), `GET /deal/{id}`, `GET /routes`, `GET /settings` — HTML pages
+- `GET /api/routes`, `GET /api/deals/{id}`, `GET /api/settings` — JSON read
+- `POST /api/routes/{id}/snooze`, `POST /api/routes/{id}/unsnooze`, `DELETE /api/routes/{id}` — route mutations
+- `POST /api/deals/{id}/feedback`, `PATCH /api/settings` — deal/user mutations
+
+**Trip creation is intentionally NOT a web endpoint** — adding routes goes via the bot's `/trip` flow in `src/bot/commands.py` because multi-turn disambiguation (clarifying questions, IATA option pickers) is critical and a one-shot HTTP parse can't match it. The `/routes` page has a "Back to chat" CTA pointing users at the bot.
+
+**Deterministic reasoning** (`_build_deterministic_reasoning` in `data.py`): the deal page's "Why this is the best" bullets are computed from snapshot data, not from a Claude-generated string. This means every number in the bullets always matches the hero/breakdown — no drift between LLM prose and live page state. Bullets cover: position vs Google's typical_price_range (fare-only — labeled explicitly), position in 90-day price history (new low / midpoint / above), delta since last alert, nearby airports footprint.
 
 ### Smart Date Polling Strategy
 
