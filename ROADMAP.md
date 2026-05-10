@@ -14,7 +14,41 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## In Progress
 
-<!-- No items currently in progress -->
+### [ITEM-049] Telegram Mini Web App
+- **Status:** In Progress *(frontend pass complete; backend remaining)*
+- **Priority:** P1 (High)
+- **Effort:** L *(of which ~40% shipped — frontend; ~60% remaining — backend + deploy)*
+- **Dependencies:** [ITEM-051] shipped as v0.9.0 — its "📊 Details" button is the entry point
+- **Summary:** Rich detail views launched from a button on each Telegram alert. Telegram WebApp `web_app` button hands off signed `initData` (no separate auth). Replaces parts of the parked [ITEM-P02] (Lovelace dashboard) — Telegram WebApp is a better fit than HA Lovelace for a multi-user direction.
+
+- **Frontend pass (DONE — 2026-05-10, uncommitted in worktree at `frontend/`):**
+  - 3 pages built: `deal.html`, `routes.html`, `settings.html` + `index.html` preview
+  - Plain HTML + CSS + ~250 lines vanilla JS (rejected the original FastAPI+HTMX suggestion for the design pass — see `frontend/DESIGN.md` and `frontend/README.md` for rationale; HTML structure is portable to Jinja for the backend pass)
+  - "Editorial ledger" aesthetic: Fraunces / Hanken Grotesk / JetBrains Mono, no rounded corners, hairline rules, tabular numerals
+  - Telegram WebApp SDK wired (BackButton, MainButton, theme params, haptics, showAlert/showConfirm) — no-ops gracefully outside Telegram
+  - Add-trip flow: input → submit → parse-confirm card → prepend placeholder route card
+  - Mock data inline; documented backend contract for 7 endpoints in `frontend/README.md`
+
+- **Backend pass (REMAINING — what /release should plan):**
+  - FastAPI app under `src/web/` serving the 3 pages via Jinja (port the static HTML to Jinja templates) + JSON action endpoints
+  - 7 endpoints per `frontend/README.md`: `GET /api/deals/:id`, `GET /api/routes`, `POST /api/routes/parse`, `POST /api/routes`, `POST /api/routes/:id/snooze`, `POST /api/deals/:id/feedback`, `GET/PATCH /api/settings`
+  - `initData` HMAC validation middleware (against bot token from env var `TELEGRAM_BOT_TOKEN`)
+  - Wire to existing services: `db.py`, `scorer.py` for `/parse`, orchestrator for immediate poll on route create
+  - Submit-only Claude parse (decision locked 2026-05-10 — no live-as-you-type to keep cost discipline)
+  - Bot side: swap `📊 Details` button URL on deal alerts from Google Flights placeholder to the real Mini Web App URL
+  - HTTPS deploy: Cloudflare Tunnel from the Pi (preferred over Caddy — no port forwarding, no static IP needed)
+  - Tests: `initData` HMAC validation, each endpoint contract, integration test through orchestrator → /parse → /routes → first poll
+
+- **Acceptance Criteria:**
+  - [x] 3 frontend pages render with mock data
+  - [x] Frontend documented + portable to Jinja
+  - [ ] FastAPI app boots and serves all 7 endpoints
+  - [ ] `initData` HMAC validation rejects forged requests; integration tests cover happy and forged paths
+  - [ ] Existing Telegram bot deal alerts include `web_app` button pointing to `/deal/{deal_id}`
+  - [ ] Routes page snooze toggle calls `/api/routes/:id/snooze` (wired to existing `db.snooze_route`)
+  - [ ] Settings page PATCH persists `users.preferences` and `airport_transport` rows
+  - [ ] Cloudflare Tunnel deployed; HTTPS URL reachable from outside the LAN
+  - [ ] Tests pass; suite stays green
 
 ## Ready
 
@@ -36,27 +70,6 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Transport mode and estimated cost stored in `airport_transport`
   - [ ] Works conversationally (one natural language message, not N separate questions)
   - [ ] Fallback: if user skips, transport costs remain NULL (already handled gracefully)
-
-### [ITEM-049] Telegram Mini Web App
-- **Status:** Ready
-- **Priority:** P1 (High)
-- **Effort:** L
-- **Dependencies:** [ITEM-051] must ship first — its "📊 Details" button is the entry point
-- **Summary:** Rich detail views launched from a button on each Telegram alert. Telegram WebApp `web_app` button hands off signed `initData` (no separate auth). Replaces parts of the parked [ITEM-P02] (Lovelace dashboard) — Telegram WebApp is a better fit than HA Lovelace for a multi-user direction.
-- **Pages:**
-  - `/deal/{id}` — price-history sparkline (90d), full alternatives table including <€75-savings ones, baggage policy by airline, structured why-best, booking deep links
-  - `/routes` — list, snooze toggles, edit dates
-  - `/settings` — baggage preference, transport overrides, notification quiet hours
-- **Stack suggestion:** FastAPI + HTMX deployed alongside the bot on the Pi (or on Railway later when [ARCHITECTURE.md](ARCHITECTURE.md) Phase A migration happens). Matches the codebase's Python skill set, no JS build step.
-- **Why this matters:** [ITEM-051] fixes the message-fits-in-chat parts of the value prop. Anything richer (price charts, side-by-side comparisons, full alternatives view) needs a real surface — and Telegram Mini Apps give us that without giving up Telegram's auth/push benefits.
-- **Acceptance Criteria:**
-  - [ ] WebApp button added to deal alerts pointing to `/deal/{id}` page
-  - [ ] `initData` validation server-side (HMAC against bot token)
-  - [ ] Deal detail page shows: price history chart, full alternatives table, baggage by airline, structured why-best, booking deep link
-  - [ ] Routes page shows snooze toggles wired to existing snooze logic from [ITEM-051]
-  - [ ] Settings page persists preferences to DB
-  - [ ] HTTPS configured (Cloudflare Tunnel or Caddy on the Pi)
-  - [ ] Tests for `initData` validation and route handlers
 
 ## Proposed
 
