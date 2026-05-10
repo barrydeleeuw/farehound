@@ -26,6 +26,11 @@
       <span class="meta">tap a row to edit</span>
     </div>
 
+    <div class="airport-actions">
+      <button class="btn-link" id="add-airport-btn">+ add airport</button>
+      <button class="btn-link" id="suggest-airports-btn">Suggest closest to home</button>
+    </div>
+
     {% for ap in settings.airports %}
     <article class="airport-card" data-airport="{{ ap.code }}">
       <header class="airport-card-head">
@@ -58,6 +63,9 @@
 
       <footer class="airport-card-foot">
         <button class="btn-link" data-action="add-mode" data-airport="{{ ap.code }}">+ add mode</button>
+        {% if not ap.is_primary %}
+        <button class="btn-link danger" data-action="delete-airport" data-airport="{{ ap.code }}">remove airport</button>
+        {% endif %}
         {% if ap.modes %}
         <div class="override-control">
           <label>Always use:
@@ -306,6 +314,51 @@
         await api("PUT", `/api/airports/${airport}/override`, { mode });
         window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
       } catch (err) { showToast(`Couldn't save: ${err.message}`); }
+    });
+  });
+
+  // ----- v0.11.3: add airport / suggest closest / remove airport -----
+
+  async function addAirportByCode(code) {
+    try {
+      const res = await api("POST", "/api/airports", { code });
+      const modes = (res.modes_added || []).join(", ") || "0 modes auto-filled";
+      showToast(`Added ${res.code} (${res.name}). ${modes}.`);
+      window.location.reload();
+    } catch (err) { showToast(`Couldn't add ${code}: ${err.message}`); }
+  }
+
+  document.getElementById("add-airport-btn")?.addEventListener("click", async () => {
+    const code = (prompt("IATA code (3 letters) of the airport to add:") || "").trim().toUpperCase();
+    if (!code) return;
+    if (!/^[A-Z]{3}$/.test(code)) { showToast("Must be 3 letters."); return; }
+    await addAirportByCode(code);
+  });
+
+  document.getElementById("suggest-airports-btn")?.addEventListener("click", async () => {
+    let res;
+    try {
+      res = await api("GET", "/api/airports/suggest?limit=5");
+    } catch (err) { showToast(`Couldn't suggest: ${err.message}`); return; }
+    if (!res.candidates?.length) { showToast("No more nearby airports to add."); return; }
+    const lines = res.candidates.map((c, i) => `${i + 1}. ${c.iata} — ${c.name} (${c.distance_km} km)`).join("\n");
+    const ok = confirm(`Closest airports to ${res.home_code}:\n\n${lines}\n\nAdd all ${res.candidates.length}?`);
+    if (!ok) return;
+    for (const c of res.candidates) {
+      try { await api("POST", "/api/airports", { code: c.iata }); }
+      catch (err) { /* keep going */ }
+    }
+    window.location.reload();
+  });
+
+  document.querySelectorAll('[data-action="delete-airport"]').forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const airport = btn.dataset.airport;
+      if (!confirm(`Remove ${airport} entirely? All modes for this airport will be deleted.`)) return;
+      try {
+        await api("DELETE", `/api/airports/${airport}`);
+        window.location.reload();
+      } catch (err) { showToast(`Couldn't remove ${airport}: ${err.message}`); }
     });
   });
 </script>

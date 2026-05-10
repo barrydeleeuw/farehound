@@ -300,6 +300,7 @@ class Orchestrator:
             db=self.db,
             anthropic_key=self.config.anthropic.api_key,
             anthropic_model=self.config.anthropic.model,
+            trip_bot=self.trip_bot,  # v0.11.3 — POST /api/airports needs the auto-fill helper
         )
         uconfig = uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None, lifespan="on")
         server = uvicorn.Server(uconfig)

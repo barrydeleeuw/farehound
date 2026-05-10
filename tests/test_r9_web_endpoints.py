@@ -166,3 +166,117 @@ def test_options_per_airport_isolated(client):
     ein = client.get("/api/airports/EIN/options").json()
     assert {o["mode"] for o in ams["options"]} == {"drive"}
     assert {o["mode"] for o in ein["options"]} == {"train"}
+
+
+# ----- v0.11.3: airport CRUD (suggest, add, delete) -----
+
+
+def _seed_legacy_airport(client, code, name=None, is_primary=False):
+    """Helper: seed a legacy airport_transport row (the test client doesn't go
+    through onboarding). The `client` fixture's underlying DB is accessed via
+    the FastAPI app state."""
+    db = client.app.state.db
+    db.seed_airport_transport(
+        [{"code": code, "name": name or code, "is_primary": is_primary}],
+        user_id="dev-bypass-user",
+    )
+
+
+def test_suggest_returns_closest_airports(client):
+    # Set the user's home_airport to AMS so suggest can geocode against it.
+    db = client.app.state.db
+    db._conn.execute(
+        "UPDATE users SET home_airport = 'AMS', home_location = 'amsterdam' WHERE user_id = ?",
+        ["dev-bypass-user"],
+    )
+    db._conn.commit()
+    _seed_legacy_airport(client, "AMS", "Schiphol", is_primary=True)
+    r = client.get("/api/airports/suggest?limit=4")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["home_code"] == "AMS"
+    iatas = [c["iata"] for c in body["candidates"]]
+    assert "AMS" not in iatas  # home is excluded
+    assert len(iatas) <= 4
+    # Closest known: Rotterdam (RTM), Eindhoven (EIN), Brussels (BRU).
+    assert any(c in iatas for c in ("RTM", "EIN", "BRU"))
+
+
+def test_suggest_excludes_already_configured(client):
+    db = client.app.state.db
+    db._conn.execute(
+        "UPDATE users SET home_airport = 'AMS', home_location = 'amsterdam' WHERE user_id = ?",
+        ["dev-bypass-user"],
+    )
+    db._conn.commit()
+    _seed_legacy_airport(client, "AMS", "Schiphol", is_primary=True)
+    _seed_legacy_airport(client, "EIN", "Eindhoven")
+    r = client.get("/api/airports/suggest?limit=4")
+    iatas = [c["iata"] for c in r.json()["candidates"]]
+    assert "EIN" not in iatas  # already configured
+
+
+def test_suggest_rejects_unknown_home_airport(client):
+    db = client.app.state.db
+    db._conn.execute(
+        "UPDATE users SET home_airport = 'XYZ' WHERE user_id = ?",
+        ["dev-bypass-user"],
+    )
+    db._conn.commit()
+    r = client.get("/api/airports/suggest")
+    assert r.status_code == 400
+
+
+def test_post_airport_validates_iata_format(client):
+    r = client.post("/api/airports", json={"code": "ABCD"})
+    assert r.status_code == 400
+
+
+def test_post_airport_rejects_unknown_iata(client):
+    r = client.post("/api/airports", json={"code": "ZZZ"})
+    assert r.status_code == 400
+    assert "viable-airports" in r.json()["detail"]
+
+
+def test_post_airport_rejects_already_configured(client):
+    _seed_legacy_airport(client, "AMS", "Schiphol", is_primary=True)
+    r = client.post("/api/airports", json={"code": "AMS"})
+    assert r.status_code == 409
+
+
+def test_post_airport_adds_legacy_row_without_bot(client):
+    """No trip_bot in app.state → autofill_skipped='bot_unavailable' but legacy row added."""
+    r = client.post("/api/airports", json={"code": "EIN"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == "EIN"
+    assert body["modes_added"] == []
+    assert body["autofill_skipped"] == "bot_unavailable"
+    # Legacy row exists.
+    db = client.app.state.db
+    legacy = db.get_airport_transport("EIN", user_id="dev-bypass-user")
+    assert legacy is not None
+    assert legacy["is_primary"] is False
+
+
+def test_delete_airport(client):
+    _seed_legacy_airport(client, "EIN", "Eindhoven")
+    client.post("/api/airports/EIN/options", json={"mode": "drive", "cost_eur": 30})
+    client.post("/api/airports/EIN/options", json={"mode": "train", "cost_eur": 15})
+    r = client.delete("/api/airports/EIN")
+    assert r.status_code == 200
+    db = client.app.state.db
+    assert db.get_airport_transport("EIN", user_id="dev-bypass-user") is None
+    assert db.get_transport_options("EIN", "dev-bypass-user", include_disabled=True) == []
+
+
+def test_delete_airport_refuses_primary(client):
+    _seed_legacy_airport(client, "AMS", "Schiphol", is_primary=True)
+    r = client.delete("/api/airports/AMS")
+    assert r.status_code == 400
+    assert "primary" in r.json()["detail"].lower()
+
+
+def test_delete_airport_404_if_missing(client):
+    r = client.delete("/api/airports/EIN")
+    assert r.status_code == 404

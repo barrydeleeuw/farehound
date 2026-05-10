@@ -213,12 +213,12 @@ def _build_deterministic_reasoning(
                 })
 
     # Bullet 4 — nearby airports footprint (informational only when not available).
-    # The /settings page is read-only for the airport list — adding new airports
-    # goes via chat, so point users there instead of Preferences.
+    # "Nearby" means alternative ORIGINS near the user's home (e.g. EIN, BRU)
+    # we polled the same destination from — not nearby destinations.
     if nearby_count == 0:
         bullets.append({
-            "headline": "No nearby airports configured for this destination.",
-            "detail": "Message me in chat to add airports near your destination — then FareHound can compare door-to-door cost across them.",
+            "headline": "Only your home airport is monitored — no alternate origins to compare.",
+            "detail": "Add nearby airports (e.g. EIN, RTM, BRU) in Preferences and FareHound will start polling them too, so you can see if a different origin would be cheaper door-to-door.",
         })
 
     return bullets[:4]
@@ -739,7 +739,7 @@ def assemble_settings(db: Database, user_id: str, telegram_handle: str = "") -> 
             "digest_time": prefs.get("digest_time"),
             "digest_skip_count_7d": user.get("digest_skip_count_7d") or 0,
             "telegram_label": telegram_handle or user.get("name") or "—",
-            "version": "0.11.2",
+            "version": "0.11.3",
         },
         "baggage_options": _BAGGAGE_OPTIONS,
     }
