@@ -154,3 +154,16 @@ class TestValidateInitData:
         init = _sign(fields)
         user = validate_init_data(init, max_age_seconds=0)
         assert user["id"] == 42
+
+    def test_duplicate_hash_field_last_wins(self):
+        # Document the non-vulnerability: prepending a forged `hash=...&` to a
+        # legit initData has no effect — dict(parse_qsl(...)) keeps the last
+        # value, which is the legit hash. The forged hash never reaches the
+        # comparison. (Was flagged by R8 code review as a potential attack
+        # vector; tracing the parsing showed it isn't.)
+        fields = {"auth_date": str(int(time.time())), "user": _user_field()}
+        legit = _sign(fields)
+        leading_forged = "hash=" + ("ee" * 32) + "&" + legit
+        # Should validate successfully — the forged hash is overwritten.
+        user = validate_init_data(leading_forged)
+        assert user["id"] == 42

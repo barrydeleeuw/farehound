@@ -12,11 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def _miniapp_url(path: str = "") -> str | None:
-    """Return the absolute Mini Web App URL for `path`, or None if MINIAPP_URL is unset.
-
-    When unset, the Telegram notifier falls back to the v0.9.0 rich-message format.
-    When set, alerts thin to a 2-line ping with a single `📊 Open in FareHound` button.
-    """
+    """Return the absolute Mini Web App URL for `path`, or None if MINIAPP_URL is unset."""
     base = os.environ.get("MINIAPP_URL", "").strip().rstrip("/")
     if not base:
         return None
@@ -312,9 +308,6 @@ class TelegramNotifier:
         return url
 
     async def send_deal_alert(self, deal_info: dict, chat_id: str | None = None) -> None:
-        # Thin-Telegram path (Option B, locked 2026-05-10): when MINIAPP_URL is
-        # configured, redirect users to the Mini Web App instead of cramming the
-        # rich data into chat. Falls through to the v0.9.0 rich format otherwise.
         if _miniapp_enabled():
             return await self._send_deal_alert_thin(deal_info, chat_id)
 
@@ -703,18 +696,13 @@ class TelegramNotifier:
             await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
 
     # ===========================================================================
-    # Thin-Telegram variants (Option B locked 2026-05-10).
-    # Used when MINIAPP_URL is configured. Web app is the primary surface;
-    # Telegram becomes a thin notification ping with a single 📊 Open button.
+    # Thin-Telegram variants — used when MINIAPP_URL is configured.
+    # Web app is the primary surface; Telegram is a notification ping with a
+    # single 📊 Open button + inline binary actions (Watching, Skip, Booked).
     # ===========================================================================
 
     def _miniapp_open_button(self, path: str = "") -> dict:
-        """Telegram WebApp button — launches the Mini Web App inside Telegram.
-
-        `web_app: {url}` opens in-app with signed initData. Falls back to a plain
-        URL link when MINIAPP_URL isn't set, but this branch is only invoked when
-        `_miniapp_enabled()` is True.
-        """
+        """Telegram WebApp button — launches the Mini Web App inside Telegram."""
         url = _miniapp_url(path) or ""
         return {"text": "📊 Open in FareHound", "web_app": {"url": url}}
 

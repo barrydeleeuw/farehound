@@ -118,6 +118,9 @@ def _register_api_routes(app: FastAPI) -> None:
         text = (body.get("text") or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
+        if len(text) > 500:
+            # Bound input so a misbehaving client can't burn Anthropic budget on huge prompts.
+            raise HTTPException(status_code=400, detail="text too long (max 500 chars)")
 
         api_key = app.state.anthropic_key
         model = app.state.anthropic_model
@@ -235,6 +238,12 @@ def _register_api_routes(app: FastAPI) -> None:
         feedback = (body.get("feedback") or "").strip().lower()
         if feedback not in ("booked", "watching", "dismissed"):
             raise HTTPException(status_code=400, detail="feedback must be booked|watching|dismissed")
+
+        # Ownership check — users may only mutate their own deals.
+        owned = await asyncio.to_thread(_deal_belongs_to, db, deal_id, user_id)
+        if not owned:
+            raise HTTPException(status_code=404, detail="deal not found")
+
         await asyncio.to_thread(db.update_deal_feedback, deal_id, feedback)
         return JSONResponse({"feedback": feedback})
 
@@ -281,7 +290,7 @@ def _register_api_routes(app: FastAPI) -> None:
             updates["preferences"] = json.dumps(prefs)
 
         if updates:
-            await asyncio.to_thread(_update_user_safe, db, user_id, updates)
+            await asyncio.to_thread(db.update_user, user_id, **updates)
 
         return JSONResponse({"updated": list(updates.keys())})
 
@@ -297,32 +306,12 @@ def _route_belongs_to(db: Database, route_id: str, user_id: str) -> bool:
     return row is not None
 
 
-def _update_user_safe(db: Database, user_id: str, updates: dict) -> None:
-    """Wrapper around `db.update_user` that tolerates fields not yet in the allowlist.
-
-    The `users.update_user` allowlist includes `preferences`; `baggage_needs` may not be
-    a top-level column, so when not allowed, we fold it into preferences instead.
-    """
-    try:
-        db.update_user(user_id, **updates)
-    except Exception:
-        # Fall back: stuff anything unknown into preferences JSON
-        prefs = updates.pop("preferences", None)
-        existing = db.get_user(user_id) or {}
-        existing_prefs = existing.get("preferences") or {}
-        if not isinstance(existing_prefs, dict):
-            try:
-                existing_prefs = json.loads(existing_prefs)
-            except Exception:
-                existing_prefs = {}
-        if isinstance(prefs, str):
-            try:
-                prefs = json.loads(prefs)
-            except Exception:
-                prefs = {}
-        existing_prefs.update(prefs or {})
-        existing_prefs.update(updates)
-        db.update_user(user_id, preferences=json.dumps(existing_prefs))
+def _deal_belongs_to(db: Database, deal_id: str, user_id: str) -> bool:
+    row = db._conn.execute(
+        "SELECT 1 FROM deals WHERE deal_id = ? AND user_id = ?",
+        [deal_id, user_id],
+    ).fetchone()
+    return row is not None
 
 
 __all__ = ["create_app"]

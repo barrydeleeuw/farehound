@@ -168,6 +168,49 @@ class TestFeedbackEndpoint:
         )
         assert resp.status_code == 400
 
+    def test_feedback_unknown_deal_404(self, client):
+        # CR-1 regression: /api/deals/{deal_id}/feedback must enforce ownership.
+        # A deal_id that doesn't belong to the requesting user (or doesn't exist)
+        # must 404, not silently mutate someone else's deal.
+        resp = client.post(
+            "/api/deals/d_someone_elses/feedback", json={"feedback": "booked"}
+        )
+        assert resp.status_code == 404
+
+    def test_feedback_other_users_deal_blocked(self, db, seeded, monkeypatch):
+        # CR-1 regression: even with valid auth, user A cannot mutate user B's deal.
+        from datetime import UTC, datetime
+        from decimal import Decimal
+        from src.storage.models import Deal, PriceSnapshot
+
+        # Seed a second user with their own deal
+        other_user = db.create_user(telegram_chat_id="99", name="Other")
+        snap = PriceSnapshot(
+            snapshot_id="snap_other", route_id="ams_nrt_test",
+            observed_at=datetime.now(UTC), source="serpapi_poll", passengers=2,
+            lowest_price=Decimal("3500"),
+        )
+        db.insert_snapshot(snap, user_id=other_user)
+        db.insert_deal(Deal(
+            deal_id="d_other_user", snapshot_id="snap_other", route_id="ams_nrt_test",
+            score=Decimal("0.8"), urgency="watch", alert_sent=True,
+            alert_sent_at=datetime.now(UTC),
+        ), user_id=other_user)
+
+        # Now user 42 (from FAREHOUND_WEB_DEV_USER_ID) tries to mutate other user's deal
+        from src.web.app import create_app
+        from fastapi.testclient import TestClient
+        app = create_app(db=db, anthropic_key=None, anthropic_model="test")
+        c = TestClient(app)
+        resp = c.post("/api/deals/d_other_user/feedback", json={"feedback": "booked"})
+        assert resp.status_code == 404
+
+        # And the original deal feedback was NOT changed
+        row = db._conn.execute(
+            "SELECT feedback FROM deals WHERE deal_id = 'd_other_user'"
+        ).fetchone()
+        assert row[0] is None or row[0] == ""
+
 
 class TestSettingsEndpoint:
     def test_get_settings_json(self, client):
@@ -224,6 +267,14 @@ class TestParseEndpoint:
         # Fixture sets anthropic_key=None; should return 503
         resp = client.post("/api/routes/parse", json={"text": "Tokyo for 2 weeks"})
         assert resp.status_code == 503
+
+    def test_parse_rejects_oversized_text(self, client):
+        # CR-2 regression: cap input at 500 chars to prevent abuse via valid
+        # initData (which is good for 24h).
+        long_text = "Tokyo " * 200  # ~1200 chars
+        resp = client.post("/api/routes/parse", json={"text": long_text})
+        assert resp.status_code == 400
+        assert "too long" in resp.json()["detail"].lower()
 
 
 # ---------- Auth gate (verify the bypass actually works in this test setup) ----------
