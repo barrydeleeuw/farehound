@@ -1131,3 +1131,219 @@ body.in-telegram .main-button {
   margin-top: 4px;
   max-width: 420px;
 }
+
+/* ---------- R9 ITEM-053: editable airport cards ---------- */
+
+.airport-card {
+  border: 1px solid var(--rule);
+  margin-bottom: 14px;
+  background: var(--bg);
+}
+
+.airport-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--sans);
+}
+
+.airport-card-head .code {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.airport-card-head .name {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.airport-card-head .badge {
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  border: 1px solid var(--rule);
+  padding: 1px 6px;
+  margin-left: auto;
+}
+
+.modes-list { padding: 4px 0; }
+
+.mode-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  padding: 10px 12px;
+  align-items: baseline;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mode-row:last-child { border-bottom: 0; }
+
+.mode-row:hover { background: var(--rule); }
+
+.mode-row.is-disabled .mode-name,
+.mode-row.is-disabled .mode-cost,
+.mode-row.is-disabled .mode-time {
+  text-decoration: line-through;
+  color: var(--text-faint);
+}
+
+.mode-row.is-override {
+  background: rgba(125, 125, 125, 0.05);
+}
+
+.mode-row.is-override .mode-name::after {
+  content: " · forced";
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+}
+
+.mode-name {
+  text-transform: capitalize;
+}
+
+.mode-cost {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.mode-time {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mode-parking {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.mode-confidence {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+.empty-modes {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text-faint);
+  margin: 0;
+}
+
+.airport-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: 12px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.btn-link {
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.override-control select {
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 4px 6px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+}
+
+.mode-edit-dialog {
+  border: 1px solid var(--rule);
+  padding: 18px;
+  background: var(--bg);
+  max-width: 90%;
+  width: 360px;
+}
+
+.mode-edit-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+
+.mode-edit-dialog h2 {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 14px;
+}
+
+.mode-edit-dialog form { display: flex; flex-direction: column; gap: 10px; }
+
+.mode-edit-dialog label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mode-edit-dialog input,
+.mode-edit-dialog select {
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+}
+
+.mode-edit-dialog .checkbox-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.dialog-actions button {
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.dialog-actions button.danger {
+  color: var(--text-dim);
+}
+
+#edit-save {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+}

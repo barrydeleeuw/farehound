@@ -135,6 +135,7 @@ class Orchestrator:
                 anthropic_api_key=config.anthropic.api_key,
                 anthropic_model=config.anthropic.model,
                 serpapi_key=config.serpapi.api_key,
+                google_maps_api_key=os.environ.get("GOOGLE_MAPS_API_KEY") or None,
                 reload_callback=self.reload_routes,
             )
 
@@ -703,7 +704,12 @@ class Orchestrator:
             return
 
         primary_transport = await loop.run_in_executor(
-            None, self.db.get_airport_transport, route.origin, user_id
+            None,
+            lambda: self.db.get_resolved_transport(
+                route.origin, user_id,
+                passengers=route.passengers or 2,
+                trip_days=max((windows[0][1] - windows[0][0]).days, 0) if windows else 0,
+            ),
         )
         if not primary_transport:
             logger.warning("No transport data for primary airport %s", route.origin)
@@ -791,13 +797,25 @@ class Orchestrator:
                         airport["airport_code"], route.destination, lowest,
                     )
 
+                    # R9 ITEM-053: secondary transport reads must use the resolved
+                    # multi-mode picker, otherwise nearby comparisons silently use
+                    # stale single-mode values from airport_transport.
+                    sec_window_days = max((return_dt - outbound).days, 0)
+                    sec_resolved = await loop.run_in_executor(
+                        None,
+                        lambda code=airport["airport_code"]: self.db.get_resolved_transport(
+                            code, user_id,
+                            passengers=route.passengers or 2,
+                            trip_days=sec_window_days,
+                        ),
+                    ) or {}
                     sec_entry = {
                         "airport_code": airport["airport_code"],
                         "fare_pp": float(lowest) / route.passengers,
-                        "transport_cost": airport.get("transport_cost_eur") or 0,
-                        "parking_cost": airport.get("parking_cost_eur"),
-                        "transport_mode": airport.get("transport_mode", ""),
-                        "transport_time_min": airport.get("transport_time_min", 0),
+                        "transport_cost": sec_resolved.get("transport_cost_eur") or 0,
+                        "parking_cost": sec_resolved.get("parking_cost_eur"),
+                        "transport_mode": sec_resolved.get("transport_mode", ""),
+                        "transport_time_min": sec_resolved.get("transport_time_min", 0),
                         "flight_duration_min": sec_duration,
                     }
                     secondary_results.append(sec_entry)
@@ -866,8 +884,16 @@ class Orchestrator:
         if not secondary_airports or snapshot.lowest_price is None:
             return
 
+        snap_trip_days = 0
+        if snapshot.outbound_date and snapshot.return_date:
+            snap_trip_days = max((snapshot.return_date - snapshot.outbound_date).days, 0)
         primary_transport = await loop.run_in_executor(
-            None, self.db.get_airport_transport, route.origin, user_id
+            None,
+            lambda: self.db.get_resolved_transport(
+                route.origin, user_id,
+                passengers=route.passengers or 2,
+                trip_days=snap_trip_days,
+            ),
         )
         if not primary_transport:
             return
@@ -938,13 +964,22 @@ class Orchestrator:
                 )
                 await loop.run_in_executor(None, self.db.insert_snapshot, sec_snapshot, user_id)
 
+                # R9 ITEM-053: resolved cheapest mode for THIS party + duration.
+                sec_resolved = await loop.run_in_executor(
+                    None,
+                    lambda code=airport["airport_code"]: self.db.get_resolved_transport(
+                        code, user_id,
+                        passengers=route.passengers or 2,
+                        trip_days=snap_trip_days,
+                    ),
+                ) or {}
                 secondary_results.append({
                     "airport_code": airport["airport_code"],
                     "fare_pp": float(lowest) / route.passengers,
-                    "transport_cost": airport.get("transport_cost_eur") or 0,
-                    "parking_cost": airport.get("parking_cost_eur"),
-                    "transport_mode": airport.get("transport_mode", ""),
-                    "transport_time_min": airport.get("transport_time_min", 0),
+                    "transport_cost": sec_resolved.get("transport_cost_eur") or 0,
+                    "parking_cost": sec_resolved.get("parking_cost_eur"),
+                    "transport_mode": sec_resolved.get("transport_mode", ""),
+                    "transport_time_min": sec_resolved.get("transport_time_min", 0),
                     "flight_duration_min": sec_duration,
                     "baggage_estimate": sec_baggage,
                 })
@@ -1151,8 +1186,16 @@ class Orchestrator:
         if snapshot.search_params and isinstance(snapshot.search_params, dict):
             gf_url = snapshot.search_params.get("google_flights_url", "")
 
+        deal_trip_days = 0
+        if snapshot.outbound_date and snapshot.return_date:
+            deal_trip_days = max((snapshot.return_date - snapshot.outbound_date).days, 0)
         primary_transport = await loop.run_in_executor(
-            None, self.db.get_airport_transport, route.origin, user_id
+            None,
+            lambda: self.db.get_resolved_transport(
+                route.origin, user_id,
+                passengers=route.passengers or 2,
+                trip_days=deal_trip_days,
+            ),
         )
         primary_t_cost = primary_transport.get("transport_cost_eur", 0) if primary_transport else 0
         primary_parking = primary_transport.get("parking_cost_eur") if primary_transport else None

@@ -310,6 +310,182 @@ def _register_api_routes(app: FastAPI) -> None:
 
         return JSONResponse({"updated": list(updates.keys())})
 
+    # ---- R9 ITEM-053: airport transport options (multi-mode editable) ----
+
+    _VALID_MODES = {"drive", "train", "taxi", "uber", "bus", "metro", "ferry", "tram", "other"}
+    _PER_PERSON_MODE_DEFAULTS = {"train", "bus", "metro", "ferry", "tram"}
+
+    def _validate_airport_code(code: str) -> str:
+        c = (code or "").strip().upper()
+        if not c.isalpha() or len(c) != 3:
+            raise HTTPException(status_code=400, detail="airport_code must be a 3-letter IATA code")
+        return c
+
+    def _validate_mode(mode: str) -> str:
+        m = (mode or "").strip().lower()
+        if m not in _VALID_MODES:
+            raise HTTPException(status_code=400, detail=f"mode must be one of: {sorted(_VALID_MODES)}")
+        return m
+
+    @app.get("/api/airports/{code}/options")
+    async def get_airport_options(
+        code: str, tg_user: dict = Depends(require_user)
+    ) -> JSONResponse:
+        """List all transport options (incl. disabled) for an airport."""
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        airport = _validate_airport_code(code)
+        opts = await asyncio.to_thread(
+            db.get_transport_options, airport, user_id, include_disabled=True
+        )
+        override = await asyncio.to_thread(db.get_airport_override_mode, airport, user_id)
+        return JSONResponse({
+            "airport_code": airport,
+            "options": opts,
+            "override_mode": override,
+        })
+
+    @app.post("/api/airports/{code}/options")
+    async def add_airport_option(
+        code: str, body: dict = Body(...), tg_user: dict = Depends(require_user)
+    ) -> JSONResponse:
+        """Add (or replace) a transport option for an airport. User-driven."""
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        airport = _validate_airport_code(code)
+        mode = _validate_mode(body.get("mode", ""))
+        try:
+            # Clamp to non-negative (review #7: PUT clamps; POST should too).
+            cost_eur = max(0.0, float(body["cost_eur"])) if body.get("cost_eur") is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="cost_eur must be a number") from None
+        time_min = body.get("time_min")
+        if time_min is not None:
+            try:
+                time_min = max(0, int(time_min))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="time_min must be an integer") from None
+        parking = body.get("parking_cost_per_day_eur")
+        if parking is not None:
+            try:
+                parking = max(0.0, float(parking))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="parking_cost_per_day_eur must be a number") from None
+        # Sensible default for cost_scales_with_pax based on mode; user can flip.
+        scales_default = mode in _PER_PERSON_MODE_DEFAULTS
+        scales = bool(body.get("cost_scales_with_pax", scales_default))
+        label = (body.get("label") or "").strip() or None
+
+        await asyncio.to_thread(
+            db.add_transport_option,
+            user_id=user_id, airport_code=airport, mode=mode,
+            cost_eur=cost_eur, cost_scales_with_pax=scales,
+            time_min=time_min, parking_cost_per_day_eur=parking,
+            source="user_added", confidence="high", label=label, enabled=True,
+        )
+        return JSONResponse({"added": True, "airport_code": airport, "mode": mode})
+
+    @app.put("/api/airports/{code}/options/{mode}")
+    async def update_airport_option(
+        code: str, mode: str, body: dict = Body(...),
+        tg_user: dict = Depends(require_user),
+    ) -> JSONResponse:
+        """Patch any subset of {cost_eur, time_min, parking_cost_per_day_eur, enabled, label}."""
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        airport = _validate_airport_code(code)
+        canonical_mode = _validate_mode(mode)
+        kwargs: dict = {}
+        if "cost_eur" in body and body["cost_eur"] is not None:
+            try:
+                kwargs["cost_eur"] = max(0.0, float(body["cost_eur"]))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="cost_eur must be a number") from None
+        if "time_min" in body and body["time_min"] is not None:
+            try:
+                kwargs["time_min"] = max(0, int(body["time_min"]))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="time_min must be an integer") from None
+        if "parking_cost_per_day_eur" in body:
+            v = body["parking_cost_per_day_eur"]
+            if v is None:
+                kwargs["parking_cost_per_day_eur"] = 0.0
+            else:
+                try:
+                    kwargs["parking_cost_per_day_eur"] = max(0.0, float(v))
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="parking must be a number") from None
+        if "enabled" in body:
+            kwargs["enabled"] = bool(body["enabled"])
+        if "label" in body:
+            kwargs["label"] = (body["label"] or "").strip() or None
+
+        updated = await asyncio.to_thread(
+            db.update_transport_option,
+            user_id=user_id, airport_code=airport, mode=canonical_mode, **kwargs,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="option not found")
+        return JSONResponse({"updated": True})
+
+    @app.delete("/api/airports/{code}/options/{mode}")
+    async def delete_airport_option(
+        code: str, mode: str, tg_user: dict = Depends(require_user)
+    ) -> JSONResponse:
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        airport = _validate_airport_code(code)
+        canonical_mode = _validate_mode(mode)
+        deleted = await asyncio.to_thread(
+            db.delete_transport_option,
+            user_id=user_id, airport_code=airport, mode=canonical_mode,
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="option not found")
+        return JSONResponse({"deleted": True})
+
+    @app.put("/api/airports/{code}/override")
+    async def set_airport_override(
+        code: str, body: dict = Body(default={}),
+        tg_user: dict = Depends(require_user),
+    ) -> JSONResponse:
+        """Set or clear the per-airport 'always use [mode]' preference. Pass mode=null to clear."""
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        airport = _validate_airport_code(code)
+        raw_mode = body.get("mode")
+        if raw_mode is None or raw_mode == "":
+            mode_val = None
+        else:
+            mode_val = _validate_mode(str(raw_mode))
+            # R9 review #3: refuse to set an override pointing at a mode that
+            # doesn't exist (or is disabled) for this airport. The renderer
+            # would silently fall through to cheapest, which surprises the user.
+            existing = await asyncio.to_thread(
+                db.get_transport_options, airport, user_id, include_disabled=False,
+            )
+            modes_available = {(o.get("mode") or "").lower() for o in existing}
+            if mode_val.lower() not in modes_available:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Mode '{mode_val}' is not an enabled option for {airport}",
+                )
+        await asyncio.to_thread(
+            db.set_airport_override_mode,
+            user_id=user_id, airport_code=airport, mode=mode_val,
+        )
+        return JSONResponse({"override_mode": mode_val})
+
 
 # ---------- helpers ----------
 

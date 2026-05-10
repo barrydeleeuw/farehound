@@ -121,6 +121,29 @@ CREATE TABLE IF NOT EXISTS airport_transport (
     is_primary        INTEGER DEFAULT 0
 );
 
+-- R9 ITEM-053: multi-mode transport options per airport.
+-- Replaces the one-mode-per-airport airport_transport table. The legacy table
+-- stays for one release as compat; rows are migrated forward at first boot.
+CREATE TABLE IF NOT EXISTS airport_transport_option (
+    user_id                  TEXT NOT NULL,
+    airport_code             TEXT NOT NULL,
+    mode                     TEXT NOT NULL,        -- drive | train | taxi | uber | bus | other
+    cost_eur                 REAL,                 -- one-way; doubled at render time for round-trip
+    cost_scales_with_pax     INTEGER NOT NULL DEFAULT 0,  -- 1 for train/bus, 0 for drive/taxi/uber
+    time_min                 INTEGER,
+    parking_cost_per_day_eur REAL,                 -- only for drive; null otherwise
+    enabled                  INTEGER NOT NULL DEFAULT 1,  -- user can disable a mode without deleting
+    source                   TEXT,                 -- google_maps | curated | user_override | user_added | legacy
+    confidence               TEXT,                 -- high | medium | low (for "estimate — confirm" UI)
+    label                    TEXT,                 -- optional user-facing label, e.g. "ride from family"
+    created_at               TEXT DEFAULT (datetime('now')),
+    updated_at               TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, airport_code, mode)
+);
+
+CREATE INDEX IF NOT EXISTS idx_transport_option_lookup
+    ON airport_transport_option(user_id, airport_code, enabled);
+
 CREATE TABLE IF NOT EXISTS savings_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
@@ -232,8 +255,65 @@ class Database:
         if not _has_column(self._conn, "deals", "reasoning_json"):
             self._conn.execute("ALTER TABLE deals ADD COLUMN reasoning_json TEXT")
         self._conn.commit()
+        # R9 ITEM-053: per-user per-airport "always use [mode]" override map (JSON).
+        # Stored as JSON {airport_code: mode_string} on users to avoid yet another
+        # lookup table for what is functionally a small flat preference set.
+        if not _has_column(self._conn, "users", "airport_override_mode"):
+            self._conn.execute("ALTER TABLE users ADD COLUMN airport_override_mode TEXT")
+        self._conn.commit()
+        # R9 ITEM-053: forward-migrate legacy airport_transport rows into
+        # airport_transport_option. Idempotent — runs on every boot but only
+        # writes rows that don't already exist in the new table.
+        self._migrate_airport_transport_to_options()
         # Migrate existing data: create default user if needed
         self._migrate_default_user()
+
+    def _migrate_airport_transport_to_options(self) -> None:
+        """Forward-migrate legacy airport_transport rows into airport_transport_option.
+
+        Idempotent: skips rows that already exist in the new table. Treats the
+        legacy single-mode row as a `source='legacy'` entry; the user can promote
+        it to `user_override` by editing in Settings.
+        """
+        try:
+            cursor = self._conn.execute(
+                "SELECT airport_code, airport_name, transport_mode, transport_cost_eur, "
+                "transport_time_min, parking_cost_eur, user_id FROM airport_transport"
+            )
+        except sqlite3.OperationalError:
+            # Legacy table missing — nothing to migrate.
+            return
+        migrated = 0
+        for row in cursor.fetchall():
+            airport_code, _name, mode, cost, time_min, parking, user_id = row
+            if not user_id or not mode:
+                # Pre-multi-user rows or rows missing the mode field — skip.
+                continue
+            existing = self._conn.execute(
+                "SELECT 1 FROM airport_transport_option "
+                "WHERE user_id = ? AND airport_code = ? AND mode = ?",
+                [user_id, airport_code, mode],
+            ).fetchone()
+            if existing:
+                continue
+            from src.analysis.transport import is_per_person_mode  # local import to avoid cycle
+            self._conn.execute(
+                """
+                INSERT INTO airport_transport_option (
+                    user_id, airport_code, mode, cost_eur, cost_scales_with_pax,
+                    time_min, parking_cost_per_day_eur, enabled, source, confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'legacy', 'high')
+                """,
+                [
+                    user_id, airport_code, mode, cost,
+                    1 if is_per_person_mode(mode) else 0,
+                    time_min, parking,
+                ],
+            )
+            migrated += 1
+        if migrated:
+            self._conn.commit()
+            logger.info("Migrated %d airport_transport rows → airport_transport_option", migrated)
 
     def _migrate_default_user(self) -> None:
         user_count = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -1000,6 +1080,265 @@ class Database:
             d["is_primary"] = False
             results.append(d)
         return results
+
+    # --- R9 ITEM-053: Multi-mode Transport Options ---
+
+    _OPTION_COLUMNS = [
+        "user_id", "airport_code", "mode", "cost_eur", "cost_scales_with_pax",
+        "time_min", "parking_cost_per_day_eur", "enabled", "source", "confidence",
+        "label", "created_at", "updated_at",
+    ]
+
+    def _row_to_option(self, row) -> dict:
+        d = dict(zip(self._OPTION_COLUMNS, row))
+        d["enabled"] = bool(d["enabled"])
+        d["cost_scales_with_pax"] = bool(d["cost_scales_with_pax"])
+        return d
+
+    def get_transport_options(
+        self, airport_code: str, user_id: str, *, include_disabled: bool = False
+    ) -> list[dict]:
+        """Return all transport options for an airport. Empty list if none configured."""
+        sql = (
+            "SELECT user_id, airport_code, mode, cost_eur, cost_scales_with_pax, "
+            "time_min, parking_cost_per_day_eur, enabled, source, confidence, "
+            "label, created_at, updated_at "
+            "FROM airport_transport_option WHERE user_id = ? AND airport_code = ?"
+        )
+        params: list = [user_id, airport_code]
+        if not include_disabled:
+            sql += " AND enabled = 1"
+        cursor = self._conn.execute(sql, params)
+        return [self._row_to_option(row) for row in cursor.fetchall()]
+
+    def get_all_transport_options(self, user_id: str) -> list[dict]:
+        """Return all options across all airports for a user, sorted by airport then mode."""
+        cursor = self._conn.execute(
+            "SELECT user_id, airport_code, mode, cost_eur, cost_scales_with_pax, "
+            "time_min, parking_cost_per_day_eur, enabled, source, confidence, "
+            "label, created_at, updated_at "
+            "FROM airport_transport_option WHERE user_id = ? "
+            "ORDER BY airport_code, mode",
+            [user_id],
+        )
+        return [self._row_to_option(row) for row in cursor.fetchall()]
+
+    def add_transport_option(
+        self,
+        *,
+        user_id: str,
+        airport_code: str,
+        mode: str,
+        cost_eur: float | None,
+        cost_scales_with_pax: bool,
+        time_min: int | None = None,
+        parking_cost_per_day_eur: float | None = None,
+        source: str = "user_added",
+        confidence: str = "high",
+        label: str | None = None,
+        enabled: bool = True,
+    ) -> None:
+        """Insert (or replace) a transport option for an airport.
+
+        Replace-on-conflict means re-running onboarding with the same airport+mode
+        updates the row instead of erroring. User edits go through update_transport_option().
+        """
+        self._conn.execute(
+            """
+            INSERT INTO airport_transport_option (
+                user_id, airport_code, mode, cost_eur, cost_scales_with_pax,
+                time_min, parking_cost_per_day_eur, enabled, source, confidence, label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, airport_code, mode) DO UPDATE SET
+                cost_eur = excluded.cost_eur,
+                cost_scales_with_pax = excluded.cost_scales_with_pax,
+                time_min = excluded.time_min,
+                parking_cost_per_day_eur = excluded.parking_cost_per_day_eur,
+                enabled = excluded.enabled,
+                source = excluded.source,
+                confidence = excluded.confidence,
+                label = excluded.label,
+                updated_at = datetime('now')
+            """,
+            [
+                user_id, airport_code, mode, cost_eur,
+                1 if cost_scales_with_pax else 0,
+                time_min, parking_cost_per_day_eur,
+                1 if enabled else 0,
+                source, confidence, label,
+            ],
+        )
+        self._conn.commit()
+
+    def update_transport_option(
+        self,
+        *,
+        user_id: str,
+        airport_code: str,
+        mode: str,
+        cost_eur: float | None = None,
+        time_min: int | None = None,
+        parking_cost_per_day_eur: float | None = None,
+        enabled: bool | None = None,
+        label: str | None = None,
+    ) -> bool:
+        """Patch fields on an existing option. Returns True if a row was updated.
+
+        Promotes source to 'user_override' on any user-driven edit so we know not
+        to overwrite it on a future auto-fill pass.
+        """
+        sets: list[str] = ["source = 'user_override'", "updated_at = datetime('now')"]
+        params: list = []
+        if cost_eur is not None:
+            sets.append("cost_eur = ?")
+            params.append(cost_eur)
+        if time_min is not None:
+            sets.append("time_min = ?")
+            params.append(time_min)
+        if parking_cost_per_day_eur is not None:
+            sets.append("parking_cost_per_day_eur = ?")
+            params.append(parking_cost_per_day_eur)
+        if enabled is not None:
+            sets.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        if label is not None:
+            sets.append("label = ?")
+            params.append(label)
+        params.extend([user_id, airport_code, mode])
+        sql = (
+            "UPDATE airport_transport_option SET " + ", ".join(sets) +
+            " WHERE user_id = ? AND airport_code = ? AND mode = ?"
+        )
+        cursor = self._conn.execute(sql, params)
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_transport_option(
+        self, *, user_id: str, airport_code: str, mode: str
+    ) -> bool:
+        """Hard-delete an option. Use update_transport_option(enabled=False) to soft-disable."""
+        cursor = self._conn.execute(
+            "DELETE FROM airport_transport_option "
+            "WHERE user_id = ? AND airport_code = ? AND mode = ?",
+            [user_id, airport_code, mode],
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_airport_override_mode(self, airport_code: str, user_id: str) -> str | None:
+        """Return the user's per-airport 'always use [mode]' override, if set."""
+        row = self._conn.execute(
+            "SELECT airport_override_mode FROM users WHERE user_id = ?",
+            [user_id],
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            overrides = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(overrides, dict):
+            return None
+        val = overrides.get(airport_code)
+        return val if isinstance(val, str) and val else None
+
+    def get_resolved_transport(
+        self,
+        airport_code: str,
+        user_id: str | None = None,
+        *,
+        passengers: int = 1,
+        trip_days: int = 0,
+    ) -> dict | None:
+        """Drop-in replacement for get_airport_transport() that resolves
+        multiple airport_transport_option rows to the cheapest mode for the
+        given party + duration.
+
+        Returns the same shape as get_airport_transport() (so existing dict-
+        accessing callers keep working) plus four R9 fields:
+            mode_label    — display string e.g. "train (cheapest)"
+            is_cheapest   — True if cost-optimal, False if override forced a different mode
+            override_used — True if the per-airport override was honored
+            no_options    — True if user has no options configured (legacy data also missing)
+
+        Falls back to legacy get_airport_transport() data when the user has
+        no rows in airport_transport_option for this airport. This handles
+        users who exist before migration completes (no data loss); the
+        forward-migration in init_schema() ensures fallback is the exception
+        not the rule.
+        """
+        from src.analysis.transport import resolve_breakdown_inputs  # local — avoid circular import
+
+        if not user_id:
+            # Pre-multi-user callers (or tests). Defer to legacy path.
+            return self.get_airport_transport(airport_code, user_id=user_id)
+
+        options = self.get_transport_options(airport_code, user_id, include_disabled=False)
+        if not options:
+            # No options yet — fall back to legacy single-mode row, if any.
+            legacy = self.get_airport_transport(airport_code, user_id=user_id)
+            if legacy is None:
+                return None
+            return {
+                **legacy,
+                "mode_label": legacy.get("transport_mode") or "",
+                "is_cheapest": False,
+                "override_used": False,
+                "no_options": False,
+            }
+
+        override_mode = self.get_airport_override_mode(airport_code, user_id)
+        resolved = resolve_breakdown_inputs(
+            options, passengers=passengers, trip_days=trip_days,
+            override_mode=override_mode,
+        )
+        # Legacy primary-row metadata (airport_name, is_primary) — read once if present.
+        legacy_meta = self.get_airport_transport(airport_code, user_id=user_id) or {}
+        mode = resolved["mode"]
+        if resolved["override_used"]:
+            mode_label = f"{mode} (your choice)"
+        elif resolved["is_cheapest"] and len(options) > 1:
+            mode_label = f"{mode} (cheapest)"
+        else:
+            mode_label = mode
+        return {
+            "airport_code": airport_code,
+            "airport_name": legacy_meta.get("airport_name"),
+            "transport_mode": mode,
+            "transport_cost_eur": resolved["transport_cost_eur"],
+            "transport_time_min": resolved["transport_time_min"],
+            "parking_cost_eur": resolved["parking_cost_eur"],
+            "is_primary": legacy_meta.get("is_primary", False),
+            "user_id": user_id,
+            "mode_label": mode_label,
+            "is_cheapest": resolved["is_cheapest"],
+            "override_used": resolved["override_used"],
+            "no_options": resolved["no_options"],
+        }
+
+    def set_airport_override_mode(
+        self, *, user_id: str, airport_code: str, mode: str | None
+    ) -> None:
+        """Set or clear the per-airport mode override. Pass mode=None to clear."""
+        row = self._conn.execute(
+            "SELECT airport_override_mode FROM users WHERE user_id = ?",
+            [user_id],
+        ).fetchone()
+        try:
+            overrides = json.loads(row[0]) if row and row[0] else {}
+        except (TypeError, ValueError):
+            overrides = {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        if mode is None:
+            overrides.pop(airport_code, None)
+        else:
+            overrides[airport_code] = mode
+        self._conn.execute(
+            "UPDATE users SET airport_override_mode = ? WHERE user_id = ?",
+            [json.dumps(overrides) if overrides else None, user_id],
+        )
+        self._conn.commit()
 
     # --- Savings ---
 

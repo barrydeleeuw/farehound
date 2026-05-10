@@ -1,0 +1,34 @@
+{
+  "_meta": {
+    "description": "Curated round-trip train fare estimates per person for common home-city → airport routes in the EU. Used by R9 ITEM-053 to seed cost_eur for transit options at onboarding. User confirms/overrides at onboarding via inline [Adjust] button; all values flagged with confidence='medium' until confirmed.",
+    "source": "Manual lookup against NS / Deutsche Bahn / SNCB / SBB tariffs, 2026-05",
+    "currency": "EUR",
+    "schema": {
+      "rt_per_pp_eur": "Round-trip per-person fare (off-peak, no discount card)",
+      "last_verified": "ISO date — annual review target"
+    },
+    "notes": "Cost is round-trip per person to match SerpAPI flight pricing convention. The transport math layer (compute_mode_total) treats train as cost_scales_with_pax=True and multiplies by passenger count. For routes not listed here, onboarding falls back to a per-km heuristic OR conversational confirm.",
+    "key_format": "Lookup by 'origin_city|airport_iata' — origin_city is lowercased free text (e.g. 'amsterdam', 'rotterdam'). Lookup is exact-match; no fuzzy matching."
+  },
+  "fares": {
+    "amsterdam|AMS": {"rt_per_pp_eur": 11.0, "last_verified": "2026-05-10"},
+    "amsterdam|EIN": {"rt_per_pp_eur": 30.0, "last_verified": "2026-05-10"},
+    "amsterdam|RTM": {"rt_per_pp_eur": 18.0, "last_verified": "2026-05-10"},
+    "amsterdam|BRU": {"rt_per_pp_eur": 60.0, "last_verified": "2026-05-10"},
+    "amsterdam|DUS": {"rt_per_pp_eur": 80.0, "last_verified": "2026-05-10"},
+    "rotterdam|AMS": {"rt_per_pp_eur": 18.0, "last_verified": "2026-05-10"},
+    "rotterdam|EIN": {"rt_per_pp_eur": 24.0, "last_verified": "2026-05-10"},
+    "rotterdam|RTM": {"rt_per_pp_eur": 6.0, "last_verified": "2026-05-10"},
+    "rotterdam|BRU": {"rt_per_pp_eur": 50.0, "last_verified": "2026-05-10"},
+    "the hague|AMS": {"rt_per_pp_eur": 16.0, "last_verified": "2026-05-10"},
+    "the hague|EIN": {"rt_per_pp_eur": 30.0, "last_verified": "2026-05-10"},
+    "the hague|BRU": {"rt_per_pp_eur": 55.0, "last_verified": "2026-05-10"},
+    "utrecht|AMS": {"rt_per_pp_eur": 16.0, "last_verified": "2026-05-10"},
+    "utrecht|EIN": {"rt_per_pp_eur": 26.0, "last_verified": "2026-05-10"},
+    "utrecht|RTM": {"rt_per_pp_eur": 22.0, "last_verified": "2026-05-10"},
+    "eindhoven|EIN": {"rt_per_pp_eur": 6.0, "last_verified": "2026-05-10"},
+    "eindhoven|AMS": {"rt_per_pp_eur": 30.0, "last_verified": "2026-05-10"},
+    "eindhoven|BRU": {"rt_per_pp_eur": 40.0, "last_verified": "2026-05-10"},
+    "eindhoven|DUS": {"rt_per_pp_eur": 50.0, "last_verified": "2026-05-10"}
+  }
+}

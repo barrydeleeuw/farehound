@@ -1,0 +1,41 @@
+{
+  "_meta": {
+    "description": "Curated long-term parking rates for ~20 EU airports. Used by R9 ITEM-053 to seed parking_cost_per_day_eur when a user adds an airport during onboarding. User can override per-airport in Settings.",
+    "source": "Manual lookup of each airport's long-term P+R / economy lot rate, 2026-05",
+    "currency": "EUR",
+    "schema": {
+      "daily_eur": "Long-term parking, daily rate (cheapest reasonable lot, walking distance or short shuttle)",
+      "last_verified": "ISO date — annual review target"
+    },
+    "notes": "Rates round-trip-safe: total cost = daily_eur × trip_days. For drives where the user parks at home (driver returns alone), set daily_eur=0 in Settings."
+  },
+  "airports": {
+    "AMS": {"name": "Amsterdam Schiphol", "daily_eur": 8.0, "last_verified": "2026-05-10"},
+    "EIN": {"name": "Eindhoven", "daily_eur": 7.0, "last_verified": "2026-05-10"},
+    "RTM": {"name": "Rotterdam The Hague", "daily_eur": 6.0, "last_verified": "2026-05-10"},
+    "MST": {"name": "Maastricht", "daily_eur": 5.0, "last_verified": "2026-05-10"},
+    "GRQ": {"name": "Groningen", "daily_eur": 5.0, "last_verified": "2026-05-10"},
+    "BRU": {"name": "Brussels", "daily_eur": 9.0, "last_verified": "2026-05-10"},
+    "CRL": {"name": "Brussels Charleroi", "daily_eur": 7.0, "last_verified": "2026-05-10"},
+    "DUS": {"name": "Düsseldorf", "daily_eur": 8.0, "last_verified": "2026-05-10"},
+    "CGN": {"name": "Cologne Bonn", "daily_eur": 7.0, "last_verified": "2026-05-10"},
+    "FRA": {"name": "Frankfurt", "daily_eur": 11.0, "last_verified": "2026-05-10"},
+    "MUC": {"name": "Munich", "daily_eur": 11.0, "last_verified": "2026-05-10"},
+    "LHR": {"name": "London Heathrow", "daily_eur": 18.0, "last_verified": "2026-05-10"},
+    "LGW": {"name": "London Gatwick", "daily_eur": 14.0, "last_verified": "2026-05-10"},
+    "STN": {"name": "London Stansted", "daily_eur": 11.0, "last_verified": "2026-05-10"},
+    "CDG": {"name": "Paris Charles de Gaulle", "daily_eur": 12.0, "last_verified": "2026-05-10"},
+    "ORY": {"name": "Paris Orly", "daily_eur": 11.0, "last_verified": "2026-05-10"},
+    "MAD": {"name": "Madrid Barajas", "daily_eur": 9.0, "last_verified": "2026-05-10"},
+    "BCN": {"name": "Barcelona El Prat", "daily_eur": 10.0, "last_verified": "2026-05-10"},
+    "FCO": {"name": "Rome Fiumicino", "daily_eur": 10.0, "last_verified": "2026-05-10"},
+    "MXP": {"name": "Milan Malpensa", "daily_eur": 10.0, "last_verified": "2026-05-10"},
+    "ZRH": {"name": "Zurich", "daily_eur": 16.0, "last_verified": "2026-05-10"},
+    "GVA": {"name": "Geneva", "daily_eur": 14.0, "last_verified": "2026-05-10"},
+    "VIE": {"name": "Vienna", "daily_eur": 9.0, "last_verified": "2026-05-10"},
+    "ARN": {"name": "Stockholm Arlanda", "daily_eur": 10.0, "last_verified": "2026-05-10"},
+    "CPH": {"name": "Copenhagen", "daily_eur": 10.0, "last_verified": "2026-05-10"},
+    "OSL": {"name": "Oslo", "daily_eur": 12.0, "last_verified": "2026-05-10"},
+    "DUB": {"name": "Dublin", "daily_eur": 12.0, "last_verified": "2026-05-10"}
+  }
+}

@@ -274,6 +274,7 @@ class TripBot:
         anthropic_api_key: str,
         anthropic_model: str,
         serpapi_key: str | None = None,
+        google_maps_api_key: str | None = None,
         reload_callback=None,
     ) -> None:
         self._bot_token = bot_token
@@ -281,6 +282,7 @@ class TripBot:
         self._anthropic_key = anthropic_api_key
         self._anthropic_model = anthropic_model
         self._serpapi_key = serpapi_key
+        self._google_maps_api_key = google_maps_api_key
         self._reload_callback = reload_callback
         self._offset: int = 0
         self._pending: dict[str, dict] = {}  # chat_id -> pending confirmation
@@ -588,11 +590,19 @@ class TripBot:
             user_id, home_airport=primary["code"], onboarded=1,
         ))
 
-        # Seed airport_transport (no transport costs yet — ITEM-004 will add those)
+        # Seed airport_transport (legacy, single-mode — kept for compat / fallback).
         airport_data = [{"code": primary["code"], "name": primary["name"], "is_primary": True}]
         for ap in nearby:
             airport_data.append({"code": ap["code"], "name": ap["name"], "is_primary": False})
         await loop.run_in_executor(None, self._db.seed_airport_transport, airport_data, user_id)
+
+        # R9 ITEM-053: auto-fill multiple transport options per airport via
+        # Google Maps + curated parking + curated train fares. Graceful skip
+        # if google_maps_api_key is unset — settings page becomes the entry point.
+        all_codes = [primary["code"]] + [ap["code"] for ap in nearby]
+        autofilled = await self._auto_fill_transport_options(
+            user_id=user_id, origin_city=location, airport_codes=all_codes,
+        )
 
         # Check if this user is the first user (auto-approve as admin)
         all_users = await loop.run_in_executor(None, self._db.get_all_active_users)
@@ -611,6 +621,19 @@ class TripBot:
             lines.append(f"  ✈️ {ap['name']} ({ap['code']})")
         lines.append("")
 
+        # R9: surface auto-fill outcome so user knows whether transport costs are populated.
+        any_modes_filled = any(v["modes"] for v in autofilled.values())
+        any_gm_skipped = any(v.get("skipped_reason") == "google_maps_key_missing" for v in autofilled.values())
+        if any_modes_filled:
+            lines.append("I've estimated transport costs (drive / train / taxi + parking). "
+                         "Review and adjust the numbers in *Preferences* — most are estimates "
+                         "until you confirm them.")
+            lines.append("")
+        elif any_gm_skipped:
+            lines.append("_(Google Maps API key not configured — transport costs are blank. "
+                         "Add them in Preferences.)_")
+            lines.append("")
+
         if is_first_user:
             lines.append("Now tell me about a trip! For example:")
             lines.append("`Japan for 2 weeks in October, 2 passengers`")
@@ -627,6 +650,150 @@ class TripBot:
 
         await self._send(client, chat_id, "\n".join(lines))
         self._pending.pop(chat_id, None)
+
+    async def _auto_fill_transport_options(
+        self,
+        *,
+        user_id: str,
+        origin_city: str,
+        airport_codes: list[str],
+    ) -> dict:
+        """R9 ITEM-053: populate airport_transport_option with auto-filled values.
+
+        For each airport:
+          - Google Maps Distance Matrix → drive distance/duration + transit duration
+          - Curated parking dataset → daily parking rate
+          - Curated train fares dataset → RT/pp train fare estimate
+          - Drive cost via heuristic (€0.25/km) once we have distance
+          - Taxi cost via heuristic (€2.50/km) once we have distance
+
+        Graceful skip when GOOGLE_MAPS_API_KEY is unset: parking + train fares
+        are still seeded from curated data, but drive/taxi durations are absent.
+        User adjusts in Settings.
+
+        Returns: {airport_code: {modes: [...], skipped_reason: str | None}}
+        """
+        from src.apis.google_maps import (
+            GoogleMapsClient,
+            GoogleMapsError,
+            GoogleMapsKeyMissing,
+            estimate_drive_cost_eur,
+            estimate_taxi_cost_eur,
+        )
+        from src.utils.airport_data import (
+            get_airport_meta,
+            get_parking_rate,
+            get_train_fare,
+        )
+
+        loop = asyncio.get_running_loop()
+        result: dict = {}
+
+        gm_client = GoogleMapsClient(api_key=self._google_maps_api_key)
+        try:
+            for code in airport_codes:
+                modes_added: list[str] = []
+                meta = get_airport_meta(code)
+                airport_label = meta["name"] if meta else code
+
+                # 1. Train fare from curated data (if known).
+                train_fare = get_train_fare(origin_city, code)
+                if train_fare is not None:
+                    await loop.run_in_executor(
+                        None,
+                        lambda c=code, f=train_fare: self._db.add_transport_option(
+                            user_id=user_id, airport_code=c, mode="train",
+                            # Curated value is RT/pp; store as one-way (÷2). Renderer
+                            # applies × 2 (RT) × passengers (cost_scales_with_pax=True).
+                            cost_eur=f / 2,
+                            cost_scales_with_pax=True,
+                            time_min=None, parking_cost_per_day_eur=None,
+                            source="curated", confidence="medium",
+                        ),
+                    )
+                    modes_added.append("train")
+
+                # 2. Parking rate from curated data (used by drive option below).
+                parking_rate = get_parking_rate(code)
+
+                # 3. Drive + taxi via Google Maps (only if we have an API key + airport meta).
+                drive_distance_km: float | None = None
+                drive_duration_min: int | None = None
+                transit_duration_min: int | None = None
+                gm_skipped = False
+                if not gm_client.is_configured:
+                    gm_skipped = True
+                elif meta is None:
+                    gm_skipped = True
+                else:
+                    dest = f"{airport_label} Airport"
+                    try:
+                        drive_res = await gm_client.directions(
+                            origin=origin_city, destination=dest, mode="drive",
+                        )
+                        drive_distance_km = drive_res.distance_km
+                        drive_duration_min = drive_res.duration_min
+                    except GoogleMapsKeyMissing:
+                        gm_skipped = True
+                    except GoogleMapsError as e:
+                        logger.warning("Google Maps drive lookup failed for %s: %s", code, e)
+                    if not gm_skipped:
+                        try:
+                            transit_res = await gm_client.directions(
+                                origin=origin_city, destination=dest, mode="transit",
+                            )
+                            transit_duration_min = transit_res.duration_min
+                        except GoogleMapsError as e:
+                            logger.debug("Google Maps transit lookup failed for %s: %s", code, e)
+
+                # 3a. Drive option.
+                if drive_distance_km is not None:
+                    drive_cost = estimate_drive_cost_eur(drive_distance_km)
+                    await loop.run_in_executor(
+                        None,
+                        lambda c=code, cost=drive_cost, t=drive_duration_min, p=parking_rate:
+                        self._db.add_transport_option(
+                            user_id=user_id, airport_code=c, mode="drive",
+                            cost_eur=cost, cost_scales_with_pax=False,
+                            time_min=t, parking_cost_per_day_eur=p,
+                            source="google_maps", confidence="medium",
+                        ),
+                    )
+                    modes_added.append("drive")
+
+                    # 3b. Taxi heuristic (uses same distance).
+                    taxi_cost = estimate_taxi_cost_eur(drive_distance_km)
+                    await loop.run_in_executor(
+                        None,
+                        lambda c=code, cost=taxi_cost, t=drive_duration_min:
+                        self._db.add_transport_option(
+                            user_id=user_id, airport_code=c, mode="taxi",
+                            cost_eur=cost, cost_scales_with_pax=False,
+                            time_min=t, parking_cost_per_day_eur=None,
+                            source="google_maps", confidence="low",
+                        ),
+                    )
+                    modes_added.append("taxi")
+
+                # 3c. Update train option's transit time if Google gave us one.
+                if transit_duration_min is not None and "train" in modes_added:
+                    await loop.run_in_executor(
+                        None,
+                        lambda c=code, t=transit_duration_min:
+                        self._db.update_transport_option(
+                            user_id=user_id, airport_code=c, mode="train",
+                            time_min=t,
+                        ),
+                    )
+
+                result[code] = {
+                    "modes": modes_added,
+                    "skipped_reason": "google_maps_key_missing" if gm_skipped and not gm_client.is_configured
+                                      else ("airport_not_in_dataset" if meta is None and not modes_added else None),
+                }
+        finally:
+            await gm_client.close()
+        return result
 
     async def _notify_admin_new_user(
         self, name: str, location: str, airport: str, user_id: str,
@@ -1260,9 +1427,16 @@ class TripBot:
             lines = [f"💰 *{name}*"]
             lines.append(f"*€{price_pp:,.0f}/pp* ({r.passengers} pax)")
 
-            # Cost breakdown with transport
+            # Cost breakdown with transport — R9 picks cheapest mode for this party.
+            r_trip_days = 0
+            if r.earliest_departure and r.latest_return:
+                r_trip_days = max((r.latest_return - r.earliest_departure).days, 0)
             transport = await loop.run_in_executor(
-                None, self._db.get_airport_transport, r.origin, user_id,
+                None,
+                lambda: self._db.get_resolved_transport(
+                    r.origin, user_id,
+                    passengers=r.passengers or 2, trip_days=r_trip_days,
+                ),
             )
             t_cost = transport["transport_cost_eur"] if transport else 0
             p_cost = (transport or {}).get("parking_cost_eur") or 0
@@ -1334,7 +1508,11 @@ class TripBot:
                             lines.append("*Nearby alternatives:*")
                         alt_code = alt["airport_code"].upper()
                         alt_transport = await loop.run_in_executor(
-                            None, self._db.get_airport_transport, alt_code, user_id,
+                            None,
+                            lambda code=alt_code: self._db.get_resolved_transport(
+                                code, user_id,
+                                passengers=r.passengers or 2, trip_days=r_trip_days,
+                            ),
                         )
                         at_cost = alt_transport["transport_cost_eur"] if alt_transport else 0
                         ap_cost = (alt_transport or {}).get("parking_cost_eur") or 0
@@ -1930,9 +2108,15 @@ class TripBot:
                         "No flights found for those dates. I'll keep checking on the next poll cycle.")
                     return
 
-                # Get transport info
+                # Get transport info — R9 picks cheapest mode for this party.
+                _trip_days = max((ret_date - out_date).days, 0) if (out_date and ret_date) else 0
                 primary_transport = await loop.run_in_executor(
-                    None, self._db.get_airport_transport, route.origin, user_id,
+                    None,
+                    lambda: self._db.get_resolved_transport(
+                        route.origin, user_id,
+                        passengers=route.passengers or 2,
+                        trip_days=_trip_days,
+                    ),
                 )
                 p_transport_cost = primary_transport["transport_cost_eur"] if primary_transport else 0
                 p_parking_cost = (primary_transport or {}).get("parking_cost_eur") or 0
