@@ -29,26 +29,32 @@ Every feature we build serves this mission: reduce the gap between what people p
   - Add-trip flow: input → submit → parse-confirm card → prepend placeholder route card
   - Mock data inline; documented backend contract for 7 endpoints in `frontend/README.md`
 
-- **Backend pass (REMAINING — what /release should plan):**
+- **Backend pass (REMAINING — what /release R8 plans):**
   - FastAPI app under `src/web/` serving the 3 pages via Jinja (port the static HTML to Jinja templates) + JSON action endpoints
   - 7 endpoints per `frontend/README.md`: `GET /api/deals/:id`, `GET /api/routes`, `POST /api/routes/parse`, `POST /api/routes`, `POST /api/routes/:id/snooze`, `POST /api/deals/:id/feedback`, `GET/PATCH /api/settings`
   - `initData` HMAC validation middleware (against bot token from env var `TELEGRAM_BOT_TOKEN`)
   - Wire to existing services: `db.py`, `scorer.py` for `/parse`, orchestrator for immediate poll on route create
   - Submit-only Claude parse (decision locked 2026-05-10 — no live-as-you-type to keep cost discipline)
-  - Bot side: swap `📊 Details` button URL on deal alerts from Google Flights placeholder to the real Mini Web App URL
-  - HTTPS deploy: Cloudflare Tunnel from the Pi (preferred over Caddy — no port forwarding, no static IP needed)
-  - Tests: `initData` HMAC validation, each endpoint contract, integration test through orchestrator → /parse → /routes → first poll
+  - HTTPS deploy: Cloudflare Tunnel from the Pi (preferred over Caddy — no port forwarding, no static IP needed). Documentation only; Barry runs the deploy commands himself with his Cloudflare account.
+
+- **Telegram surface change (locked 2026-05-10 — Option B):** Web app becomes the primary UX. Telegram alerts thin to ping format. Decision rationale in this session's history; in short: user found the v0.9.0 rich-Telegram format crappy and wants to consume rich data in the web app, not in chat.
+  - `send_deal_alert`, `send_error_fare_alert`: replace rich body with 2-line ping (`💰 AMS→NRT — €1,820/pp · new low. Tap to open.`). Replace `Book Now` URL button with `📊 Open in FareHound` deep-link button to `/deal/{deal_id}`. **Keep inline action buttons** (`Watching 👀`, `Skip route 🔕`) — they're one-tap and more convenient than opening the web app for binary actions.
+  - `send_follow_up`: keep "Did you book?" question. Replace book URL with `📊 Open in FareHound`. Keep inline `Booked ✅` and `Watching 👀` buttons.
+  - `send_daily_digest`: replace per-route rich messages with a single summary ping (`📊 FareHound Daily — N routes, M moved. Tap to open.`) → single button to `/routes`.
+  - **Feature-flagged on `MINIAPP_URL`**: when env var is empty/unset, falls back to v0.9.0 rich format. Lets us ship backend first, flip Telegram format with a config change.
 
 - **Acceptance Criteria:**
   - [x] 3 frontend pages render with mock data
   - [x] Frontend documented + portable to Jinja
   - [ ] FastAPI app boots and serves all 7 endpoints
   - [ ] `initData` HMAC validation rejects forged requests; integration tests cover happy and forged paths
-  - [ ] Existing Telegram bot deal alerts include `web_app` button pointing to `/deal/{deal_id}`
+  - [ ] When `MINIAPP_URL` is set: deal alert / error fare / follow-up / daily digest use thin-ping format with `📊 Open in FareHound` button; inline action buttons preserved where applicable
+  - [ ] When `MINIAPP_URL` is unset: v0.9.0 rich format still renders (fallback verified by tests)
   - [ ] Routes page snooze toggle calls `/api/routes/:id/snooze` (wired to existing `db.snooze_route`)
   - [ ] Settings page PATCH persists `users.preferences` and `airport_transport` rows
-  - [ ] Cloudflare Tunnel deployed; HTTPS URL reachable from outside the LAN
+  - [ ] Cloudflare Tunnel setup documented (script + instructions) — Barry runs the deploy
   - [ ] Tests pass; suite stays green
+  - [ ] R7 verification cases MV-5/6/7/8 (rich-Telegram cases) marked superseded by web app verification in `docs/releases/R7/verification_report.md`
 
 ## Ready
 
