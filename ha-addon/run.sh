@@ -12,6 +12,20 @@ if [[ -n "$TELEGRAM_API_ID" ]]; then
     export TELEGRAM_API_HASH
 fi
 
+# Telegram bot token — exported so the Mini Web App can validate initData HMAC.
+TELEGRAM_BOT_TOKEN=$(bashio::config 'telegram_bot_token')
+if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
+    export TELEGRAM_BOT_TOKEN
+fi
+
+# Mini Web App URL — when set, Telegram alerts thin to a ping format and the
+# bot's keyboards point users at the web app. When empty, falls back to the
+# v0.9.0 rich Telegram format.
+MINIAPP_URL=$(bashio::config 'miniapp_url')
+if [[ -n "$MINIAPP_URL" ]]; then
+    export MINIAPP_URL
+fi
+
 # HA Supervisor token for API access (injected by Supervisor)
 export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
 

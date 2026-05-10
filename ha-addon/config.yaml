@@ -26,6 +26,7 @@ options:
   telegram_bot_token: ""
   telegram_chat_id: ""
   routes: "[]"
+  miniapp_url: ""
 schema:
   serpapi_api_key: str
   anthropic_api_key: str
@@ -39,3 +40,4 @@ schema:
   telegram_bot_token: str?
   telegram_chat_id: str?
   routes: str?
+  miniapp_url: str?

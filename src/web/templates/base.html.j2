@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>{% block title %}FareHound{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body
+  {% block body_attrs %}{% endblock %}
+>
+<main class="app">
+  <header class="topbar">
+    <span class="brand">FareHound</span>
+    <span class="crumb">{% block crumb %}{% endblock %}</span>
+  </header>
+
+  {% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+<script src="/static/app.js"></script>
+</body>
+</html>

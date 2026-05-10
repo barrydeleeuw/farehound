@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 
@@ -8,6 +9,24 @@ from src.analysis.nearby_airports import transport_total
 from src.utils.airports import route_name
 
 logger = logging.getLogger(__name__)
+
+
+def _miniapp_url(path: str = "") -> str | None:
+    """Return the absolute Mini Web App URL for `path`, or None if MINIAPP_URL is unset.
+
+    When unset, the Telegram notifier falls back to the v0.9.0 rich-message format.
+    When set, alerts thin to a 2-line ping with a single `📊 Open in FareHound` button.
+    """
+    base = os.environ.get("MINIAPP_URL", "").strip().rstrip("/")
+    if not base:
+        return None
+    if not path:
+        return base
+    return f"{base}/{path.lstrip('/')}"
+
+
+def _miniapp_enabled() -> bool:
+    return _miniapp_url() is not None
 
 
 def find_cheapest_date(
@@ -293,6 +312,12 @@ class TelegramNotifier:
         return url
 
     async def send_deal_alert(self, deal_info: dict, chat_id: str | None = None) -> None:
+        # Thin-Telegram path (Option B, locked 2026-05-10): when MINIAPP_URL is
+        # configured, redirect users to the Mini Web App instead of cramming the
+        # rich data into chat. Falls through to the v0.9.0 rich format otherwise.
+        if _miniapp_enabled():
+            return await self._send_deal_alert_thin(deal_info, chat_id)
+
         origin = deal_info.get("origin", "???")
         dest = deal_info.get("destination", "???")
         price = deal_info.get("price", "?")
@@ -443,6 +468,9 @@ class TelegramNotifier:
         return {"inline_keyboard": keyboard}
 
     async def send_error_fare_alert(self, deal_info: dict, chat_id: str | None = None) -> None:
+        if _miniapp_enabled():
+            return await self._send_error_fare_alert_thin(deal_info, chat_id)
+
         origin = deal_info.get("origin", "???")
         dest = deal_info.get("destination", "???")
         price = deal_info.get("price", "?")
@@ -494,6 +522,9 @@ class TelegramNotifier:
 
     async def send_follow_up(self, deal_info: dict, chat_id: str | None = None) -> None:
         """Send a follow-up message for deals with no feedback after 3+ days."""
+        if _miniapp_enabled():
+            return await self._send_follow_up_thin(deal_info, chat_id)
+
         route = route_name(deal_info.get("origin", "???"), deal_info.get("destination", "???"))
         price = deal_info.get("price", "?")
         deal_id = deal_info.get("deal_id")
@@ -527,6 +558,9 @@ class TelegramNotifier:
     async def send_daily_digest(self, routes_summary: list[dict], chat_id: str | None = None) -> None:
         if not routes_summary:
             return
+
+        if _miniapp_enabled():
+            return await self._send_daily_digest_thin(routes_summary, chat_id)
 
         from src.utils.airports import airport_name
 
@@ -667,3 +701,139 @@ class TelegramNotifier:
             reply_markup = {"inline_keyboard": keyboard}
 
             await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
+
+    # ===========================================================================
+    # Thin-Telegram variants (Option B locked 2026-05-10).
+    # Used when MINIAPP_URL is configured. Web app is the primary surface;
+    # Telegram becomes a thin notification ping with a single 📊 Open button.
+    # ===========================================================================
+
+    def _miniapp_open_button(self, path: str = "") -> dict:
+        """Telegram WebApp button — launches the Mini Web App inside Telegram.
+
+        `web_app: {url}` opens in-app with signed initData. Falls back to a plain
+        URL link when MINIAPP_URL isn't set, but this branch is only invoked when
+        `_miniapp_enabled()` is True.
+        """
+        url = _miniapp_url(path) or ""
+        return {"text": "📊 Open in FareHound", "web_app": {"url": url}}
+
+    async def _send_deal_alert_thin(self, deal_info: dict, chat_id: str | None = None) -> None:
+        origin = deal_info.get("origin", "???")
+        dest = deal_info.get("destination", "???")
+        price = deal_info.get("price", "?")
+        passengers = deal_info.get("passengers", 2)
+        score = deal_info.get("score")
+        deal_id = deal_info.get("deal_id")
+        route_id = deal_info.get("route_id")
+
+        try:
+            price_pp = float(price) / passengers if passengers and passengers > 1 else float(price)
+            price_label = f"€{price_pp:,.0f}/pp"
+        except (TypeError, ValueError):
+            price_label = f"€{price}"
+
+        emoji = _deal_emoji(score)
+        route = route_name(origin, dest)
+
+        lines = [f"{emoji} *{route}* — {price_label}"]
+        # Optional one-line context (delta vs alert price, or "new low")
+        delta = deal_info.get("delta_since_alert")
+        if delta is not None:
+            try:
+                delta_f = float(delta)
+                if delta_f < 0:
+                    lines.append(f"▼ €{abs(delta_f):,.0f} since alert")
+                elif delta_f > 0:
+                    lines.append(f"▲ €{delta_f:,.0f} since alert")
+            except (TypeError, ValueError):
+                pass
+        lines.append("Tap to open.")
+
+        keyboard: list[list[dict]] = []
+        primary_row: list[dict] = [self._miniapp_open_button(f"deal/{deal_id}" if deal_id else "")]
+        if deal_id:
+            primary_row.append({"text": "Watching 👀", "callback_data": f"deal:watch:{deal_id}"})
+        if route_id:
+            primary_row.append({"text": "Skip route 🔕", "callback_data": f"route:snooze:7:{route_id}"})
+        keyboard.append(primary_row)
+        reply_markup = {"inline_keyboard": keyboard}
+
+        await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
+
+    async def _send_error_fare_alert_thin(self, deal_info: dict, chat_id: str | None = None) -> None:
+        origin = deal_info.get("origin", "???")
+        dest = deal_info.get("destination", "???")
+        price = deal_info.get("price", "?")
+        deal_id = deal_info.get("deal_id")
+        route_id = deal_info.get("route_id")
+
+        try:
+            price_label = f"€{float(price):,.0f}"
+        except (TypeError, ValueError):
+            price_label = f"€{price}"
+
+        route = route_name(origin, dest)
+        lines = [
+            f"🔥 *Error fare* — {route} — {price_label}",
+            "Book fast — these usually disappear.",
+        ]
+
+        keyboard: list[list[dict]] = []
+        primary_row: list[dict] = [self._miniapp_open_button(f"deal/{deal_id}" if deal_id else "")]
+        if deal_id:
+            primary_row.append({"text": "Watching 👀", "callback_data": f"deal:watch:{deal_id}"})
+        if route_id:
+            primary_row.append({"text": "Skip route 🔕", "callback_data": f"route:snooze:7:{route_id}"})
+        keyboard.append(primary_row)
+        reply_markup = {"inline_keyboard": keyboard}
+
+        await self._send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
+
+    async def _send_follow_up_thin(self, deal_info: dict, chat_id: str | None = None) -> None:
+        origin = deal_info.get("origin", "???")
+        dest = deal_info.get("destination", "???")
+        price = deal_info.get("price", "?")
+        deal_id = deal_info.get("deal_id")
+
+        try:
+            price_label = f"€{float(price):,.0f}"
+        except (TypeError, ValueError):
+            price_label = f"€{price}"
+
+        route = route_name(origin, dest)
+        text = f"You saw the {route} deal at {price_label} three days ago. Did you book it?"
+
+        keyboard: list[list[dict]] = []
+        # Inline binary actions stay — they're one-tap and more convenient than opening the web app.
+        if deal_id:
+            keyboard.append([
+                {"text": "Yes, booked ✅", "callback_data": f"deal:book:{deal_id}"},
+                {"text": "Still watching 👀", "callback_data": f"deal:watch:{deal_id}"},
+            ])
+            keyboard.append([self._miniapp_open_button(f"deal/{deal_id}")])
+        reply_markup = {"inline_keyboard": keyboard} if keyboard else None
+
+        await self._send_message(chat_id, text, reply_markup=reply_markup)
+
+    async def _send_daily_digest_thin(
+        self, routes_summary: list[dict], chat_id: str | None = None
+    ) -> None:
+        n_routes = len(routes_summary)
+        moved = sum(
+            1 for r in routes_summary
+            if r.get("alert_price") is not None
+            and r.get("lowest_price") is not None
+            and abs(float(r.get("lowest_price") or 0) - float(r.get("alert_price") or 0)) >= 10
+        )
+
+        if moved == 0:
+            text = f"📊 *FareHound Daily* — {n_routes} route{'s' if n_routes != 1 else ''}. Tap to open."
+        else:
+            text = (
+                f"📊 *FareHound Daily* — {n_routes} route{'s' if n_routes != 1 else ''}, "
+                f"{moved} price{'s' if moved != 1 else ''} moved. Tap to open."
+            )
+
+        keyboard = {"inline_keyboard": [[self._miniapp_open_button("routes")]]}
+        await self._send_message(chat_id, text, reply_markup=keyboard)

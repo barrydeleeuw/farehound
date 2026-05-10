@@ -1,0 +1,1106 @@
+/* ============================================================
+   FareHound — Mini Web App
+   "A flight ledger." Editorial, hairline, monospace numbers.
+   ============================================================ */
+
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap");
+
+/* ----- THEME ----- */
+
+:root {
+  /* Defaults — overridden by Telegram themeParams when running inside Telegram */
+  --bg: #0d0e10;
+  --bg-elev: #16181c;
+  --text: #e8e3d6;
+  --text-dim: #8b8478;
+  --text-faint: #5a5650;
+  --rule: #1f2227;
+  --rule-strong: #2c2f36;
+  --positive: #5fdc8b;
+  --warning: #f0a55a;
+  --negative: #d96666;
+  --button-bg: #e8e3d6;
+  --button-text: #0d0e10;
+
+  /* Telegram overrides — fall back to our palette */
+  --bg: var(--tg-theme-bg-color, #0d0e10);
+  --text: var(--tg-theme-text-color, #e8e3d6);
+  --text-dim: var(--tg-theme-hint-color, #8b8478);
+  --button-bg: var(--tg-theme-button-color, #e8e3d6);
+  --button-text: var(--tg-theme-button-text-color, #0d0e10);
+
+  --serif: "Fraunces", "Times New Roman", serif;
+  --sans: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", "Menlo", "Consolas", monospace;
+}
+
+/* Light-theme override — when Telegram or system prefers light */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f1e8;
+    --bg-elev: #ffffff;
+    --text: #1a1a1d;
+    --text-dim: #6b6962;
+    --text-faint: #a8a39a;
+    --rule: #e8e3d6;
+    --rule-strong: #d4cebd;
+    --positive: #2a8050;
+    --warning: #b86d1c;
+    --negative: #a83333;
+    --button-bg: #1a1a1d;
+    --button-text: #f5f1e8;
+
+    --bg: var(--tg-theme-bg-color, #f5f1e8);
+    --text: var(--tg-theme-text-color, #1a1a1d);
+    --text-dim: var(--tg-theme-hint-color, #6b6962);
+    --button-bg: var(--tg-theme-button-color, #1a1a1d);
+    --button-text: var(--tg-theme-button-text-color, #f5f1e8);
+  }
+}
+
+/* ----- RESET ----- */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.45;
+  font-feature-settings: "ss01", "ss02", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  min-height: 100vh;
+  /* Safe area for Telegram status bar */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  outline: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+  border-bottom-color: var(--text-dim);
+  padding-bottom: 1px;
+  transition: border-color 120ms ease;
+}
+
+a:hover, a:focus-visible {
+  border-bottom-color: var(--text);
+}
+
+/* ----- LAYOUT ----- */
+
+.app {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 20px 22px 96px;  /* extra bottom for Telegram MainButton clearance */
+  position: relative;
+}
+
+/* Top bar — minimal, just brand + page label */
+.topbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 28px;
+}
+
+.topbar .brand {
+  color: var(--text);
+}
+
+.topbar .crumb::before {
+  content: "•";
+  margin: 0 8px;
+  color: var(--text-faint);
+}
+
+/* Section header — a hairline + tracked all-caps label */
+.section {
+  margin-top: 36px;
+}
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+
+.section-label::before {
+  content: "";
+  display: block;
+  width: 18px;
+  height: 1px;
+  background: var(--text-dim);
+}
+
+.section-label .meta {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+/* ----- TYPE ----- */
+
+.display {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 44px;
+  line-height: 1.04;
+  letter-spacing: -0.02em;
+  font-variation-settings: "opsz" 100;
+}
+
+.display-sm {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 28px;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  font-variation-settings: "opsz" 60;
+}
+
+.metadata {
+  color: var(--text-dim);
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  margin-top: 6px;
+}
+
+.metadata .sep::before {
+  content: "·";
+  margin: 0 7px;
+  color: var(--text-faint);
+}
+
+/* Numerical heroes — JetBrains Mono, tabular */
+.number {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "zero", "tnum";
+}
+
+.price-hero {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-top: 24px;
+  margin-bottom: 6px;
+}
+
+.price-hero .currency {
+  font-family: var(--mono);
+  font-size: 38px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.price-hero .amount {
+  font-family: var(--mono);
+  font-size: 60px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.price-hero .unit {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  align-self: flex-end;
+  margin-bottom: 8px;
+}
+
+.price-hero .delta {
+  margin-left: auto;
+  text-align: right;
+  align-self: flex-end;
+  margin-bottom: 8px;
+}
+
+.delta {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.delta-positive { color: var(--positive); }
+.delta-negative { color: var(--negative); }
+
+.delta .label {
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* ----- LEDGER TABLES ----- */
+
+.ledger {
+  width: 100%;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  border-collapse: collapse;
+}
+
+.ledger td {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: baseline;
+}
+
+.ledger tr:last-child td {
+  border-bottom: 0;
+}
+
+.ledger .label-cell {
+  font-family: var(--sans);
+  color: var(--text-dim);
+  font-size: 13px;
+  width: 35%;
+}
+
+.ledger .op {
+  width: 18px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.ledger .num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ledger .num .currency {
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+.ledger .total-row td {
+  padding-top: 14px;
+  border-top: 1px solid var(--text-dim);
+  border-bottom: 0;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ledger .total-row .label-cell {
+  font-family: var(--sans);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.ledger .total-row .annotation {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+  letter-spacing: 0;
+  text-transform: none;
+  margin-left: 8px;
+}
+
+/* Clickable row state */
+.ledger tr.expandable td {
+  cursor: pointer;
+}
+
+.ledger tr.expandable:hover .label-cell {
+  color: var(--text);
+}
+
+.ledger tr.expansion td {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-top: 0;
+  padding-bottom: 12px;
+  border: 0;
+  font-style: italic;
+}
+
+/* ----- "WHY THIS IS THE BEST" ----- */
+
+.reasoning {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.reasoning li {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.reasoning li:last-child {
+  border-bottom: 0;
+}
+
+.reasoning .check {
+  color: var(--positive);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.reasoning .headline {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.reasoning .detail {
+  grid-column: 2;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reasoning .detail .num {
+  color: var(--text);
+}
+
+/* ----- SPARKLINE ----- */
+
+.sparkline-wrap {
+  position: relative;
+  margin-top: 6px;
+}
+
+.sparkline {
+  width: 100%;
+  height: 64px;
+  display: block;
+  overflow: visible;
+}
+
+.sparkline .band {
+  fill: var(--text-dim);
+  fill-opacity: 0.08;
+}
+
+.sparkline .band-edge {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  fill: none;
+}
+
+.sparkline .line {
+  stroke: var(--text);
+  stroke-width: 1.5;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sparkline .current-dot {
+  fill: var(--positive);
+  stroke: var(--bg);
+  stroke-width: 2;
+}
+
+.sparkline-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.sparkline-axis .center {
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ----- ALTERNATIVES TABLE ----- */
+
+.alts {
+  width: 100%;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+
+.alts td {
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: middle;
+}
+
+.alts tr:last-child td {
+  border-bottom: 0;
+}
+
+.alts .code {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  width: 48px;
+}
+
+.alts .desc {
+  font-family: var(--sans);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.alts .total {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.alts .marker {
+  width: 14px;
+  text-align: right;
+  color: var(--positive);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.alts tr.is-best .total {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.alts tr.is-current .code {
+  color: var(--positive);
+}
+
+/* ----- BAGGAGE LIST ----- */
+
+.baggage {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.baggage li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+.baggage li:last-child {
+  border-bottom: 0;
+}
+
+.baggage .item {
+  color: var(--text);
+}
+
+.baggage .cost {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.baggage .cost.included {
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+.baggage .cost.surcharge {
+  color: var(--warning);
+}
+
+/* ----- SECONDARY ACTIONS ----- */
+
+.secondary-actions {
+  display: flex;
+  gap: 22px;
+  margin-top: 32px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.action {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+  border-bottom: 1px solid var(--text-dim);
+  padding-bottom: 2px;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.action:hover, .action:focus-visible {
+  border-bottom-color: var(--text);
+}
+
+.action.danger {
+  color: var(--negative);
+  border-bottom-color: var(--negative);
+  opacity: 0.85;
+}
+
+.action.danger:hover {
+  opacity: 1;
+}
+
+/* Fallback main button (only shown when not running inside Telegram) */
+.main-button {
+  display: block;
+  width: 100%;
+  padding: 18px 24px;
+  margin-top: 28px;
+  background: var(--button-bg);
+  color: var(--button-text);
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border: 0;
+  cursor: pointer;
+  transition: opacity 120ms ease;
+}
+
+.main-button:hover { opacity: 0.9; }
+.main-button:active { opacity: 0.75; }
+
+body.in-telegram .main-button {
+  display: none;  /* Telegram MainButton takes over */
+}
+
+/* ----- ROUTE LIST (page 2) ----- */
+
+.routes-count {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 24px;
+  letter-spacing: 0.02em;
+}
+
+.add-route-form {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+  margin-bottom: 36px;
+}
+
+.add-route {
+  flex: 1;
+  display: block;
+  padding: 12px 0;
+  background: transparent;
+  border: 0;
+  font-family: var(--sans);
+  font-size: 14px;
+  color: var(--text);
+  letter-spacing: 0.01em;
+  cursor: text;
+}
+
+.add-route::placeholder {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.add-route:focus {
+  outline: 0;
+}
+
+.add-route-submit {
+  flex-shrink: 0;
+  padding: 0 14px;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--rule-strong);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 120ms ease, border-left-color 120ms ease;
+}
+
+.add-route-submit:hover,
+.add-route-submit:focus-visible {
+  color: var(--text);
+  border-left-color: var(--text);
+}
+
+/* Parse-confirm card — appears below the input after submit */
+.parse-confirm {
+  border-top: 1px solid var(--text-dim);
+  border-bottom: 1px solid var(--text-dim);
+  padding: 22px 0 20px;
+  margin-bottom: 36px;
+  animation: rise 320ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.parse-confirm-status {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--positive);
+  margin-bottom: 10px;
+}
+
+.parse-confirm-name {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 28px;
+  line-height: 1.06;
+  letter-spacing: -0.01em;
+  font-variation-settings: "opsz" 60;
+  color: var(--text);
+}
+
+.parse-confirm-meta {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-top: 6px;
+}
+
+.parse-confirm-note {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-faint);
+  font-style: italic;
+  margin-top: 14px;
+}
+
+.parse-confirm-original {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--rule-strong);
+  background: transparent;
+  font-style: normal;
+}
+
+.parse-confirm-actions {
+  display: flex;
+  gap: 22px;
+  margin-top: 18px;
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+/* Pending state — newly added route, prices not yet polled */
+.route-card.is-pending {
+  opacity: 1;
+}
+
+.route-card.is-pending .ordinal {
+  color: var(--positive);
+}
+
+.price.pending {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-style: italic;
+  color: var(--text-dim);
+  letter-spacing: 0.01em;
+}
+
+.route-card {
+  padding-top: 28px;
+  padding-bottom: 32px;
+  border-top: 1px solid var(--rule);
+}
+
+.route-card .ordinal {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+
+.route-card.is-snoozed .ordinal::after {
+  content: " · SNOOZED";
+  color: var(--warning);
+}
+
+.route-card .name {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 28px;
+  letter-spacing: -0.01em;
+  line-height: 1.06;
+  font-variation-settings: "opsz" 60;
+}
+
+.route-card .name a {
+  border-bottom: 0;
+}
+
+.route-card .meta-line {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-top: 6px;
+}
+
+.route-card .price-row {
+  display: flex;
+  align-items: baseline;
+  margin-top: 18px;
+  gap: 14px;
+}
+
+.route-card .price-row .price {
+  font-family: var(--mono);
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.route-card .price-row .price .currency {
+  color: var(--text-faint);
+  font-size: 18px;
+  margin-right: 4px;
+}
+
+.route-card .price-row .price .unit {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-left: 4px;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+}
+
+.route-card .badge {
+  margin-left: auto;
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+}
+
+.badge-positive { color: var(--positive); }
+.badge-warning { color: var(--warning); }
+
+.route-card .footnote {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.route-card.is-snoozed {
+  opacity: 0.62;
+}
+
+.route-card .actions {
+  display: flex;
+  gap: 22px;
+  margin-top: 18px;
+  font-size: 13px;
+}
+
+.route-card .actions .action {
+  font-size: 13px;
+}
+
+/* ----- SETTINGS ----- */
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.radio-row:last-child { border-bottom: 0; }
+
+.radio-row .dot {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--text-dim);
+  background: transparent;
+  border-radius: 0;  /* SQUARE — even radios don't get rounded */
+  flex-shrink: 0;
+  position: relative;
+  transition: border-color 120ms ease;
+}
+
+.radio-row.is-selected .dot {
+  border-color: var(--text);
+}
+
+.radio-row.is-selected .dot::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--text);
+}
+
+.radio-row .label {
+  color: var(--text);
+}
+
+.radio-row .desc {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.transport-table {
+  width: 100%;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+
+.transport-table td {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.transport-table tr:last-child td { border-bottom: 0; }
+
+.transport-table .code {
+  font-weight: 700;
+  width: 44px;
+}
+
+.transport-table .mode {
+  font-family: var(--sans);
+  color: var(--text-dim);
+  font-size: 12px;
+  width: 60px;
+}
+
+.transport-table .num {
+  text-align: right;
+  width: 64px;
+  white-space: nowrap;
+}
+
+.transport-table .num .currency,
+.transport-table .num .unit-label {
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+.field-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: 14px;
+}
+
+.field-row:last-child { border-bottom: 0; }
+
+.field-row .label {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.field-row input[type="time"] {
+  font-family: var(--mono);
+  font-size: 14px;
+  padding: 4px 8px;
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+  color: var(--text);
+  width: 84px;
+  text-align: center;
+}
+
+.field-row input[type="time"]:focus {
+  border-color: var(--text);
+}
+
+.field-row .between {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.field-row .value {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+/* ----- SUBTLE PAGE-LOAD ENTRY ----- */
+
+@media (prefers-reduced-motion: no-preference) {
+  .app > * {
+    animation: rise 480ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  .app > *:nth-child(1) { animation-delay: 0ms; }
+  .app > *:nth-child(2) { animation-delay: 40ms; }
+  .app > *:nth-child(3) { animation-delay: 80ms; }
+  .app > *:nth-child(4) { animation-delay: 120ms; }
+  .app > *:nth-child(5) { animation-delay: 160ms; }
+  .app > *:nth-child(6) { animation-delay: 200ms; }
+  .app > *:nth-child(7) { animation-delay: 240ms; }
+  .app > *:nth-child(8) { animation-delay: 280ms; }
+  .app > *:nth-child(9) { animation-delay: 320ms; }
+  .app > *:nth-child(10) { animation-delay: 360ms; }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ----- PREVIEW INDEX ONLY ----- */
+
+.preview-index {
+  padding: 40px 24px;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.preview-index h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 36px;
+  letter-spacing: -0.02em;
+  font-variation-settings: "opsz" 100;
+  margin-bottom: 8px;
+}
+
+.preview-index .lede {
+  color: var(--text-dim);
+  font-size: 14px;
+  margin-bottom: 36px;
+}
+
+.preview-index ol {
+  list-style: none;
+  counter-reset: pages;
+}
+
+.preview-index li {
+  counter-increment: pages;
+  border-top: 1px solid var(--rule);
+  padding: 22px 0;
+}
+
+.preview-index li::before {
+  content: counter(pages, decimal-leading-zero);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+
+.preview-index li a {
+  display: block;
+  font-family: var(--serif);
+  font-size: 28px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  margin-top: 6px;
+  border: 0;
+  font-variation-settings: "opsz" 60;
+}
+
+.preview-index li p {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  max-width: 420px;
+}
