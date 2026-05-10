@@ -122,6 +122,63 @@ class FlightSearchResult:
         }
 
 
+@dataclass
+class DirectionsResult:
+    """Distance + duration result from SerpAPI's google_maps_directions engine."""
+    distance_km: float
+    duration_min: int
+    mode: str  # canonical: 'drive' or 'transit'
+
+
+def _parse_directions_response(data: dict, canonical_mode: str) -> DirectionsResult:
+    """Parse SerpAPI google_maps_directions response into a DirectionsResult.
+
+    Defensive — SerpAPI's scraped response shape varies slightly by route, so
+    we walk a couple of plausible paths and fall through to a SerpAPIError
+    rather than crashing the onboarding caller.
+    """
+    # SerpAPI google_maps_directions returns `directions[]` with each direction
+    # containing `travel_modes[]` whose entries have `total_duration` (seconds)
+    # and `distance` (text + meters). Some responses put the values directly
+    # on the top-level direction entry. We try both shapes.
+    try:
+        directions = data.get("directions") or []
+        if not directions:
+            raise SerpAPIError("SerpAPI directions: no routes returned")
+        first = directions[0]
+        # Shape A: travel_modes[0] contains the per-mode totals.
+        modes_list = first.get("travel_modes") or []
+        if modes_list:
+            mode_entry = modes_list[0]
+            total_seconds = mode_entry.get("total_duration") or 0
+            distance_meters = (
+                mode_entry.get("distance", {}).get("value")
+                if isinstance(mode_entry.get("distance"), dict)
+                else mode_entry.get("distance")
+            ) or 0
+        else:
+            # Shape B: totals on the direction itself.
+            total_seconds = first.get("total_duration") or first.get("duration", {}).get("value") or 0
+            distance_meters = (
+                first.get("distance", {}).get("value")
+                if isinstance(first.get("distance"), dict)
+                else first.get("distance")
+            ) or 0
+        if not total_seconds or not distance_meters:
+            raise SerpAPIError(
+                f"SerpAPI directions: missing duration/distance in response"
+            )
+        return DirectionsResult(
+            distance_km=round(float(distance_meters) / 1000, 1),
+            duration_min=int(round(float(total_seconds) / 60)),
+            mode=canonical_mode,
+        )
+    except SerpAPIError:
+        raise
+    except (KeyError, TypeError, ValueError) as e:
+        raise SerpAPIError(f"SerpAPI directions parse failed: {e}") from e
+
+
 def extract_lowest_price(
     result: FlightSearchResult,
     max_stops: int | None = None,
@@ -377,6 +434,71 @@ class SerpAPIClient:
             price_insights=result.price_insights,
             flights=all_flights,
         )
+
+    async def directions(
+        self,
+        *,
+        origin: str,
+        destination: str,
+        mode: str = "drive",
+    ) -> "DirectionsResult":
+        """Look up driving / transit distance + duration via SerpAPI's
+        google_maps_directions engine.
+
+        R9 ITEM-053: used during onboarding to auto-fill drive distance and
+        transit duration between the user's home location and each nearby
+        airport. Reuses the existing SerpAPI plan budget — no separate Google
+        Cloud account or quota / billing setup required.
+
+        `origin` / `destination` accept free-form strings (city names,
+        addresses, IATA codes); SerpAPI passes them through to Google Maps
+        which handles geocoding.
+
+        `mode` is one of: drive | driving | car (= driving), train | transit |
+        bus (= transit). Mapped to Google's travel_mode encoding internally.
+        """
+        # Google Maps travel_mode codes: 0=driving, 3=transit, 2=walking, 1=bicycling.
+        # We only ever need driving and transit for ITEM-053.
+        m = mode.lower().strip()
+        if m in {"drive", "driving", "car"}:
+            travel_mode = 0
+            canonical_mode = "drive"
+        elif m in {"train", "transit", "bus", "public transport"}:
+            travel_mode = 3
+            canonical_mode = "transit"
+        else:
+            raise SerpAPIError(f"Unsupported travel mode: {mode}")
+
+        params: dict[str, str | int] = {
+            "engine": "google_maps_directions",
+            "api_key": self.api_key,
+            "start_addr": origin,
+            "end_addr": destination,
+            "travel_mode": travel_mode,
+            "hl": "en",
+        }
+
+        # Cache (saves quota when same query repeats — common during testing).
+        if self._cache:
+            cached = self._cache.get(params)
+            if cached:
+                return _parse_directions_response(cached, canonical_mode)
+
+        self._warn_rate_limit()
+
+        response = await self._client.get(SERPAPI_BASE_URL, params=params)
+        self._calls_this_month += 1
+        if response.status_code != 200:
+            logger.error("SerpAPI directions HTTP %d: %s", response.status_code, response.text[:500])
+            raise SerpAPIError(f"SerpAPI directions returned HTTP {response.status_code}")
+        data = response.json()
+        if "error" in data:
+            raise SerpAPIError(f"SerpAPI directions error: {data['error']}")
+
+        if self._cache:
+            self._cache.put(params, data)
+
+        return _parse_directions_response(data, canonical_mode)
 
     def _warn_rate_limit(self) -> None:
         if self._calls_this_month >= MONTHLY_BUDGET_HARD_CAP:
