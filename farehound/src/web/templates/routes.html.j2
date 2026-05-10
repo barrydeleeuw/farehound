@@ -23,9 +23,17 @@
   </form>
 
   <section class="parse-confirm" id="parse-confirm" hidden>
-    <div class="parse-confirm-status">Parsed</div>
+    <div class="parse-confirm-status" id="pc-status">Parsed</div>
     <h3 class="parse-confirm-name" id="pc-name">—</h3>
     <p class="parse-confirm-meta" id="pc-meta">—</p>
+
+    <!-- Clarification UI: shown when Claude returned needs_clarification=true,
+         e.g. "Japan" → "did you mean NRT, KIX, or NGO?" -->
+    <div id="pc-clarify" hidden style="margin-top: 14px;">
+      <p class="parse-confirm-note" id="pc-clarify-question" style="font-style:normal; color: var(--warning);"></p>
+      <div id="pc-clarify-options" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;"></div>
+    </div>
+
     <p class="parse-confirm-note">
       Claude turned your text into this trip. <a href="#" id="pc-show-original">view original</a>
     </p>
@@ -126,6 +134,66 @@
       return resp.json();
     }
 
+    function renderParsed(parsed, originalText) {
+      pcName.textContent = `${parsed.origin || "?"} → ${parsed.destination || "?"}`;
+      const dur = parsed.trip_duration_days ? `${parsed.trip_duration_days} days` : "dates flexible";
+      const dates = parsed.earliest_departure ? `${parsed.earliest_departure} → ${parsed.latest_return}` : dur;
+      pcMeta.textContent = `${parsed.city || parsed.destination || "—"} · ${dates} · ${parsed.passengers || 2} pax`;
+      pcOriginal.textContent = `"${originalText}"`;
+      pcOriginal.hidden = true;
+      pcShowOriginal.textContent = "view original";
+
+      // Clarification path: Claude needs disambiguation before we can save.
+      const clarifyBlock = document.getElementById("pc-clarify");
+      const clarifyQ = document.getElementById("pc-clarify-question");
+      const clarifyOpts = document.getElementById("pc-clarify-options");
+      const status = document.getElementById("pc-status");
+      const confirmBtn = document.getElementById("pc-confirm");
+
+      const needsClarify = parsed.needs_clarification === true || !parsed.destination;
+
+      clarifyOpts.replaceChildren();
+      if (needsClarify) {
+        status.textContent = "Needs clarification";
+        status.style.color = "var(--warning)";
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = "0.4";
+        confirmBtn.title = "Pick a destination first";
+
+        clarifyQ.textContent = parsed.clarification_question
+          || (parsed.destination
+              ? "Confirm the destination."
+              : "Couldn't pin down the destination — try again with a clearer phrase like \"flight to Valencia in June\".");
+
+        const opts = Array.isArray(parsed.options) ? parsed.options : [];
+        opts.forEach((opt) => {
+          const btn = document.createElement("button");
+          btn.className = "action";
+          btn.type = "button";
+          btn.style.borderBottomColor = "var(--warning)";
+          btn.textContent = opt;
+          btn.addEventListener("click", () => {
+            // Try to extract IATA from the option string, e.g. "Tenerife South (TFS)" → "TFS"
+            const iataMatch = String(opt).match(/\(([A-Z]{3})\)/);
+            const iata = iataMatch ? iataMatch[1] : String(opt).trim().toUpperCase().slice(0, 3);
+            parsed.destination = iata;
+            parsed.needs_clarification = false;
+            parsed.options = null;
+            renderParsed(parsed, originalText);
+          });
+          clarifyOpts.appendChild(btn);
+        });
+        clarifyBlock.hidden = false;
+      } else {
+        status.textContent = "Parsed";
+        status.style.color = "var(--positive)";
+        confirmBtn.disabled = false;
+        confirmBtn.style.opacity = "";
+        confirmBtn.title = "";
+        clarifyBlock.hidden = true;
+      }
+    }
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const text = input.value.trim();
@@ -134,13 +202,7 @@
       try {
         const parsed = await callApi("/api/routes/parse", { text });
         lastParsed = parsed;
-        pcName.textContent = `${parsed.origin || "?"} → ${parsed.destination || "?"}`;
-        const dur = parsed.trip_duration_days ? `${parsed.trip_duration_days} days` : "dates flexible";
-        const dates = parsed.earliest_departure ? `${parsed.earliest_departure} → ${parsed.latest_return}` : dur;
-        pcMeta.textContent = `${parsed.city || parsed.destination || ""} · ${dates} · ${parsed.passengers || 2} pax`;
-        pcOriginal.textContent = `"${text}"`;
-        pcOriginal.hidden = true;
-        pcShowOriginal.textContent = "view original";
+        renderParsed(parsed, text);
         card.hidden = false;
         card.scrollIntoView({ behavior: "smooth", block: "center" });
       } catch (err) {
@@ -163,6 +225,12 @@
 
     document.getElementById("pc-confirm").addEventListener("click", async () => {
       if (!lastParsed) return;
+      if (!lastParsed.destination) {
+        const msg = "Pick a destination above first — Claude couldn't pin it down on its own.";
+        if (window.Telegram?.WebApp?.showAlert) window.Telegram.WebApp.showAlert(msg);
+        else alert(msg);
+        return;
+      }
       try {
         const result = await callApi("/api/routes", lastParsed);
         const ordinal = String(list.querySelectorAll(".route-card").length + 1).padStart(2, "0");
