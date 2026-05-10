@@ -222,6 +222,113 @@ def test_trips_list_no_deal_yields_no_link(db_with_user):
     assert route_card["current_price_pp_display"] != "—"
 
 
+def test_deal_page_wires_nearby_alternatives_when_secondaries_polled(db_with_user):
+    """v0.11.5: when the orchestrator has polled secondary airports, the deal
+    page reasoning bullet shows them and the Alternatives table populates.
+    Pre-fix the bullet was hardcoded to 'no alternate origins' even when data
+    existed."""
+    from src.storage.models import PriceSnapshot
+    from src.web.data import assemble_deal
+
+    _seed_route_snapshot_deal(
+        db_with_user,
+        transport_options=[
+            {"mode": "drive", "cost_eur": 30, "cost_scales_with_pax": False,
+             "parking_cost_per_day_eur": 8},
+        ],
+    )
+
+    # Configure a secondary airport (BRU) with cheaper transport.
+    db_with_user._conn.execute(
+        "INSERT INTO airport_transport (airport_code, airport_name, transport_mode, "
+        "transport_cost_eur, transport_time_min, parking_cost_eur, is_primary, user_id) "
+        "VALUES ('BRU', 'Brussels', 'train', 60, 130, NULL, 0, 'u1')"
+    )
+    db_with_user._conn.commit()
+    db_with_user.add_transport_option(
+        user_id="u1", airport_code="BRU", mode="train",
+        cost_eur=30, cost_scales_with_pax=True,  # 60/RT/pp
+    )
+
+    # Seed a secondary snapshot for BRU → cheaper than primary AMS €800.
+    db_with_user.insert_snapshot(
+        PriceSnapshot(
+            snapshot_id="s2", route_id="r1",
+            observed_at=datetime.now(UTC), source="serpapi", passengers=2,
+            outbound_date=date(2026, 10, 1), return_date=date(2026, 10, 8),
+            lowest_price=600.0,
+            search_params={"origin": "BRU"},
+            user_id="u1",
+        ),
+        user_id="u1",
+    )
+
+    payload = assemble_deal(db_with_user, deal_id="d1", user_id="u1")
+    assert payload is not None
+
+    # Reasoning bullet now references the nearby comparison.
+    headlines = [b["headline"] for b in payload["reasoning"]]
+    assert any("BRU" in h or "alternative" in h.lower() for h in headlines), (
+        f"Expected nearby-airport bullet, got: {headlines}"
+    )
+    # The 'No alternate origins' wording should NOT appear when secondaries exist.
+    assert not any("no alternate origins" in h.lower() for h in headlines)
+
+    # Alternatives table is populated.
+    alts = payload["alternatives"]["airports"]
+    assert len(alts) >= 2  # primary + at least one secondary
+    codes = [r["code"] for r in alts]
+    assert "AMS" in codes
+    assert "BRU" in codes
+    # Exactly one row marked is_current (the primary).
+    current = [r for r in alts if r["is_current"]]
+    assert len(current) == 1 and current[0]["code"] == "AMS"
+    # Exactly one row marked is_best (the cheapest total).
+    best = [r for r in alts if r["is_best"]]
+    assert len(best) == 1
+
+
+def test_deal_page_says_yours_is_best_when_no_savings(db_with_user):
+    """v0.11.5: secondaries exist but none are cheaper → bullet should say
+    'your airport is best, checked X alternatives' not 'no alternate origins'."""
+    from src.storage.models import PriceSnapshot
+    from src.web.data import assemble_deal
+
+    _seed_route_snapshot_deal(
+        db_with_user,
+        transport_options=[
+            {"mode": "train", "cost_eur": 11, "cost_scales_with_pax": True},
+        ],
+    )
+    # Add an EIN with high secondary fare → won't be competitive.
+    db_with_user._conn.execute(
+        "INSERT INTO airport_transport (airport_code, airport_name, transport_mode, "
+        "transport_cost_eur, transport_time_min, parking_cost_eur, is_primary, user_id) "
+        "VALUES ('EIN', 'Eindhoven', 'train', 30, 90, NULL, 0, 'u1')"
+    )
+    db_with_user._conn.commit()
+    db_with_user.add_transport_option(
+        user_id="u1", airport_code="EIN", mode="train",
+        cost_eur=15, cost_scales_with_pax=True,
+    )
+    db_with_user.insert_snapshot(
+        PriceSnapshot(
+            snapshot_id="s3", route_id="r1",
+            observed_at=datetime.now(UTC), source="serpapi", passengers=2,
+            outbound_date=date(2026, 10, 1), return_date=date(2026, 10, 8),
+            lowest_price=900.0,  # higher than AMS's 800 → not competitive
+            search_params={"origin": "EIN"},
+            user_id="u1",
+        ),
+        user_id="u1",
+    )
+    payload = assemble_deal(db_with_user, deal_id="d1", user_id="u1")
+    headlines = [b["headline"] for b in payload["reasoning"]]
+    assert any("best" in h.lower() and ("alternative" in h.lower() or "checked" in h.lower()) for h in headlines), (
+        f"Expected 'yours is best' bullet, got: {headlines}"
+    )
+
+
 def test_assemble_deal_disabled_mode_excluded(db_with_user):
     """Disabling train should switch the chosen mode to next-cheapest."""
     _seed_route_snapshot_deal(
