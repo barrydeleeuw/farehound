@@ -38,11 +38,12 @@
         {% endfor %}
       </tbody>
     </table>
-    {% if not settings.transports %}
     <p class="footnote" style="font-family: var(--sans); color: var(--text-faint); font-size: 12px; margin-top: 12px;">
-      No airports configured. Add a route — FareHound asks about transport during onboarding.
+      {% if not settings.transports %}
+      No airports configured yet.
+      {% endif %}
+      To add a new airport (or change an existing one), message me in chat — adding airports needs the conversational flow so I can ask the right follow-ups about how you get there.
     </p>
-    {% endif %}
   </section>
 
   <section class="section">
