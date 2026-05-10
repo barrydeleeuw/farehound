@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>{% block title %}FareHound{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v={{ cache_buster }}" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body
@@ -19,6 +19,6 @@
   {% block content %}{% endblock %}
 </main>
 {% block scripts %}{% endblock %}
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={{ cache_buster }}"></script>
 </body>
 </html>

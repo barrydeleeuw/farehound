@@ -31,6 +31,12 @@ logger = logging.getLogger("farehound.web")
 _HERE = Path(__file__).parent
 _TEMPLATES = Jinja2Templates(directory=str(_HERE / "templates"))
 
+# Cache-buster appended to static asset URLs (?v=...) so Telegram's WebApp
+# WebView picks up new JS/CSS after a restart instead of serving stale files.
+# Boot-time epoch — bumps on every container restart.
+import time as _time
+_TEMPLATES.env.globals["cache_buster"] = str(int(_time.time()))
+
 
 def create_app(db: Database, anthropic_key: str | None, anthropic_model: str | None) -> FastAPI:
     """Build the FastAPI app, wired to the existing Database + Claude client."""
