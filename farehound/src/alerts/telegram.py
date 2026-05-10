@@ -289,23 +289,22 @@ class TelegramNotifier:
             logger.exception("Unexpected error sending Telegram message")
 
     def _google_flights_url(self, deal: dict) -> str:
+        """v0.11.6: delegates to the canonical `#flt=` deep-link builder.
+        The old `?q=Flights+from+X+to+Y` query-string form often dumped users
+        on flights.google.com instead of a populated search."""
+        from src.apis.serpapi import build_google_flights_url
         origin = deal.get("origin", "")
         dest = deal.get("destination", "")
         outbound = deal.get("outbound_date", "")
-        return_date = deal.get("return_date", "")
-        passengers = deal.get("passengers", 2)
-        # Use Google Flights direct URL format
-        url = (
-            f"https://www.google.com/travel/flights"
-            f"?q=Flights+from+{origin}+to+{dest}"
+        if not origin or not dest or not outbound:
+            return f"https://www.google.com/travel/flights?q=Flights+from+{origin}+to+{dest}"
+        return build_google_flights_url(
+            origin=origin,
+            destination=dest,
+            outbound_date=outbound,
+            return_date=deal.get("return_date") or None,
+            passengers=deal.get("passengers", 2),
         )
-        if outbound:
-            url += f"+on+{outbound}"
-        if return_date:
-            url += f"+return+{return_date}"
-        if passengers and passengers > 1:
-            url += f"+{passengers}+passengers"
-        return url
 
     async def send_deal_alert(self, deal_info: dict, chat_id: str | None = None) -> None:
         if _miniapp_enabled():

@@ -680,14 +680,22 @@ def _baggage_policy_items(snapshot: PriceSnapshot | None) -> tuple[list[dict], s
 
 
 def _google_flights_url(route: Route, snapshot: PriceSnapshot | None) -> str:
-    base = f"https://www.google.com/travel/flights?q=Flights+from+{route.origin}+to+{route.destination}"
-    if snapshot and snapshot.outbound_date:
-        base += f"+on+{snapshot.outbound_date}"
-    if snapshot and snapshot.return_date:
-        base += f"+return+{snapshot.return_date}"
-    if route.passengers and route.passengers > 1:
-        base += f"+{route.passengers}+passengers"
-    return base
+    """Deep-link to Google Flights search. v0.11.6: delegates to the canonical
+    `#flt=` hash-fragment builder; the old `?q=Flights+from+...` form was
+    landing users on flights.google.com homepage instead of a populated search.
+    """
+    from src.apis.serpapi import build_google_flights_url
+    if not snapshot or not snapshot.outbound_date:
+        # No dates → fall back to a search-style URL Google's parser handles
+        # most of the time.
+        return f"https://www.google.com/travel/flights?q=Flights+from+{route.origin}+to+{route.destination}"
+    return build_google_flights_url(
+        origin=route.origin,
+        destination=route.destination,
+        outbound_date=snapshot.outbound_date,
+        return_date=snapshot.return_date,
+        passengers=route.passengers,
+    )
 
 
 # ---------- routes page ----------
@@ -931,7 +939,7 @@ def assemble_settings(db: Database, user_id: str, telegram_handle: str = "") -> 
             "digest_time": prefs.get("digest_time"),
             "digest_skip_count_7d": user.get("digest_skip_count_7d") or 0,
             "telegram_label": telegram_handle or user.get("name") or "—",
-            "version": "0.11.5",
+            "version": "0.11.6",
         },
         "baggage_options": _BAGGAGE_OPTIONS,
     }

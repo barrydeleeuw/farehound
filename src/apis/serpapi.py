@@ -564,22 +564,35 @@ def build_google_flights_url(
     destination: str,
     outbound_date: str | date,
     return_date: str | date | None = None,
+    passengers: int | None = None,
 ) -> str:
-    """Construct a Google Flights search URL for use in alerts."""
-    params = {
-        "hl": "en",
-        "curr": "EUR",
-    }
-    # Google Flights URL format: /travel/flights/s/origin/dest/date[/return_date]
-    # But the query-param form is more reliable for deep links.
-    tfs = f"CBwQAhoeEgoyMDI2LTEwLTAxagcIARIDQU1TcgcIARIDTlJU"  # opaque, not useful
-    # Simpler approach: use the flights search page with query params
-    base = "https://www.google.com/travel/flights"
-    parts = [
-        f"q=Flights+from+{origin}+to+{destination}",
-        f"d={outbound_date}",
-    ]
-    if return_date:
-        parts.append(f"r={return_date}")
+    """Construct a Google Flights deep-link URL.
 
-    return f"{base}?{('&'.join(parts))}"
+    v0.11.6: switched from `?q=Flights+from+X+to+Y` (a free-text search query
+    that Google parses inconsistently — it often lands on the homepage instead
+    of a populated search) to the `#flt=` hash-fragment format that Google's
+    own UI generates when you share a search URL. This format reliably opens
+    the Flights search page with origin / destination / dates pre-filled.
+
+    Format: `https://www.google.com/travel/flights?hl=en#flt=ORIG.DEST.YYYY-MM-DD*DEST.ORIG.YYYY-MM-DD;c:EUR;e:1;sd:1;t:f`
+    where `t:f` = round trip, `t:c` = one-way.
+
+    Note: Telegram in-app browser sometimes strips hash fragments. For Telegram
+    alerts the SerpAPI-provided `booking_options[].link` value is preferred
+    when available; this is the fallback.
+    """
+    out_str = str(outbound_date)
+    leg_out = f"{origin}.{destination}.{out_str}"
+    if return_date:
+        ret_str = str(return_date)
+        flt = f"{leg_out}*{destination}.{origin}.{ret_str}"
+        trip_type = "f"  # round trip
+    else:
+        flt = leg_out
+        trip_type = "c"  # one-way
+    params = f"c:EUR;e:1;sd:1;t:{trip_type}"
+    pax_part = ""
+    if passengers and passengers > 1:
+        # tt:N → number of adults. Caps at 9 (Google's UI limit).
+        pax_part = f";px:{min(int(passengers), 9)}"
+    return f"https://www.google.com/travel/flights?hl=en#flt={flt};{params}{pax_part}"
