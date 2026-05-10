@@ -18,11 +18,14 @@ After a release is committed and signed off:
 
 1. **Bump version** in `farehound/config.yaml` (e.g., `2.1.0` → `2.1.1`)
 
-2. **Sync `farehound/src/`** — copy root `src/` into `farehound/src/` so the HA Supervisor
-   build context has the latest code. The Supervisor builds from the `farehound/` subdirectory,
-   so `src/` must exist there.
+2. **Sync `farehound/src/` AND `farehound/pyproject.toml`** — copy root `src/` and root
+   `pyproject.toml` into `farehound/` so the HA Supervisor build context has the latest code
+   AND the latest deps. The Supervisor builds from the `farehound/` subdirectory; both files
+   must exist there. **Skipping the pyproject sync silently breaks any release that adds a
+   dep** (the Docker image rebuild will succeed but imports will fail at runtime).
    ```
    rm -rf farehound/src && cp -r src/ farehound/src/
+   cp pyproject.toml farehound/pyproject.toml
    ```
 
 3. **Commit and push** to `main`
