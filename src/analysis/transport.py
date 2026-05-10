@@ -44,9 +44,13 @@ def compute_mode_total(opt: dict, passengers: int, trip_days: int = 0) -> float:
           ...
         }
 
-    For per-person modes (train/bus): cost_eur × 2 × passengers.
-    For per-vehicle modes (drive/taxi): cost_eur × 2.
-    Plus parking (only meaningful for drive): parking_cost_per_day_eur × trip_days.
+    Two cost models, controlled by `cost_scales_with_pax`:
+
+    - **Per-vehicle** (drive, taxi): cost is for the whole party in one
+      vehicle. Total = cost × 2 (RT) + parking_per_day × trip_days.
+      Assumes party ≤ 4 pax (one car). Above 4 the user should adjust.
+    - **Per-person** (train, bus, metro, ferry, tram): cost is one ticket.
+      Total = cost × 2 (RT) × passengers. No parking.
 
     When trip_days == 0 we substitute DEFAULT_TRIP_DAYS_FOR_COMPARISON for the
     parking term — otherwise drive options without an explicit trip duration

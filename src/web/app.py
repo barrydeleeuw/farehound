@@ -312,7 +312,10 @@ def _register_api_routes(app: FastAPI) -> None:
 
     # ---- R9 ITEM-053: airport transport options (multi-mode editable) ----
 
-    _VALID_MODES = {"drive", "train", "taxi", "uber", "bus", "metro", "ferry", "tram", "other"}
+    # Uber removed in v0.11.2 — same per-vehicle cost model as taxi, redundant.
+    # Existing uber rows (if any) keep working at the math layer; they just can't
+    # be created or edited via the UI any more.
+    _VALID_MODES = {"drive", "train", "taxi", "bus", "metro", "ferry", "tram", "other"}
     _PER_PERSON_MODE_DEFAULTS = {"train", "bus", "metro", "ferry", "tram"}
 
     def _validate_airport_code(code: str) -> str:

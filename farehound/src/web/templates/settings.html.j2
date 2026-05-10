@@ -125,11 +125,10 @@
       <input type="hidden" id="edit-mode-canonical" />
       <label>Mode
         <select id="edit-mode-name">
-          <option value="drive">drive</option>
-          <option value="train">train</option>
-          <option value="taxi">taxi</option>
-          <option value="uber">uber</option>
-          <option value="bus">bus</option>
+          <option value="drive">drive (per car)</option>
+          <option value="taxi">taxi (per car, ≤4 pax)</option>
+          <option value="train">train (per person)</option>
+          <option value="bus">bus (per person)</option>
           <option value="other">other</option>
         </select>
       </label>
@@ -138,6 +137,7 @@
       </label>
       <label>Cost (€, one-way)
         <input type="number" id="edit-cost" step="0.50" min="0" />
+        <small id="cost-hint" class="field-hint">drive/taxi: cost for the whole party. train/bus: cost per person.</small>
       </label>
       <label>Time (minutes)
         <input type="number" id="edit-time" min="0" max="600" />
