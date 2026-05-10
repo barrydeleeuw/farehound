@@ -93,6 +93,35 @@ Breakdown row becomes: `transport (train, cheapest)  €15/pp` with the chosen m
 - **NS API:** free, no key needed for fare lookups. Rate-limit lenient.
 - **Cache:** all auto-fill results are stored in `airport_transport_option` with `source` + `confidence` so we never re-call Google Maps for the same airport pair.
 
+### [ITEM-054] Cheapest-TOTAL fare selection across airlines (not just cheapest FARE)
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** M
+- **Dependencies:** [ITEM-053] shipped through v0.11.8 (airline-code capture from `other_flights` fallback) — Done.
+- **Why this matters:** FareHound's mission is "lowest REAL cost door-to-door." Today the orchestrator picks the cheapest **fare** out of SerpAPI's results, then adds baggage based on that airline's policy. If Transavia offers €129 (no bag included → +€30 = €159 total) and KLM offers €145 (bag included → €145 total), we currently surface Transavia at €159 — when KLM is actually €14 cheaper door-to-door. The "real cost" promise breaks down across airline classes.
+- **Surfaced in v0.11.x dogfooding:** Barry's AMS→MEX deal showed €30/checked baggage for an Air France long-haul (where the bag is included in the fare) because the airline code was being lost; v0.11.8 fixed the airline-capture half. The remaining half — picking the cheapest TOTAL not the cheapest FARE — is this item.
+- **Approach:**
+  - Walk through `best_flights + other_flights` from each SerpAPI response.
+  - For each flight option, compute `total = price + baggage_party_total` where `baggage_party_total = parse_baggage_extensions(opt.extensions) or fallback_table(opt.airline, leg_distance, baggage_needs) × passengers × 2 directions`.
+  - Pick the option with the lowest total — `min(options, key=lambda o: total(o))`.
+  - Store the chosen option as `snapshot.best_flight` along with its `airline_code`, `airline_name`, `price`, and `baggage_estimate`.
+  - Deal page shows the chosen airline prominently + an expandable "see other fare options" list ranked by total cost so the user can see the trade-off.
+- **Acceptance criteria:**
+  - [ ] For each snapshot, all flights in `best_flights + other_flights` are evaluated for total cost (not just the cheapest fare).
+  - [ ] `snapshot.best_flight` reflects the lowest-TOTAL option, including its airline code.
+  - [ ] Deal page hero shows airline name (e.g. "AMS → NRT · KLM").
+  - [ ] Deal page has a "fare options" disclosure that lists each priced option with `airline · €fare · €total` so the user can see the trade-off.
+  - [ ] Synthetic SerpAPI fixture test: 2 options — Transavia €129 (no bag) + KLM €145 (long-haul bag included) — KLM picked when `baggage_needs='one_checked'`; Transavia picked when `baggage_needs='carry_on_only'`.
+  - [ ] Existing scoring still works with the chosen option (scorer prompts unchanged).
+  - [ ] Backwards-compat: snapshots stored pre-ITEM-054 keep rendering correctly (their `best_flight` already has whatever was picked at poll time).
+- **Out of scope:**
+  - Booking-class differentiation within a single airline (KLM Light vs Standard vs Flex). SerpAPI doesn't reliably surface fare-class metadata; would need a separate effort.
+  - Code-share resolution (operating carrier vs marketing carrier). Same data-availability constraint.
+- **Surfaces affected:**
+  - Orchestrator: `_compute_baggage_for_result` becomes `_pick_cheapest_total_option` returning `(flight, baggage)` together.
+  - Telegram alerts: `airline` field on deal_info uses the chosen option's airline (already the case post-v0.11.8 once the flow is fixed).
+  - Deal page: hero shows airline, breakdown row label can include airline ("flights — KLM"), new "Fare options" section.
+
 ## Proposed
 
 ### [ITEM-050] Full custom web dashboard
