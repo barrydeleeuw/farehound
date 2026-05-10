@@ -250,6 +250,7 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
 
     return {
         "deal_id": deal_row["deal_id"],
+        "route_id": route.route_id,  # exposed on body data attr for the Skip route action
         "route": {
             "origin": route.origin,
             "destination": route.destination,

@@ -55,12 +55,12 @@
 
       <div class="actions">
         {% if r.is_snoozed %}
-          <button class="action" data-unsnooze>Resume now</button>
+          <button class="action" data-unsnooze type="button">Resume now</button>
         {% else %}
-          <button class="action" data-snooze="7">Snooze 7d</button>
-          <button class="action" data-snooze="30">Snooze 30d</button>
+          <button class="action" data-snooze="7" type="button">Snooze 7d</button>
+          <button class="action" data-snooze="30" type="button">Snooze 30d</button>
         {% endif %}
-        <button class="action">Edit dates</button>
+        <button class="action danger" data-remove type="button">Remove</button>
       </div>
     </article>
     {% endfor %}

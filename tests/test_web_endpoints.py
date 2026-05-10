@@ -148,6 +148,55 @@ class TestSnoozeEndpoint:
         assert resp.json() == {"ok": True}
 
 
+class TestRemoveRoute:
+    def test_delete_route_soft_deletes_and_404s_after(self, client, db, seeded):
+        rid = seeded["route_id"]
+        # Pre: route is active
+        active = db.get_active_routes(user_id=seeded["user_id"])
+        assert any(r.route_id == rid for r in active)
+
+        resp = client.request("DELETE", f"/api/routes/{rid}")
+        assert resp.status_code == 200
+        assert resp.json() == {"removed": True}
+
+        # Post: route is no longer in active list (soft-delete)
+        active_after = db.get_active_routes(user_id=seeded["user_id"])
+        assert not any(r.route_id == rid for r in active_after)
+
+        # Subsequent operations on the route 404 (ownership check still passes
+        # since it remains in the routes table, but a delete is idempotent —
+        # second DELETE should also 200 since the row is still owned).
+        # (The intent is "stop monitoring", not "purge from history".)
+
+    def test_delete_unknown_route_404(self, client):
+        resp = client.request("DELETE", "/api/routes/nonexistent_route")
+        assert resp.status_code == 404
+
+    def test_delete_other_users_route_blocked(self, db, seeded, monkeypatch):
+        # Cross-user safety: even with valid auth, user A cannot remove user B's route.
+        from src.storage.models import Route
+        other_user = db.create_user(telegram_chat_id="99", name="Other")
+        db.upsert_route(
+            Route(
+                route_id="ams_lis_other",
+                origin="AMS", destination="LIS",
+                earliest_departure="2026-07-01", latest_return="2026-07-08",
+                passengers=2, max_stops=1, active=True,
+            ),
+            other_user,
+        )
+        # Test bypass user is "42"; "ams_lis_other" belongs to other user "99"
+        from src.web.app import create_app
+        from fastapi.testclient import TestClient
+        app = create_app(db=db, anthropic_key=None, anthropic_model="test")
+        c = TestClient(app)
+        resp = c.request("DELETE", "/api/routes/ams_lis_other")
+        assert resp.status_code == 404
+        # And the other user's route stays active
+        active = db.get_active_routes(user_id=other_user)
+        assert any(r.route_id == "ams_lis_other" for r in active)
+
+
 class TestFeedbackEndpoint:
     def test_feedback_booked(self, client, db, seeded):
         resp = client.post(

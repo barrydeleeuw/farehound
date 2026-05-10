@@ -151,27 +151,83 @@
     svg.appendChild(dot);
   }
 
-  // ---------- Snooze chip confirm ----------
+  // ---------- Authenticated fetch helper ----------
+
+  async function api(method, path, body) {
+    const headers = { "content-type": "application/json" };
+    if (TG && TG.initData) headers["x-telegram-init-data"] = TG.initData;
+    const init = { method, headers };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    const resp = await fetch(path, init);
+    if (!resp.ok) {
+      let msg = `HTTP ${resp.status}`;
+      try { const j = await resp.json(); if (j.detail) msg = j.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    if (resp.status === 204) return null;
+    return resp.json().catch(() => null);
+  }
+
+  function confirmAsync(text) {
+    return new Promise((resolve) => {
+      if (TG && TG.showConfirm) TG.showConfirm(text, (ok) => resolve(!!ok));
+      else resolve(window.confirm(text));
+    });
+  }
+
+  // ---------- Route actions: snooze / unsnooze / remove ----------
 
   function wireRouteActions() {
     document.querySelectorAll("[data-snooze]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const days = btn.dataset.snooze;
+      btn.addEventListener("click", async () => {
+        const days = parseInt(btn.dataset.snooze, 10);
         const card = btn.closest(".route-card");
-        if (!card) return;
-        card.classList.add("is-snoozed");
-        alertOrToast(`Snoozed ${days}d.`);
-        hapticImpact("medium");
+        const routeId = card?.dataset?.routeId;
+        if (!card || !routeId) return;
+        try {
+          await api("POST", `/api/routes/${routeId}/snooze`, { days });
+          card.classList.add("is-snoozed");
+          alertOrToast(`Snoozed ${days}d.`);
+          hapticImpact("medium");
+        } catch (err) {
+          alertOrToast(`Snooze failed: ${err.message}`);
+        }
       });
     });
 
     document.querySelectorAll("[data-unsnooze]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const card = btn.closest(".route-card");
-        if (!card) return;
-        card.classList.remove("is-snoozed");
-        alertOrToast("Resumed.");
-        hapticImpact("medium");
+        const routeId = card?.dataset?.routeId;
+        if (!card || !routeId) return;
+        try {
+          await api("POST", `/api/routes/${routeId}/unsnooze`);
+          card.classList.remove("is-snoozed");
+          alertOrToast("Resumed.");
+          hapticImpact("medium");
+        } catch (err) {
+          alertOrToast(`Resume failed: ${err.message}`);
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-remove]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const card = btn.closest(".route-card");
+        const routeId = card?.dataset?.routeId;
+        if (!card || !routeId) return;
+        const name = card.querySelector(".name")?.textContent?.trim() || "this route";
+        const ok = await confirmAsync(`Remove ${name}?\nFareHound will stop monitoring this trip.`);
+        if (!ok) return;
+        try {
+          await api("DELETE", `/api/routes/${routeId}`);
+          card.style.transition = "opacity 200ms ease, height 200ms ease";
+          card.style.opacity = "0";
+          setTimeout(() => card.remove(), 220);
+          hapticImpact("medium");
+        } catch (err) {
+          alertOrToast(`Remove failed: ${err.message}`);
+        }
       });
     });
   }
@@ -190,20 +246,33 @@
     }
 
     document.querySelectorAll("[data-action]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const a = btn.dataset.action;
+        if (!dealId) return;
         if (a === "watch") {
-          alertOrToast("Marked as watching. We'll keep monitoring quietly.");
-          hapticImpact("light");
-        } else if (a === "skip") {
-          if (TG && TG.showConfirm) {
-            TG.showConfirm("Skip this route for 7 days?", (ok) => {
-              if (ok) alertOrToast("Skipped for 7 days.");
-            });
-          } else if (window.confirm("Skip this route for 7 days?")) {
-            alertOrToast("Skipped for 7 days.");
+          try {
+            await api("POST", `/api/deals/${dealId}/feedback`, { feedback: "watching" });
+            alertOrToast("Marked as watching. We'll keep monitoring quietly.");
+            hapticImpact("light");
+          } catch (err) {
+            alertOrToast(`Failed: ${err.message}`);
           }
-          hapticImpact("medium");
+        } else if (a === "skip") {
+          const ok = await confirmAsync("Skip this route for 7 days?");
+          if (!ok) return;
+          // Skip route = mark deal dismissed + snooze the route 7d.
+          // Pull route_id from the body data attr (set by the deal template).
+          const routeId = document.body.dataset.routeId;
+          try {
+            await api("POST", `/api/deals/${dealId}/feedback`, { feedback: "dismissed" });
+            if (routeId) {
+              await api("POST", `/api/routes/${routeId}/snooze`, { days: 7 });
+            }
+            alertOrToast("Skipped for 7 days.");
+            hapticImpact("medium");
+          } catch (err) {
+            alertOrToast(`Failed: ${err.message}`);
+          }
         }
       });
     });
