@@ -213,14 +213,31 @@
 
     document.querySelectorAll("[data-remove]").forEach((btn) => {
       btn.addEventListener("click", async () => {
+        // Diagnostics — surface every short-circuit as a toast so we can see
+        // where clicks die. Will be removed once the action is verified working.
         const card = btn.closest(".route-card");
-        const routeId = card?.dataset?.routeId;
-        if (!card || !routeId) return;
+        if (!card) {
+          alertOrToast("DEBUG: no .route-card ancestor — DOM structure issue");
+          return;
+        }
+        const routeId = card.dataset.routeId;
+        if (!routeId) {
+          alertOrToast(`DEBUG: card has no data-route-id (data attrs: ${JSON.stringify(card.dataset)})`);
+          return;
+        }
         const name = card.querySelector(".name")?.textContent?.trim() || "this route";
-        const ok = await confirmAsync(`Remove ${name}?\nFareHound will stop monitoring this trip.`);
+        let ok;
+        try {
+          ok = await confirmAsync(`Remove ${name}?\nFareHound will stop monitoring this trip.`);
+        } catch (e) {
+          alertOrToast(`DEBUG: confirm threw: ${e.message}`);
+          return;
+        }
+        alertOrToast(`DEBUG: confirm returned ${ok} for ${routeId}`);
         if (!ok) return;
         try {
-          await api("DELETE", `/api/routes/${routeId}`);
+          const resp = await api("DELETE", `/api/routes/${routeId}`);
+          alertOrToast(`Removed (server: ${JSON.stringify(resp)})`);
           card.style.transition = "opacity 200ms ease, height 200ms ease";
           card.style.opacity = "0";
           setTimeout(() => card.remove(), 220);
