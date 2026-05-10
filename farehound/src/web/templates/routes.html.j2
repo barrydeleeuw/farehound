@@ -1,0 +1,193 @@
+{% extends "base.html.j2" %}
+{% block title %}Routes · FareHound{% endblock %}
+{% block crumb %}Routes{% endblock %}
+{% block body_attrs %}data-back="false"{% endblock %}
+
+{% block content %}
+  <p class="routes-count">
+    {{ summary.monitored }} monitored
+    {% if summary.snoozed %} · {{ summary.snoozed }} snoozed{% endif %}
+    {% if summary.last_poll_label %} · last poll {{ summary.last_poll_label }}{% endif %}
+  </p>
+
+  <form class="add-route-form" id="add-trip-form" autocomplete="off">
+    <input
+      class="add-route"
+      type="text"
+      id="add-trip-input"
+      placeholder="Add a trip — e.g. Seoul for 2 weeks in October"
+      aria-label="Add a trip in plain language"
+      required
+    />
+    <button type="submit" class="add-route-submit" aria-label="Parse trip">Add</button>
+  </form>
+
+  <section class="parse-confirm" id="parse-confirm" hidden>
+    <div class="parse-confirm-status">Parsed</div>
+    <h3 class="parse-confirm-name" id="pc-name">—</h3>
+    <p class="parse-confirm-meta" id="pc-meta">—</p>
+    <p class="parse-confirm-note">
+      Claude turned your text into this trip. <a href="#" id="pc-show-original">view original</a>
+    </p>
+    <p class="parse-confirm-original" id="pc-original" hidden></p>
+    <div class="parse-confirm-actions">
+      <button class="action" id="pc-confirm">Confirm &amp; monitor</button>
+      <button class="action" id="pc-edit">Edit text</button>
+      <button class="action danger" id="pc-cancel">Cancel</button>
+    </div>
+  </section>
+
+  <div id="routes-list">
+    {% for r in routes %}
+    <article class="route-card{% if r.is_snoozed %} is-snoozed{% endif %}{% if r.is_pending %} is-pending{% endif %}" data-route-id="{{ r.route_id }}">
+      <div class="ordinal">{{ r.ordinal }}{% if r.is_pending %} · NEW{% endif %}</div>
+      <h2 class="name"><a href="/deal/{{ r.latest_deal_id }}">{{ r.origin }} → {{ r.destination }}</a></h2>
+      <div class="meta-line">{{ r.city }} · {{ r.dates_label }} · {{ r.passengers }} pax</div>
+
+      {% if r.is_pending %}
+      <div class="price-row"><span class="price pending">checking prices…</span></div>
+      <div class="footnote">first poll runs on the next cycle</div>
+      {% else %}
+      <div class="price-row">
+        <span class="price">
+          <span class="currency">€</span>{{ r.current_price_pp_display }}<span class="unit">/pp</span>
+        </span>
+        {% if r.delta_label %}
+          {% if r.is_new_low %}
+            <span class="badge badge-positive">New low</span>
+          {% elif r.is_snoozed %}
+            <span class="badge badge-warning">Snoozed</span>
+          {% else %}
+            <span class="delta delta-positive number">{{ r.delta_label }}</span>
+          {% endif %}
+        {% elif r.is_snoozed %}
+          <span class="badge badge-warning">Snoozed</span>
+        {% endif %}
+      </div>
+      <div class="footnote">{{ r.footnote }}</div>
+      {% endif %}
+
+      <div class="actions">
+        {% if r.is_snoozed %}
+          <button class="action" data-unsnooze>Resume now</button>
+        {% else %}
+          <button class="action" data-snooze="7">Snooze 7d</button>
+          <button class="action" data-snooze="30">Snooze 30d</button>
+        {% endif %}
+        <button class="action">Edit dates</button>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+
+  <section class="section">
+    <p class="footnote" style="font-family: var(--sans); font-size:12px; color: var(--text-faint); margin-top: 24px;">
+      SerpAPI usage: {{ summary.serpapi_used }}/{{ summary.serpapi_cap }} this month.
+      {% if summary.savings_total %}Saved you €{{ summary.savings_total }} across {{ summary.savings_trip_count }} trips.{% endif %}
+    </p>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    const form = document.getElementById("add-trip-form");
+    const input = document.getElementById("add-trip-input");
+    const card = document.getElementById("parse-confirm");
+    const pcName = document.getElementById("pc-name");
+    const pcMeta = document.getElementById("pc-meta");
+    const pcOriginal = document.getElementById("pc-original");
+    const pcShowOriginal = document.getElementById("pc-show-original");
+    const list = document.getElementById("routes-list");
+    let lastInput = "";
+    let lastParsed = null;
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    }
+
+    async function callApi(path, body) {
+      const headers = { "content-type": "application/json" };
+      const initData = window.Telegram?.WebApp?.initData;
+      if (initData) headers["x-telegram-init-data"] = initData;
+      const resp = await fetch(path, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body || {}),
+      });
+      if (!resp.ok) {
+        let msg = `HTTP ${resp.status}`;
+        try { const j = await resp.json(); if (j.detail) msg = j.detail; } catch (_) {}
+        throw new Error(msg);
+      }
+      return resp.json();
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      lastInput = text;
+      try {
+        const parsed = await callApi("/api/routes/parse", { text });
+        lastParsed = parsed;
+        pcName.textContent = `${parsed.origin || "?"} → ${parsed.destination || "?"}`;
+        const dur = parsed.trip_duration_days ? `${parsed.trip_duration_days} days` : "dates flexible";
+        const dates = parsed.earliest_departure ? `${parsed.earliest_departure} → ${parsed.latest_return}` : dur;
+        pcMeta.textContent = `${parsed.city || parsed.destination || ""} · ${dates} · ${parsed.passengers || 2} pax`;
+        pcOriginal.textContent = `"${text}"`;
+        pcOriginal.hidden = true;
+        pcShowOriginal.textContent = "view original";
+        card.hidden = false;
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+      } catch (err) {
+        if (window.Telegram?.WebApp?.showAlert) window.Telegram.WebApp.showAlert(`Parse failed: ${err.message}`);
+        else alert(`Parse failed: ${err.message}`);
+      }
+    });
+
+    pcShowOriginal.addEventListener("click", (e) => {
+      e.preventDefault();
+      const open = !pcOriginal.hidden;
+      pcOriginal.hidden = open;
+      pcShowOriginal.textContent = open ? "view original" : "hide original";
+    });
+
+    document.getElementById("pc-cancel").addEventListener("click", () => { card.hidden = true; });
+    document.getElementById("pc-edit").addEventListener("click", () => {
+      card.hidden = true; input.focus(); input.select();
+    });
+
+    document.getElementById("pc-confirm").addEventListener("click", async () => {
+      if (!lastParsed) return;
+      try {
+        const result = await callApi("/api/routes", lastParsed);
+        const ordinal = String(list.querySelectorAll(".route-card").length + 1).padStart(2, "0");
+        const article = el("article", "route-card is-pending");
+        article.dataset.routeId = result.route_id;
+        article.appendChild(el("div", "ordinal", `${ordinal} · NEW`));
+        article.appendChild(el("h2", "name", `${lastParsed.origin || "?"} → ${lastParsed.destination || "?"}`));
+        const meta = lastParsed.city || lastParsed.destination || "";
+        const dur = lastParsed.trip_duration_days ? `${lastParsed.trip_duration_days} days` : "dates flexible";
+        article.appendChild(el("div", "meta-line", `${meta} · ${dur} · ${lastParsed.passengers || 2} pax`));
+        const priceRow = el("div", "price-row");
+        priceRow.appendChild(el("span", "price pending", "checking prices…"));
+        article.appendChild(priceRow);
+        article.appendChild(el("div", "footnote", "first poll runs on the next cycle"));
+        list.prepend(article);
+        card.hidden = true;
+        input.value = "";
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+          window.Telegram.WebApp.HapticFeedback.notificationOccurred("success");
+        }
+      } catch (err) {
+        if (window.Telegram?.WebApp?.showAlert) window.Telegram.WebApp.showAlert(`Add failed: ${err.message}`);
+        else alert(`Add failed: ${err.message}`);
+      }
+    });
+  })();
+</script>
+{% endblock %}

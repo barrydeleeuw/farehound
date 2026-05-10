@@ -1,6 +1,6 @@
 name: FareHound
 description: Personal flight fare monitor with AI-powered deal scoring
-version: 0.9.0
+version: 0.10.0
 slug: farehound
 init: false
 url: https://github.com/barrydeleeuw/farehound
@@ -27,6 +27,7 @@ options:
   telegram_bot_token: ""
   telegram_chat_id: ""
   routes: "[]"
+  miniapp_url: ""
 schema:
   serpapi_api_key: str
   anthropic_api_key: str
@@ -40,3 +41,4 @@ schema:
   telegram_bot_token: str?
   telegram_chat_id: str?
   routes: str?
+  miniapp_url: str?

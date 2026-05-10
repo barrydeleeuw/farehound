@@ -1,0 +1,128 @@
+{% extends "base.html.j2" %}
+{% block title %}Preferences · FareHound{% endblock %}
+{% block crumb %}Preferences{% endblock %}
+{% block body_attrs %}data-back="true"{% endblock %}
+
+{% block content %}
+  <h1 class="display-sm" style="margin-top: 8px;">Preferences</h1>
+  <p class="metadata">How FareHound calculates your real cost.</p>
+
+  <section class="section">
+    <div class="section-label"><span>Baggage needs</span></div>
+    <div class="radio-group" data-name="baggage_needs">
+      {% for opt in baggage_options %}
+      <label class="radio-row{% if opt.value == settings.baggage_needs %} is-selected{% endif %}" data-value="{{ opt.value }}">
+        <span class="dot"></span>
+        <span class="label">{{ opt.label }}</span>
+        <span class="desc">{{ opt.desc }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label">
+      <span>Transport to airport</span>
+      <span class="meta">round trip cost</span>
+    </div>
+    <table class="transport-table">
+      <tbody>
+        {% for t in settings.transports %}
+        <tr>
+          <td class="code">{{ t.airport_code }}</td>
+          <td class="mode">{{ t.transport_mode or "—" }}</td>
+          <td class="num"><span class="currency">€</span>{{ t.transport_cost_eur or "—" }}</td>
+          <td class="num">{{ t.time_label or "—" }}</td>
+          <td class="num"><span class="currency">€</span>{{ t.parking_cost_eur or "0" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if not settings.transports %}
+    <p class="footnote" style="font-family: var(--sans); color: var(--text-faint); font-size: 12px; margin-top: 12px;">
+      No airports configured. Add a route — FareHound asks about transport during onboarding.
+    </p>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section-label"><span>Quiet hours</span></div>
+    <div class="field-row">
+      <span class="label">No alerts between</span>
+      <input type="time" id="quiet-from" value="{{ settings.quiet_from or '22:00' }}" />
+      <span class="between">and</span>
+      <input type="time" id="quiet-to" value="{{ settings.quiet_to or '07:00' }}" />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label"><span>Daily digest</span></div>
+    <div class="field-row">
+      <span class="label">Send at</span>
+      <input type="time" id="digest-time" value="{{ settings.digest_time or '08:00' }}" />
+    </div>
+    <div class="field-row">
+      <span class="label">Skipped this week</span>
+      <span class="value">{{ settings.digest_skip_count_7d or 0 }} of last 7 days</span>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label"><span>Connected</span></div>
+    <div class="field-row">
+      <span class="label">Telegram</span>
+      <span class="value">{{ settings.telegram_label }}</span>
+    </div>
+    <div class="field-row">
+      <span class="label">FareHound version</span>
+      <span class="value">{{ settings.version }}</span>
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Radio-row selection — single-select within a group, posts to /api/settings.
+  async function patchSettings(body) {
+    const headers = { "content-type": "application/json" };
+    const initData = window.Telegram?.WebApp?.initData;
+    if (initData) headers["x-telegram-init-data"] = initData;
+    const resp = await fetch("/api/settings", { method: "PATCH", headers, body: JSON.stringify(body) });
+    if (!resp.ok) {
+      const msg = (await resp.json().catch(() => ({}))).detail || `HTTP ${resp.status}`;
+      throw new Error(msg);
+    }
+  }
+
+  document.querySelectorAll(".radio-group").forEach((group) => {
+    const name = group.dataset.name;
+    group.querySelectorAll(".radio-row").forEach((row) => {
+      row.addEventListener("click", async () => {
+        group.querySelectorAll(".radio-row").forEach((r) => r.classList.remove("is-selected"));
+        row.classList.add("is-selected");
+        try {
+          await patchSettings({ [name]: row.dataset.value });
+          if (window.Telegram?.WebApp?.HapticFeedback) {
+            window.Telegram.WebApp.HapticFeedback.selectionChanged();
+          }
+        } catch (err) {
+          console.warn("settings patch failed", err);
+        }
+      });
+    });
+  });
+
+  ["quiet-from", "quiet-to", "digest-time"].forEach((id) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.addEventListener("change", async () => {
+      const key = id.replace("-", "_");
+      try {
+        await patchSettings({ [key.replace("quiet_", "quiet_")]: input.value });
+      } catch (err) {
+        console.warn("settings patch failed", err);
+      }
+    });
+  });
+</script>
+{% endblock %}

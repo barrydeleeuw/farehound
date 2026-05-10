@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Preferences · FareHound</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body data-back="true">
+<main class="app">
+
+  <header class="topbar">
+    <span class="brand">FareHound</span>
+    <span class="crumb">Preferences</span>
+  </header>
+
+  <h1 class="display-sm" style="margin-top: 8px;">Preferences</h1>
+  <p class="metadata">How FareHound calculates your real cost.</p>
+
+  <!-- baggage needs -->
+  <section class="section">
+    <div class="section-label"><span>Baggage needs</span></div>
+    <div class="radio-group" data-name="baggage_needs">
+      <label class="radio-row">
+        <span class="dot"></span>
+        <span class="label">carry-on only</span>
+        <span class="desc">no checked bags</span>
+      </label>
+      <label class="radio-row is-selected">
+        <span class="dot"></span>
+        <span class="label">one checked bag</span>
+        <span class="desc">23kg, both directions</span>
+      </label>
+      <label class="radio-row">
+        <span class="dot"></span>
+        <span class="label">two checked bags</span>
+        <span class="desc">23kg each, both directions</span>
+      </label>
+    </div>
+  </section>
+
+  <!-- transport per airport -->
+  <section class="section">
+    <div class="section-label">
+      <span>Transport to airport</span>
+      <span class="meta">round trip cost</span>
+    </div>
+
+    <table class="transport-table">
+      <tbody>
+        <tr>
+          <td class="code">AMS</td>
+          <td class="mode">Uber</td>
+          <td class="num"><span class="currency">€</span>45</td>
+          <td class="num">34<span class="unit-label">m</span></td>
+          <td class="num"><span class="currency">€</span>0</td>
+        </tr>
+        <tr>
+          <td class="code">EIN</td>
+          <td class="mode">car</td>
+          <td class="num"><span class="currency">€</span>10</td>
+          <td class="num">50<span class="unit-label">m</span></td>
+          <td class="num"><span class="currency">€</span>80</td>
+        </tr>
+        <tr>
+          <td class="code">RTM</td>
+          <td class="mode">car</td>
+          <td class="num"><span class="currency">€</span>10</td>
+          <td class="num">21<span class="unit-label">m</span></td>
+          <td class="num"><span class="currency">€</span>80</td>
+        </tr>
+        <tr>
+          <td class="code">BRU</td>
+          <td class="mode">train</td>
+          <td class="num"><span class="currency">€</span>70</td>
+          <td class="num">2h24</td>
+          <td class="num"><span class="currency">€</span>0</td>
+        </tr>
+        <tr>
+          <td class="code">DUS</td>
+          <td class="mode">car</td>
+          <td class="num"><span class="currency">€</span>30</td>
+          <td class="num">2h00</td>
+          <td class="num"><span class="currency">€</span>80</td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="margin-top: 14px;">
+      <button class="action">+ add airport</button>
+    </p>
+  </section>
+
+  <!-- quiet hours -->
+  <section class="section">
+    <div class="section-label"><span>Quiet hours</span></div>
+    <div class="field-row">
+      <span class="label">No alerts between</span>
+      <input type="time" value="22:00" />
+      <span class="between">and</span>
+      <input type="time" value="07:00" />
+    </div>
+  </section>
+
+  <!-- daily digest -->
+  <section class="section">
+    <div class="section-label"><span>Daily digest</span></div>
+    <div class="field-row">
+      <span class="label">Send at</span>
+      <input type="time" value="08:00" />
+    </div>
+    <div class="field-row">
+      <span class="label">Skipped today?</span>
+      <span class="value">No — 2 prices moved</span>
+    </div>
+  </section>
+
+  <!-- connected -->
+  <section class="section">
+    <div class="section-label"><span>Connected</span></div>
+    <div class="field-row">
+      <span class="label">Telegram</span>
+      <span class="value">@bdeleeuw1987</span>
+    </div>
+    <div class="field-row">
+      <span class="label">FareHound version</span>
+      <span class="value">0.9.0</span>
+    </div>
+  </section>
+
+</main>
+<script>
+  // Radio-row selection (single-select within a group)
+  document.querySelectorAll(".radio-group").forEach((group) => {
+    group.querySelectorAll(".radio-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        group.querySelectorAll(".radio-row").forEach((r) => r.classList.remove("is-selected"));
+        row.classList.add("is-selected");
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+          window.Telegram.WebApp.HapticFeedback.selectionChanged();
+        }
+      });
+    });
+  });
+</script>
+<script src="app.js"></script>
+</body>
+</html>

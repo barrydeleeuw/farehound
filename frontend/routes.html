@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Routes · FareHound</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body data-back="false">
+<main class="app">
+
+  <header class="topbar">
+    <span class="brand">FareHound</span>
+    <span class="crumb">Routes</span>
+  </header>
+
+  <p class="routes-count">3 monitored · 1 snoozed · last poll 2h ago</p>
+
+  <form class="add-route-form" id="add-trip-form" autocomplete="off">
+    <input
+      class="add-route"
+      type="text"
+      id="add-trip-input"
+      placeholder="Add a trip — e.g. Seoul for 2 weeks in October"
+      aria-label="Add a trip in plain language"
+      required
+    />
+    <button type="submit" class="add-route-submit" aria-label="Parse trip">Add</button>
+  </form>
+
+  <!-- Parse-confirm card: appears after the user submits the input. Mock parser
+       echoes the typed text as if Claude returned a structured trip. -->
+  <section class="parse-confirm" id="parse-confirm" hidden>
+    <div class="parse-confirm-status">Parsed</div>
+    <h3 class="parse-confirm-name" id="pc-name">AMS → ICN</h3>
+    <p class="parse-confirm-meta" id="pc-meta">Seoul · 2 weeks in October · 2 pax</p>
+    <p class="parse-confirm-note">
+      Claude turned your text into this trip. <a href="#" id="pc-show-original">view original</a>
+    </p>
+    <p class="parse-confirm-original" id="pc-original" hidden></p>
+    <div class="parse-confirm-actions">
+      <button class="action" id="pc-confirm">Confirm &amp; monitor</button>
+      <button class="action" id="pc-edit">Edit text</button>
+      <button class="action danger" id="pc-cancel">Cancel</button>
+    </div>
+  </section>
+
+  <!-- Routes list — new cards prepend here -->
+  <div id="routes-list">
+
+  <!-- 01 -->
+  <article class="route-card" data-route-id="ams_nrt">
+    <div class="ordinal">01</div>
+    <h2 class="name"><a href="deal.html">AMS → NRT</a></h2>
+    <div class="meta-line">Tokyo · 15 Oct → 5 Nov · 2 pax</div>
+
+    <div class="price-row">
+      <span class="price">
+        <span class="currency">€</span>1,820<span class="unit">/pp</span>
+      </span>
+      <span class="delta delta-positive number">▼ €40</span>
+    </div>
+    <div class="footnote">last poll 2h ago · 1 deal this week · alerted at €1,860</div>
+
+    <div class="actions">
+      <button class="action" data-snooze="7">Snooze 7d</button>
+      <button class="action" data-snooze="30">Snooze 30d</button>
+      <button class="action">Edit dates</button>
+    </div>
+  </article>
+
+  <!-- 02 -->
+  <article class="route-card" data-route-id="ams_bkk">
+    <div class="ordinal">02</div>
+    <h2 class="name"><a href="deal.html">AMS → BKK</a></h2>
+    <div class="meta-line">Bangkok · 5 Jan → 12 Jan · 2 pax</div>
+
+    <div class="price-row">
+      <span class="price">
+        <span class="currency">€</span>620<span class="unit">/pp</span>
+      </span>
+      <span class="badge badge-positive">New low</span>
+    </div>
+    <div class="footnote">last poll 5h ago · 2 deals this week · 90-day low</div>
+
+    <div class="actions">
+      <button class="action" data-snooze="7">Snooze 7d</button>
+      <button class="action" data-snooze="30">Snooze 30d</button>
+      <button class="action">Edit dates</button>
+    </div>
+  </article>
+
+  <!-- 03 — snoozed -->
+  <article class="route-card is-snoozed" data-route-id="ams_lis">
+    <div class="ordinal">03</div>
+    <h2 class="name"><a href="deal.html">AMS → LIS</a></h2>
+    <div class="meta-line">Lisbon · 10 Jul → 17 Jul · 2 pax</div>
+
+    <div class="price-row">
+      <span class="price">
+        <span class="currency">€</span>410<span class="unit">/pp</span>
+      </span>
+      <span class="badge badge-warning">Snoozed</span>
+    </div>
+    <div class="footnote">resume in 5 days · last alerted at €395 (booked)</div>
+
+    <div class="actions">
+      <button class="action" data-unsnooze>Resume now</button>
+      <button class="action">Edit dates</button>
+    </div>
+  </article>
+
+  </div><!-- /#routes-list -->
+
+  <!-- footer note -->
+  <section class="section">
+    <p class="footnote" style="font-family: var(--sans); font-size:12px; color: var(--text-faint); margin-top: 24px;">
+      SerpAPI usage: 184/950 this month. Saved you €840 across 2 trips this year.
+    </p>
+  </section>
+
+</main>
+
+<!-- Add-trip flow: parse, confirm, prepend a placeholder card. Fully mocked locally;
+     production uses Claude to parse the input and POSTs the parsed trip to /api/routes. -->
+<script>
+  (function () {
+    const form = document.getElementById("add-trip-form");
+    const input = document.getElementById("add-trip-input");
+    const card = document.getElementById("parse-confirm");
+    const pcName = document.getElementById("pc-name");
+    const pcMeta = document.getElementById("pc-meta");
+    const pcOriginal = document.getElementById("pc-original");
+    const pcShowOriginal = document.getElementById("pc-show-original");
+    const list = document.getElementById("routes-list");
+    let lastInput = "";
+
+    // Canned parses keyed by a substring match on the input. Real version sends
+    // the text to Claude and gets back structured fields.
+    const CANNED = [
+      { match: /tokyo|nrt|narita|haneda|hnd/i, origin: "AMS", dest: "NRT", city: "Tokyo", pax: 2 },
+      { match: /seoul|icn|incheon|south korea/i, origin: "AMS", dest: "ICN", city: "Seoul", pax: 2 },
+      { match: /bangkok|bkk|thailand/i, origin: "AMS", dest: "BKK", city: "Bangkok", pax: 2 },
+      { match: /lisbon|lis|portugal/i, origin: "AMS", dest: "LIS", city: "Lisbon", pax: 2 },
+      { match: /barcelona|bcn|spain/i, origin: "AMS", dest: "BCN", city: "Barcelona", pax: 2 },
+      { match: /new york|nyc|jfk/i, origin: "AMS", dest: "JFK", city: "New York", pax: 2 },
+    ];
+
+    function parseTrip(text) {
+      const found = CANNED.find((c) => c.match.test(text));
+      if (found) return found;
+      return { origin: "AMS", dest: "???", city: "Unrecognised destination", pax: 2 };
+    }
+
+    function inferDates(text) {
+      const month = text.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i);
+      const weeks = text.match(/(\d+)\s*weeks?/i);
+      const days = text.match(/(\d+)\s*days?/i);
+      const monthStr = month ? month[0].slice(0, 3).replace(/^./, (c) => c.toUpperCase()) : null;
+      let dur = "";
+      if (weeks) dur = `${weeks[1]} week${weeks[1] === "1" ? "" : "s"}`;
+      else if (days) dur = `${days[1]} days`;
+      const parts = [dur, monthStr ? `in ${monthStr}` : null].filter(Boolean);
+      return parts.length ? parts.join(" ") : "dates flexible";
+    }
+
+    function makeNode(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      lastInput = text;
+
+      const t = parseTrip(text);
+      const dates = inferDates(text);
+
+      pcName.textContent = `${t.origin} → ${t.dest}`;
+      pcMeta.textContent = `${t.city} · ${dates} · ${t.pax} pax`;
+      pcOriginal.textContent = `"${text}"`;
+      pcOriginal.hidden = true;
+      pcShowOriginal.textContent = "view original";
+
+      card.hidden = false;
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+
+    pcShowOriginal.addEventListener("click", (e) => {
+      e.preventDefault();
+      const open = !pcOriginal.hidden;
+      pcOriginal.hidden = open;
+      pcShowOriginal.textContent = open ? "view original" : "hide original";
+    });
+
+    document.getElementById("pc-cancel").addEventListener("click", () => {
+      card.hidden = true;
+    });
+
+    document.getElementById("pc-edit").addEventListener("click", () => {
+      card.hidden = true;
+      input.focus();
+      input.select();
+    });
+
+    document.getElementById("pc-confirm").addEventListener("click", () => {
+      // Build a placeholder card via safe DOM construction. In production the
+      // backend POST returns the new route_id and we redirect to the deal page
+      // once the first poll lands.
+      const t = parseTrip(lastInput);
+      const dates = inferDates(lastInput);
+      const ordinal = String(list.querySelectorAll(".route-card").length + 1).padStart(2, "0");
+
+      const article = makeNode("article", "route-card is-pending");
+      article.appendChild(makeNode("div", "ordinal", `${ordinal} · NEW`));
+      article.appendChild(makeNode("h2", "name", `${t.origin} → ${t.dest}`));
+      article.appendChild(makeNode("div", "meta-line", `${t.city} · ${dates} · ${t.pax} pax`));
+
+      const priceRow = makeNode("div", "price-row");
+      priceRow.appendChild(makeNode("span", "price pending", "checking prices…"));
+      article.appendChild(priceRow);
+
+      article.appendChild(makeNode("div", "footnote",
+        "first poll runs immediately · expect a price within ~30 seconds"));
+
+      list.prepend(article);
+      card.hidden = true;
+      input.value = "";
+
+      if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.HapticFeedback) {
+        window.Telegram.WebApp.HapticFeedback.notificationOccurred("success");
+      }
+
+      // Renumber ordinals so the sequence stays clean.
+      list.querySelectorAll(".route-card").forEach((node, i) => {
+        const o = node.querySelector(".ordinal");
+        if (!o) return;
+        const num = String(i + 1).padStart(2, "0");
+        if (node.classList.contains("is-pending")) o.textContent = `${num} · NEW`;
+        else o.textContent = num;
+      });
+    });
+  })();
+</script>
+
+<script src="app.js"></script>
+</body>
+</html>

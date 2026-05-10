@@ -1,0 +1,162 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ deal.route.origin }} → {{ deal.route.destination }} · FareHound{% endblock %}
+{% block crumb %}Deal{% endblock %}
+{% block body_attrs %}data-back="true" data-deal-id="{{ deal.deal_id }}" data-book-url="{{ deal.book_url }}"{% endblock %}
+
+{% block content %}
+  <section class="hero">
+    <h1 class="display">{{ deal.route.origin }} → {{ deal.route.destination }}</h1>
+    <p class="metadata">
+      {{ deal.route.name }}
+      <span class="sep"></span> {{ deal.dates.label }}
+      <span class="sep"></span> {{ deal.passengers }} pax
+      {% if deal.airline %}<span class="sep"></span> {{ deal.airline }}{% endif %}
+    </p>
+
+    <div class="price-hero">
+      <span class="currency">€</span>
+      <span class="amount">{{ deal.price_pp_display }}</span>
+      <span class="unit">/ pp</span>
+      {% if deal.delta_since_alert is not none %}
+      <span class="delta {% if deal.delta_since_alert < 0 %}delta-positive{% else %}delta-negative{% endif %}">
+        <span>{% if deal.delta_since_alert < 0 %}▼{% else %}▲{% endif %} €{{ deal.delta_since_alert_abs }}</span>
+        <span class="label">since alert</span>
+      </span>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-label">
+      <span>Cost breakdown</span>
+      <span class="meta">round trip · {{ deal.passengers }} pax</span>
+    </div>
+    <table class="ledger">
+      <tbody>
+        {% for row in deal.breakdown.rows %}
+        <tr class="expandable">
+          <td class="label-cell">{{ row.label }}</td>
+          <td class="op">{{ row.op or "" }}</td>
+          <td class="num"><span class="currency">€</span>{{ row.amount_display }}</td>
+        </tr>
+        {% if row.explanation %}
+        <tr class="expansion">
+          <td colspan="3">{{ row.explanation }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        <tr class="total-row">
+          <td class="label-cell">
+            total
+            <span class="annotation">(€{{ deal.breakdown.total_pp_display }} / pp)</span>
+          </td>
+          <td class="op"></td>
+          <td class="num"><span class="currency">€</span>{{ deal.breakdown.total_display }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  {% if deal.reasoning %}
+  <section class="section">
+    <div class="section-label"><span>Why this is the best</span></div>
+    <ul class="reasoning">
+      {% for r in deal.reasoning %}
+      <li>
+        <span class="check">✓</span>
+        <div>
+          <div class="headline">{{ r.headline }}</div>
+          {% if r.detail %}<div class="detail">{{ r.detail|safe }}</div>{% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if deal.price_history.series %}
+  <section class="section">
+    <div class="section-label">
+      <span>Price · {{ deal.price_history.window_days }} days</span>
+      <span class="meta">€/pp</span>
+    </div>
+    <div class="sparkline-wrap">
+      <svg class="sparkline"
+        {% if deal.price_history.typical_low %}data-typical-low="{{ deal.price_history.typical_low }}"{% endif %}
+        {% if deal.price_history.typical_high %}data-typical-high="{{ deal.price_history.typical_high }}"{% endif %}
+      ></svg>
+      <div class="sparkline-axis">
+        <span>{{ deal.price_history.first_label }}</span>
+        <span class="center">{% if deal.price_history.typical_low %}typical band shaded{% else %}90 days{% endif %}</span>
+        <span>{{ deal.price_history.last_label }}</span>
+      </div>
+    </div>
+    <script type="application/json" id="price-history">{{ deal.price_history.series_json|safe }}</script>
+  </section>
+  {% endif %}
+
+  {% if deal.alternatives.airports %}
+  <section class="section">
+    <div class="section-label">
+      <span>Alternatives · airports</span>
+      <span class="meta">door-to-door, {{ deal.passengers }} pax</span>
+    </div>
+    <table class="alts">
+      <tbody>
+        {% for alt in deal.alternatives.airports %}
+        <tr {% if alt.is_current %}class="is-current{% if alt.is_best %} is-best{% endif %}"{% elif alt.is_best %}class="is-best"{% endif %}>
+          <td class="code">{{ alt.code }}</td>
+          <td class="desc">{{ alt.desc }}</td>
+          <td class="total"><span class="currency">€</span>{{ alt.total_display }}</td>
+          <td class="marker">{% if alt.is_best %}●{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if deal.alternatives.dates %}
+  <section class="section">
+    <div class="section-label">
+      <span>Alternatives · dates</span>
+      <span class="meta">€/pp, {{ deal.route.origin }}</span>
+    </div>
+    <table class="alts">
+      <tbody>
+        {% for d in deal.alternatives.dates %}
+        <tr {% if d.is_current %}class="is-current{% if d.is_best %} is-best{% endif %}"{% elif d.is_best %}class="is-best"{% endif %}>
+          <td class="code">{{ d.label }}</td>
+          <td class="desc">{{ d.desc }}</td>
+          <td class="total"><span class="currency">€</span>{{ d.total_display }}</td>
+          <td class="marker">{% if d.is_best %}●{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if deal.baggage_policy.entries %}
+  <section class="section">
+    <div class="section-label"><span>Baggage · {{ deal.baggage_policy.airline_label }}</span></div>
+    <ul class="baggage">
+      {% for b in deal.baggage_policy.entries %}
+      <li>
+        <span class="item">{{ b.item }}</span>
+        <span class="cost {{ b.cost_class }}">{{ b.cost_display }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <div class="secondary-actions">
+    <button class="action" data-action="watch">Watching</button>
+    <button class="action danger" data-action="skip">Skip route</button>
+  </div>
+
+  <button class="main-button" onclick="window.open(document.body.dataset.bookUrl,'_blank')">
+    Book now on Google Flights
+  </button>
+{% endblock %}
