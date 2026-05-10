@@ -25,18 +25,73 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Dependencies:** None
 - **Summary:** "Long weekend in May" should generate Thu/Fri→Sun/Mon windows, not May 1-31. Trip duration model exists but needs proper orchestrator integration.
 
-### [ITEM-045] Onboarding: ask transport mode per airport
-- **Status:** Ready — **promoted to next-up** after surfacing in R8 dogfooding.
+### [ITEM-053] Auto-discover & enrich nearby airports (Google Maps + multi-mode + cheapest-mode selection)
+- **Status:** Ready — **next-up.** Subsumes [ITEM-045] (manual onboarding) and [ITEM-004] (Google Maps lookup); both re-parked as superseded.
 - **Priority:** P1 (High)
-- **Effort:** S
-- **Dependencies:** [ITEM-043] (Done)
-- **Why now:** During v0.10.0–v0.10.16 dogfooding, the Mini Web App's deal-detail page rendered "No nearby airports configured for this destination — add transport details in preferences" because `airport_transport` was empty for nearby candidates. The settings page can't fix this (it's read-only by design — adding airports needs the conversational follow-up flow). This item closes that gap and unlocks the alternatives table on every deal.
-- **Summary:** After airport confirmation, ask the user how they get to each airport. Without this, transport costs are blank and FareHound can't calculate true door-to-door cost — the core value proposition. A simple per-airport question ("How do you get to Schiphol? Car / Train / Uber / Bus") plus estimated cost fills the `airport_transport` table properly. Could be a single Claude-powered conversational step: "How do you usually get to the airport? e.g. 'I drive to Schiphol, take the train to Rotterdam, and Uber to Eindhoven'" → Claude parses into structured transport data.
-- **Acceptance Criteria:**
-  - [ ] User is asked about transport to each airport during onboarding
-  - [ ] Transport mode and estimated cost stored in `airport_transport`
-  - [ ] Works conversationally (one natural language message, not N separate questions)
-  - [ ] Fallback: if user skips, transport costs remain NULL (already handled gracefully)
+- **Effort:** M-L
+- **Dependencies:** [ITEM-043] (Done). Requires Google Maps Platform API key (free tier covers expected usage; new add-on config option).
+- **Why now:** During v0.10.0–v0.10.16 dogfooding the deal page consistently rendered transport at €0 and the alternatives table empty because `airport_transport` had no rows for the user's home airport or nearby candidates. The current schema also forces a single mode per airport, so the user can't see "drive vs train vs taxi — which is cheapest for this trip." This item closes both gaps in one coherent release.
+
+#### Three problems solved together
+1. **No data:** `airport_transport` is empty until the user manually fills it via conversation. Users churn before getting through onboarding because transport costs are tedious to research.
+2. **One mode per airport:** schema only stores the user's chosen mode; can't compare drive vs train vs taxi at deal-render time.
+3. **No "cheapest" recommendation:** even if multiple modes were stored, there's no logic to pick the cheapest for the current party size + trip duration.
+
+#### Approach
+
+**A. Auto-discover nearby airports.** When a user sets a home airport, propose the 3 closest viable airports within ~200 km radius (excluding tiny regional/seasonal-only ones). Reuse geographic filtering from `_resolve_nearby_airports` where applicable; viable-airport curation may need a small `data/viable_airports_eu.json` allow-list to filter out airports with no long-haul service.
+
+**B. Auto-fill all viable modes per airport** (instead of one):
+- **Drive:** Google Maps Distance Matrix API (`mode=driving`) → distance + duration. Cost = `distance_km × €0.25/km` (heuristic; user can adjust per-km rate during onboarding).
+- **Train:** Google Maps Distance Matrix API (`mode=transit`) → duration. Cost via NS API for NL routes (free, scoped to Netherlands); for international routes (BRU/DUS/CRL) use a curated estimate-by-route table seeded for the EU airports we expect, with an "estimate — confirm or override" prompt to the user.
+- **Taxi:** heuristic only — `distance_km × €2.50/km` (rough EU taxi rate). Duration ≈ drive duration. No public API.
+- **Parking:** seeded from a curated `data/airport_parking.json` covering ~20 EU airports (AMS, EIN, RTM, BRU, DUS, CRL, FRA, LHR, etc.) with daily P+R / economy-lot rates. User can override per-airport.
+
+**C. Schema migration: multiple modes per airport.**
+```sql
+CREATE TABLE airport_transport_option (
+    user_id           TEXT NOT NULL,
+    airport_code      TEXT NOT NULL,
+    mode              TEXT NOT NULL,    -- 'drive' | 'train' | 'taxi' | 'uber' | 'bus'
+    cost_eur          REAL,             -- one-way; doubled at render time for round-trip
+    cost_scales_with_pax  INTEGER,      -- 1 for train/taxi/uber/bus, 0 for drive
+    time_min          INTEGER,
+    parking_cost_per_day_eur REAL,      -- only for drive; null otherwise
+    source            TEXT,             -- 'google_maps' | 'ns_api' | 'curated' | 'user_override'
+    confidence        TEXT,             -- 'high' | 'medium' | 'low' (for "estimate — confirm" UI)
+    PRIMARY KEY (user_id, airport_code, mode)
+);
+```
+Old `airport_transport` table preserved short-term as a compatibility shim (read at boot, migrated forward into options), then dropped after one release of clean operation.
+
+**D. Render-time cheapest-mode selection.** In `src/web/data.py` and `src/alerts/telegram.py`, replace the single `db.get_airport_transport(origin)` call with:
+```python
+options = db.get_transport_options(origin, user_id)
+trip_days = (route.return_date - route.depart_date).days
+totals = [_compute_mode_total(opt, passengers, trip_days) for opt in options]
+chosen = min(totals, key=lambda t: t.cost)
+```
+Breakdown row becomes: `transport (train, cheapest)  €15/pp` with the chosen mode visible. If the user has an explicit per-airport override flag set ("always use [mode] regardless of cost"), respect that instead.
+
+**E. Settings page made editable.** Currently read-only. Each airport row expands to show all stored modes with inline edit (cost, time, parking, confidence flag). Per-airport "always use [mode]" boolean override.
+
+#### Acceptance criteria
+- [ ] New user with a home airport gets 3 nearby airports auto-proposed and confirmed inline (one bot message, not N).
+- [ ] Each confirmed airport has ≥2 modes auto-populated (drive + train minimum where transit exists; taxi as fallback).
+- [ ] `data/airport_parking.json` ships with ~20 EU airports curated.
+- [ ] NS API integration for NL train fares; international routes show "estimate — confirm" with a one-tap "looks right" / "let me adjust" inline button.
+- [ ] Deal page picks the cheapest mode per route at render time, accounting for party size + trip duration.
+- [ ] Breakdown row shows the chosen mode label ("via train") so the user has transparency.
+- [ ] Settings page shows all modes per airport, editable inline; per-airport "always use X" override stored and respected.
+- [ ] Google Maps API key is a new add-on config option (`google_maps_api_key`), and the auto-fill flow is skipped gracefully (with "tap to add manually" fallback) if the key is unset.
+- [ ] Migration runs cleanly: existing single-mode rows in `airport_transport` are read forward into `airport_transport_option` at first boot, no data loss.
+- [ ] Old conversational-onboarding flow ([ITEM-045]) survives as fallback when auto-fill confidence is low or for airports outside the curated set.
+- [ ] Tests: `tests/test_transport_options.py` for cheapest-mode selection (1 pax / 4 pax / various trip durations / parking-included).
+
+#### Cost / rate-limit notes
+- **Google Maps Distance Matrix:** $5/1000 elements after free tier. Per onboarding: 4 airports × 2 modes (drive + transit) = 8 elements ≈ $0.04 per user. Free tier covers ~25k elements/mo at zero cost — comfortable.
+- **NS API:** free, no key needed for fare lookups. Rate-limit lenient.
+- **Cache:** all auto-fill results are stored in `airport_transport_option` with `source` + `confidence` so we never re-call Google Maps for the same airport pair.
 
 ## Proposed
 
@@ -102,13 +157,6 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Total cost estimate included in alert (ticket + baggage via ITEM-037)
   - [ ] API call budget stays within SerpAPI plan limits — monitoring and safeguards
   - [ ] Explore results cached and shared across users with the same/nearby home airport
-
-### [ITEM-004] Google Maps one-time transport lookup per city
-- **Status:** Proposed
-- **Priority:** P2 (Medium)
-- **Effort:** S
-- **Dependencies:** None
-- **Summary:** Cache Google Maps transport data by city. If two users live in Amsterdam, reuse the same lookup.
 
 ### [ITEM-005] Preferred airline comparison
 - **Status:** Proposed
@@ -206,7 +254,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Code-review fixes** (`a91edb8`): critical cross-user feedback bug fixed (ownership check on `/api/deals/:id/feedback`), `/api/routes/parse` capped at 500 chars to prevent Anthropic-budget abuse, over-defensive `_update_user_safe` wrapper removed.
 - **Detail:** [docs/releases/R8/release_plan.md](docs/releases/R8/release_plan.md), [docs/deployment/cloudflare-tunnel.md](docs/deployment/cloudflare-tunnel.md)
 - **Built solo** (not a team) — single new module + 4 additive template thin-outs didn't justify 3-agent coordination overhead. `/code-review` ran at the end as the independent perspective. Decision documented in release plan.
-- **Deferred follow-ups** for next release: (1) immediate poll on `POST /api/routes` (currently waits for next cron tick — surfaces as empty state for newly added routes), (2) persist nearby-airport "evaluated" list to DB so `/deal/{id}` alternatives table renders for routes that haven't yet hit a savings threshold, (3) update R7 verification report MV-5/6/7/8 to "superseded by web app", (4) **promoted: [ITEM-045] (transport-mode-per-airport onboarding)** — Barry hit the "no airports configured" gap on the deal alternatives section; the underlying gap is that `airport_transport` rows are empty for nearby airports until the user is asked. Once filled, deal-page alternatives populate automatically.
+- **Deferred follow-ups** for next release: (1) immediate poll on `POST /api/routes` (currently waits for next cron tick — surfaces as empty state for newly added routes), (2) persist nearby-airport "evaluated" list to DB so `/deal/{id}` alternatives table renders for routes that haven't yet hit a savings threshold, (3) update R7 verification report MV-5/6/7/8 to "superseded by web app", (4) **promoted: [ITEM-053] (auto-discover & enrich nearby airports)** — Barry hit the "no airports configured" gap on the deal alternatives section AND the "transport at €0 in the breakdown" gap. The underlying issue is that `airport_transport` is empty AND single-mode-per-airport. ITEM-053 fixes both by auto-filling multiple modes per airport via Google Maps + NS API + curated parking dataset, then picking the cheapest mode per route at render time. Subsumes the previous [ITEM-045] (manual conversational onboarding).
 
 ### [ITEM-D15] Real Cost Restoration (v0.9.0)
 - **Status:** Done — ITEM-051 shipped 2026-05-09 as one coherent release covering all 4 Telegram message types. Includes: unified `_format_cost_breakdown` helper across deal alert / error fare / follow-up / daily digest, SerpAPI baggage parsing + display via new `src/utils/baggage.py` module (subsumes [ITEM-037]), "we checked X airports/dates" transparency footer (kills silent omission below €75 nearby savings threshold), `Watching 👀` button on alerts and digest, per-route snooze (`routes.snoozed_until`) with auto-snooze on `booked` feedback + `/snooze` `/unsnooze` commands, structured 3-bullet scorer reasoning JSON contract with backward compat, fingerprint-gated daily digest skip with concrete "what moved" header, callback prefix consolidation (`deal:*` / `route:*`) with legacy aliases, `/status` command, and `📊 Details` button placeholder for [ITEM-049] Mini Web App. Suite: 311 → 420 (+109 R7 tests). T19 integration test caught a real ship-blocker (`deal_info["route_id"]` missing) that 416 unit tests had passed. Code-review fixes: clamped `route:snooze` callback `days` to `[1, 365]` (security-relevant; negative values would un-snooze), removed unnecessary defensive shims (`getattr`/`hasattr` for methods defined in same release).
@@ -284,3 +332,9 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ### [ITEM-P04] Tikkie (iDEAL) payment integration
 - **Parked:** Use Tikkie Business API to send payment requests directly in the Telegram chat — trusted by the Dutch demographic (especially older users who distrust credit card forms). Replaces ITEM-007/ITEM-008's payment mechanism. Netherlands-only (iDEAL). Revisit when: (1) ITEM-002 savings tracker proves value, (2) 3-5 active users, (3) contribution vs subscription model decided.
+
+### [ITEM-045] Onboarding: ask transport mode per airport
+- **Parked:** Superseded by [ITEM-053]. The conversational-onboarding flow survives as the **low-confidence fallback** inside ITEM-053 (when auto-fill can't resolve a route, e.g. no NS coverage and no curated parking row), but it's no longer the primary mechanism. Original framing — "ask the user how they get to each airport" — was a UX dead-end because users churn before completing N per-airport conversations. Auto-fill with confirm-or-override is the right primary path.
+
+### [ITEM-004] Google Maps one-time transport lookup per city
+- **Parked:** Subsumed by [ITEM-053]. ITEM-004's "cache by city, reuse across users" idea is preserved as an implementation detail inside ITEM-053 — the `airport_transport_option` table stores per-user rows but Google Maps API responses can be cached by `(origin_city, airport_code, mode)` tuple in a separate cache table to avoid re-calling for users in the same city. Out of scope until multi-user demand exists.
