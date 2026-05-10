@@ -1373,6 +1373,59 @@ async def test_confirm_route_callback_adds_route(bot, db, user_id):
 
 
 @pytest.mark.asyncio
+async def test_route_added_message_has_open_in_app_button_when_miniapp_set(
+    bot, db, user_id, monkeypatch
+):
+    """When MINIAPP_URL is set, the 'Route added' confirmation message includes a
+    web_app button to /routes — closes the loop after the bot's /trip flow."""
+    monkeypatch.setenv("MINIAPP_URL", "https://farehound.example.com")
+    bot._pending["42"] = {
+        "action": "add", "origin": "AMS", "destination": "NRT",
+        "earliest_departure": "2026-10-01", "latest_return": "2026-10-15",
+        "passengers": 2, "max_stops": 1, "notes": "", "user_id": user_id,
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_route_callback("confirm_route"), client)
+
+    # Find the "Route added" sendMessage call
+    added_call = next(
+        c for c in client.post.call_args_list
+        if "sendMessage" in str(c) and "Route added" in str(c.kwargs.get("json", {}))
+    )
+    payload = added_call.kwargs["json"]
+    markup = payload.get("reply_markup")
+    assert markup is not None, "expected reply_markup on Route added message"
+    button = markup["inline_keyboard"][0][0]
+    assert button["text"] == "📊 Open in FareHound"
+    assert button["web_app"]["url"] == "https://farehound.example.com/routes"
+
+
+@pytest.mark.asyncio
+async def test_route_added_no_button_when_miniapp_unset(bot, db, user_id, monkeypatch):
+    """When MINIAPP_URL is empty/unset, the confirmation has no reply_markup."""
+    monkeypatch.delenv("MINIAPP_URL", raising=False)
+    bot._pending["42"] = {
+        "action": "add", "origin": "AMS", "destination": "NRT",
+        "earliest_departure": "2026-10-01", "latest_return": "2026-10-15",
+        "passengers": 2, "max_stops": 1, "notes": "", "user_id": user_id,
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+
+    await bot._handle_update(_make_route_callback("confirm_route"), client)
+
+    added_call = next(
+        c for c in client.post.call_args_list
+        if "sendMessage" in str(c) and "Route added" in str(c.kwargs.get("json", {}))
+    )
+    payload = added_call.kwargs["json"]
+    assert "reply_markup" not in payload
+
+
+
+@pytest.mark.asyncio
 async def test_cancel_route_callback_cancels(bot, user_id):
     """cancel_route callback clears pending and sends Cancelled."""
     bot._pending["42"] = {"action": "add", "origin": "AMS", "destination": "NRT", "user_id": user_id}
