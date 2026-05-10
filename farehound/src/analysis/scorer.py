@@ -240,7 +240,7 @@ class DealScorer:
                 name = alt.get("airport_name") or alt.get("airport_code", "?")
                 mode = alt.get("transport_mode", "transport")
                 t_cost = alt.get("transport_cost", 0)
-                t_min = alt.get("transport_time_min", 0)
+                t_min = alt.get("transport_time_min") or 0
                 hours = t_min / 60
                 fare = alt.get("fare_pp", 0)
                 net = alt.get("net_cost", 0)

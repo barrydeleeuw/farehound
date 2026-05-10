@@ -396,7 +396,7 @@ class TelegramNotifier:
                 mode = alt.get("transport_mode", "transport")
                 t_cost = alt.get("transport_cost", 0)
                 parking = alt.get("parking_cost") or 0
-                t_min = alt.get("transport_time_min", 0)
+                t_min = alt.get("transport_time_min") or 0
                 hours = t_min / 60
                 alt_passengers = deal_info.get("passengers", 2)
                 fare_total = fare * alt_passengers
@@ -634,7 +634,7 @@ class TelegramNotifier:
                     mode = alt.get("transport_mode", "transport")
                     t_cost = alt.get("transport_cost", 0)
                     parking = alt.get("parking_cost") or 0
-                    t_min = alt.get("transport_time_min", 0)
+                    t_min = alt.get("transport_time_min") or 0  # NULL-safe
                     hours = t_min / 60
                     alt_pax = route_data.get("passengers", 2)
                     alt_fare_total = fare * alt_pax

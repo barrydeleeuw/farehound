@@ -2031,7 +2031,8 @@ class TripBot:
                     lines.append("*Nearby alternatives:*")
                     for i, alt in enumerate(alternatives[:3]):
                         icon = "🟢" if i == 0 else "🟡"
-                        t_min = alt.get("transport_time_min", 0)
+                        # NULL-safe: airport_transport.transport_time_min can be NULL.
+                        t_min = alt.get("transport_time_min") or 0
                         hours = t_min / 60
                         alt_fare_total = alt["fare_pp"] * route.passengers
                         alt_t_total = transport_total(alt["transport_cost"], alt["transport_mode"], route.passengers)
