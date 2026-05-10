@@ -2081,7 +2081,7 @@ class TripBot:
             return
         from datetime import date as date_type
         from decimal import Decimal
-        from src.apis.serpapi import SerpAPIClient, extract_lowest_price, generate_date_windows
+        from src.apis.serpapi import SerpAPIClient, extract_lowest_price, generate_date_windows, pick_representative_flight
         from src.storage.models import PriceSnapshot, _new_id
         loop = asyncio.get_running_loop()
         try:
@@ -2114,7 +2114,7 @@ class TripBot:
             if price is None:
                 logger.info("Silent initial poll: no flights for %s → %s", route.origin, route.destination)
                 return
-            best = result.best_flights[0] if result.best_flights else (result.other_flights[0] if result.other_flights else {})
+            best = pick_representative_flight(result) or {}
             typical = result.price_insights.get("typical_price_range") or []
             snapshot = PriceSnapshot(
                 snapshot_id=_new_id(),
