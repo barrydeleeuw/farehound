@@ -38,7 +38,12 @@ import time as _time
 _TEMPLATES.env.globals["cache_buster"] = str(int(_time.time()))
 
 
-def create_app(db: Database, anthropic_key: str | None, anthropic_model: str | None) -> FastAPI:
+def create_app(
+    db: Database,
+    anthropic_key: str | None,
+    anthropic_model: str | None,
+    trip_bot=None,
+) -> FastAPI:
     """Build the FastAPI app, wired to the existing Database + Claude client."""
     app = FastAPI(title="FareHound Mini Web App", docs_url=None, redoc_url=None)
 
@@ -50,6 +55,7 @@ def create_app(db: Database, anthropic_key: str | None, anthropic_model: str | N
     app.state.db = db
     app.state.anthropic_key = anthropic_key
     app.state.anthropic_model = anthropic_model or "claude-sonnet-4-20250514"
+    app.state.trip_bot = trip_bot  # for /api/airports auto-fill (v0.11.3)
 
     _register_html_routes(app)
     _register_api_routes(app)
@@ -488,6 +494,153 @@ def _register_api_routes(app: FastAPI) -> None:
             user_id=user_id, airport_code=airport, mode=mode_val,
         )
         return JSONResponse({"override_mode": mode_val})
+
+    # ---- v0.11.3: airport CRUD (add new / suggest closest / remove) ----
+
+    @app.get("/api/airports/suggest")
+    async def suggest_nearby_airports(
+        limit: int = 5, tg_user: dict = Depends(require_user),
+    ) -> JSONResponse:
+        """Return the N closest viable airports to the user's home airport that
+        aren't already configured. Used by the Preferences page's 'Suggest
+        closest' button to pre-fill nearby-origin candidates."""
+        from src.utils.airport_data import find_nearby_airports, get_airport_meta
+
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        try:
+            limit = max(1, min(int(limit), 10))
+        except (TypeError, ValueError):
+            limit = 5
+
+        user = await asyncio.to_thread(db.get_user, user_id) or {}
+        home_code = (user.get("home_airport") or "").upper()
+        home_meta = get_airport_meta(home_code) if home_code else None
+        if not home_meta:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Home airport {home_code or '(unset)'} not in viable-airports dataset",
+            )
+        # Exclude home + any already-configured airports.
+        existing = {
+            t["airport_code"].upper()
+            for t in await asyncio.to_thread(db.get_all_airport_transports, user_id)
+        }
+        existing.add(home_code)
+        nearby = await asyncio.to_thread(
+            find_nearby_airports,
+            lat=home_meta["lat"], lng=home_meta["lng"],
+            max_km=300.0, limit=limit, exclude=existing,
+        )
+        return JSONResponse({"home_code": home_code, "candidates": nearby})
+
+    @app.post("/api/airports")
+    async def add_airport(
+        body: dict = Body(...), tg_user: dict = Depends(require_user),
+    ) -> JSONResponse:
+        """Add a new airport (secondary by default) and auto-fill its transport
+        options via SerpAPI directions + curated datasets. Same flow as the
+        onboarding auto-fill, just for one airport at a time post-onboarding."""
+        from src.utils.airport_data import get_airport_meta
+
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        airport = _validate_airport_code(body.get("code", ""))
+        meta = get_airport_meta(airport)
+        if not meta:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{airport} not in viable-airports dataset — manual configuration only",
+            )
+        existing = await asyncio.to_thread(db.get_airport_transport, airport, user_id)
+        if existing:
+            raise HTTPException(status_code=409, detail=f"{airport} already configured")
+
+        # Seed the legacy table with airport metadata (is_primary=False).
+        await asyncio.to_thread(
+            db.seed_airport_transport,
+            [{"code": airport, "name": meta["name"], "is_primary": False}],
+            user_id,
+        )
+
+        # Auto-fill modes via the bot's existing helper. Need a TripBot instance —
+        # we pull the orchestrator's bot reference if available (it's the same
+        # auto-fill code path as onboarding).
+        modes_added: list[str] = []
+        autofill_skipped: str | None = None
+        bot = getattr(app.state, "trip_bot", None)
+        if bot is not None:
+            user = await asyncio.to_thread(db.get_user, user_id) or {}
+            origin_city = (user.get("home_location") or "").strip()
+            if origin_city:
+                result = await bot._auto_fill_transport_options(
+                    user_id=user_id, origin_city=origin_city, airport_codes=[airport],
+                )
+                modes_added = result.get(airport, {}).get("modes", [])
+                autofill_skipped = result.get(airport, {}).get("skipped_reason")
+            else:
+                autofill_skipped = "no_home_location"
+        else:
+            autofill_skipped = "bot_unavailable"
+
+        return JSONResponse({
+            "added": True,
+            "code": airport,
+            "name": meta["name"],
+            "modes_added": modes_added,
+            "autofill_skipped": autofill_skipped,
+        })
+
+    @app.delete("/api/airports/{code}")
+    async def delete_airport(
+        code: str, tg_user: dict = Depends(require_user),
+    ) -> JSONResponse:
+        """Remove an airport entirely — drops the legacy row + all transport
+        options. Refuses to delete the user's primary home airport (delete it
+        in the bot instead)."""
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        airport = _validate_airport_code(code)
+
+        legacy = await asyncio.to_thread(db.get_airport_transport, airport, user_id)
+        if not legacy:
+            raise HTTPException(status_code=404, detail="airport not configured")
+        if legacy.get("is_primary"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete primary home airport — change it in chat first",
+            )
+
+        # Drop options first.
+        opts = await asyncio.to_thread(
+            db.get_transport_options, airport, user_id, include_disabled=True,
+        )
+        for opt in opts:
+            await asyncio.to_thread(
+                db.delete_transport_option,
+                user_id=user_id, airport_code=airport, mode=opt["mode"],
+            )
+        # Drop legacy row.
+        await asyncio.to_thread(
+            lambda: db._conn.execute(
+                "DELETE FROM airport_transport WHERE airport_code = ? AND user_id = ?",
+                [airport, user_id],
+            ),
+        )
+        await asyncio.to_thread(db._conn.commit)
+
+        # Clear any override pointing at this airport.
+        await asyncio.to_thread(
+            db.set_airport_override_mode,
+            user_id=user_id, airport_code=airport, mode=None,
+        )
+        return JSONResponse({"deleted": True, "code": airport})
 
 
 # ---------- helpers ----------

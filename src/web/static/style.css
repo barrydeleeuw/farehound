@@ -1356,3 +1356,14 @@ body.in-telegram .main-button {
   margin-top: 4px;
   line-height: 1.4;
 }
+
+.airport-actions {
+  display: flex;
+  gap: 14px;
+  padding: 6px 0 12px;
+  flex-wrap: wrap;
+}
+
+.btn-link.danger {
+  color: var(--text-faint);
+}
