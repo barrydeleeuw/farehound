@@ -77,19 +77,39 @@ def test_generate_date_windows_exact_fit():
 # --- build_google_flights_url ---
 
 def test_build_google_flights_url_roundtrip():
+    """v0.11.6: switched to Google's own #flt= hash-fragment deep-link format."""
     url = build_google_flights_url("AMS", "NRT", "2026-10-01", "2026-10-15")
-    assert "AMS" in url
-    assert "NRT" in url
-    assert "d=2026-10-01" in url
-    assert "r=2026-10-15" in url
     assert url.startswith("https://www.google.com/travel/flights")
+    # Hash fragment carries the structured query.
+    assert "#flt=" in url
+    # Both legs encoded as `ORIG.DEST.DATE` separated by `*`.
+    assert "AMS.NRT.2026-10-01" in url
+    assert "NRT.AMS.2026-10-15" in url  # return leg
+    assert "*" in url  # round-trip leg separator
+    assert ";t:f" in url  # round-trip flag
 
 
 def test_build_google_flights_url_oneway():
     url = build_google_flights_url("AMS", "NRT", date(2026, 10, 1))
-    assert "AMS" in url
-    assert "NRT" in url
-    assert "r=" not in url
+    assert "AMS.NRT.2026-10-01" in url
+    assert "*" not in url  # no return leg
+    assert ";t:c" in url  # one-way flag
+
+
+def test_build_google_flights_url_with_passengers():
+    url = build_google_flights_url("AMS", "NRT", "2026-10-01", "2026-10-15", passengers=3)
+    assert ";px:3" in url
+
+
+def test_build_google_flights_url_passengers_capped_at_9():
+    url = build_google_flights_url("AMS", "NRT", "2026-10-01", "2026-10-15", passengers=12)
+    assert ";px:9" in url
+    assert ";px:12" not in url
+
+
+def test_build_google_flights_url_solo_traveler_no_pax_param():
+    url = build_google_flights_url("AMS", "NRT", "2026-10-01", "2026-10-15", passengers=1)
+    assert ";px:" not in url
 
 
 # --- VerificationResult ---
