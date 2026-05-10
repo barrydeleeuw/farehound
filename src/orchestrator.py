@@ -135,6 +135,7 @@ class Orchestrator:
                 anthropic_api_key=config.anthropic.api_key,
                 anthropic_model=config.anthropic.model,
                 serpapi_key=config.serpapi.api_key,
+                google_maps_api_key=os.environ.get("GOOGLE_MAPS_API_KEY") or None,
                 reload_callback=self.reload_routes,
             )
 

@@ -26,6 +26,13 @@ if bashio::var.has_value "${MINIAPP_URL}"; then
     export MINIAPP_URL
 fi
 
+# R9 ITEM-053: Google Maps Distance Matrix API key for onboarding auto-fill.
+# Empty/unset = onboarding skips auto-fill; user adds transport manually in Preferences.
+GOOGLE_MAPS_API_KEY=$(bashio::config 'google_maps_api_key')
+if bashio::var.has_value "${GOOGLE_MAPS_API_KEY}"; then
+    export GOOGLE_MAPS_API_KEY
+fi
+
 export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
 export FAREHOUND_DATA_DIR="/data"
 

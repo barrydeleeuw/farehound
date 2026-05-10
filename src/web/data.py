@@ -660,29 +660,86 @@ def assemble_settings(db: Database, user_id: str, telegram_handle: str = "") -> 
         except Exception:
             prefs = {}
 
-    transports = db.get_all_airport_transports(user_id=user_id)
-    transport_rows = []
-    for t in transports:
-        time_min = t.get("transport_time_min")
-        time_label = _format_time_min(time_min) if time_min is not None else None
-        transport_rows.append({
-            "airport_code": t.get("airport_code"),
-            "transport_mode": t.get("transport_mode"),
-            "transport_cost_eur": t.get("transport_cost_eur"),
-            "time_label": time_label,
-            "parking_cost_eur": t.get("parking_cost_eur"),
+    # R9 ITEM-053: render the editable multi-mode airport list. Each airport
+    # gets a card with all options (drive/train/taxi/...) and the user's per-
+    # airport override mode if set. The legacy airport_transport table is
+    # consulted only for airport_name + is_primary metadata; cost data lives
+    # in airport_transport_option after the migration.
+    options_all = db.get_all_transport_options(user_id) if user_id else []
+    legacy_meta = {
+        t["airport_code"]: t for t in db.get_all_airport_transports(user_id=user_id)
+    }
+    by_airport: dict[str, list[dict]] = {}
+    for opt in options_all:
+        by_airport.setdefault(opt["airport_code"], []).append(opt)
+
+    airport_cards: list[dict] = []
+    seen_codes: set[str] = set()
+    # Order: primary airport first, then alphabetical.
+    primary_code = next(
+        (m["airport_code"] for m in legacy_meta.values() if m.get("is_primary")),
+        None,
+    )
+    ordered_codes: list[str] = []
+    if primary_code:
+        ordered_codes.append(primary_code)
+    for code in sorted(by_airport.keys()):
+        if code != primary_code:
+            ordered_codes.append(code)
+    for code in legacy_meta.keys():
+        if code not in ordered_codes:
+            ordered_codes.append(code)
+
+    user_overrides_raw = user.get("airport_override_mode")
+    user_overrides = {}
+    if user_overrides_raw:
+        try:
+            user_overrides = json.loads(user_overrides_raw)
+            if not isinstance(user_overrides, dict):
+                user_overrides = {}
+        except Exception:
+            user_overrides = {}
+
+    for code in ordered_codes:
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        meta = legacy_meta.get(code, {})
+        opts = by_airport.get(code, [])
+        modes_view = []
+        for o in opts:
+            time_min = o.get("time_min")
+            modes_view.append({
+                "mode": o.get("mode"),
+                "cost_eur": o.get("cost_eur"),
+                "cost_scales_with_pax": o.get("cost_scales_with_pax"),
+                "time_min": time_min,
+                "time_label": _format_time_min(time_min) if time_min is not None else None,
+                "parking_cost_per_day_eur": o.get("parking_cost_per_day_eur"),
+                "enabled": o.get("enabled"),
+                "source": o.get("source"),
+                "confidence": o.get("confidence"),
+                "label": o.get("label"),
+            })
+        airport_cards.append({
+            "code": code,
+            "name": meta.get("airport_name") or code,
+            "is_primary": bool(meta.get("is_primary")),
+            "modes": modes_view,
+            "override_mode": user_overrides.get(code),
         })
 
     return {
         "settings": {
             "baggage_needs": user.get("baggage_needs") or prefs.get("baggage_needs") or "one_checked",
-            "transports": transport_rows,
+            "airports": airport_cards,
+            "transports": [],  # legacy field — kept for template back-compat; templates read `airports` now
             "quiet_from": prefs.get("quiet_from"),
             "quiet_to": prefs.get("quiet_to"),
             "digest_time": prefs.get("digest_time"),
             "digest_skip_count_7d": user.get("digest_skip_count_7d") or 0,
             "telegram_label": telegram_handle or user.get("name") or "—",
-            "version": "0.10.0",
+            "version": "0.11.0",
         },
         "baggage_options": _BAGGAGE_OPTIONS,
     }
