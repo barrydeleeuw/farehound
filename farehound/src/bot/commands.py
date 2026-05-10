@@ -1958,8 +1958,17 @@ class TripBot:
                 reply_markup=reply_markup,
             )
 
-            # Immediate price check (non-blocking)
-            task = asyncio.create_task(self._immediate_price_check(route, uid, chat_id, client))
+            # v0.11.4: removed the immediate Telegram price-check message
+            # (was sending half-baked numbers + nearby alts before nearby airports
+            # had transport configured). Trips list / Mini Web App show prices
+            # after the next scheduled poll cycle. The "📊 Open in FareHound"
+            # button above is the path for users who want to peek sooner.
+            #
+            # Schedule a one-shot silent SerpAPI poll so the trips list populates
+            # within seconds rather than waiting up to 24h for the next cycle.
+            task = asyncio.create_task(
+                self._silent_initial_poll(route, uid, chat_id, client)
+            )
             task.add_done_callback(self._on_price_check_done)
 
         elif pending["action"] == "remove":
@@ -2053,6 +2062,85 @@ class TripBot:
         exc = task.exception()
         if exc:
             logger.error("Background price check failed: %s", exc, exc_info=exc)
+
+    async def _silent_initial_poll(
+        self, route: Route, user_id: str, chat_id: str, client: httpx.AsyncClient,
+    ) -> None:
+        """v0.11.4: do a one-shot SerpAPI poll for the just-added route and
+        store the snapshot so the trips list shows real prices immediately,
+        WITHOUT sending any Telegram messages (the 'Current prices' message
+        used to fire here was misleading — incomplete nearby data, often
+        before transport was configured for secondaries).
+
+        The orchestrator's regular poll cycle will pick up this route within
+        24h and run the full evaluation (scoring, all secondary airports,
+        baggage parsing). This silent poll is just to populate the trips list
+        UI fast.
+        """
+        if not self._serpapi_key:
+            return
+        from datetime import date as date_type
+        from decimal import Decimal
+        from src.apis.serpapi import SerpAPIClient, extract_lowest_price, generate_date_windows
+        from src.storage.models import PriceSnapshot, _new_id
+        loop = asyncio.get_running_loop()
+        try:
+            earliest = route.earliest_departure
+            latest = route.latest_return
+            if isinstance(earliest, str) and earliest:
+                earliest = date_type.fromisoformat(earliest)
+            if isinstance(latest, str) and latest:
+                latest = date_type.fromisoformat(latest)
+            if not earliest or not latest:
+                return
+            duration = route.trip_duration_days or 14
+            windows = generate_date_windows(earliest, latest, duration, max_windows=1)
+            if not windows:
+                return
+            out_date, ret_date = windows[0]
+            cache_dir = os.environ.get("SERPAPI_CACHE_DIR")
+            serp = SerpAPIClient(
+                api_key=self._serpapi_key, currency="EUR", cache_dir=cache_dir,
+            )
+            try:
+                result = await serp.search_flights(
+                    origin=route.origin, destination=route.destination,
+                    outbound_date=out_date, return_date=ret_date,
+                    passengers=route.passengers, max_stops=route.max_stops,
+                )
+            finally:
+                await serp.close()
+            price = extract_lowest_price(result, max_stops=route.max_stops)
+            if price is None:
+                logger.info("Silent initial poll: no flights for %s → %s", route.origin, route.destination)
+                return
+            best = result.best_flights[0] if result.best_flights else (result.other_flights[0] if result.other_flights else {})
+            typical = result.price_insights.get("typical_price_range") or []
+            snapshot = PriceSnapshot(
+                snapshot_id=_new_id(),
+                route_id=route.route_id,
+                observed_at=datetime.now(UTC),
+                source="serpapi",
+                passengers=route.passengers,
+                outbound_date=out_date,
+                return_date=ret_date,
+                lowest_price=Decimal(str(price)),
+                best_flight=best,
+                all_flights=(result.best_flights or []) + (result.other_flights or []),
+                price_level=result.price_insights.get("price_level"),
+                typical_low=Decimal(str(typical[0])) if len(typical) >= 1 else None,
+                typical_high=Decimal(str(typical[1])) if len(typical) >= 2 else None,
+                price_history=result.price_insights.get("price_history"),
+                search_params={**(result.search_params or {}), "origin": route.origin},
+                user_id=user_id,
+            )
+            await loop.run_in_executor(None, self._db.insert_snapshot, snapshot, user_id)
+            logger.info(
+                "Silent initial poll stored snapshot for %s: €%s",
+                route.route_id, price,
+            )
+        except Exception as e:
+            logger.warning("Silent initial poll failed for %s: %s", route.route_id, e)
 
     async def _immediate_price_check(
         self, route: Route, user_id: str, chat_id: str, client: httpx.AsyncClient,
