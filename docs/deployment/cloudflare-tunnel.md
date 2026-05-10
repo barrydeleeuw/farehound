@@ -1,165 +1,141 @@
 # Cloudflare Tunnel — exposing the Mini Web App
 
-The Mini Web App ships in v0.10.0 listening on `localhost:8081` inside the FareHound add-on container. Telegram WebApps require **HTTPS**, so we need a public URL with a valid TLS cert. **Cloudflare Tunnel** is the cleanest path on a Pi: no port forwarding, no static IP, free for personal use, automatic TLS.
+Telegram WebApps require **HTTPS**, so we need a public URL with a valid TLS cert. Barry already runs **two cloudflared instances** for `bdl-ha.net` (on his Mac as a system LaunchDaemon, and on the Pi as a `NetworkMode: host` Docker container). We reuse the Pi's existing cloudflared by adding one new ingress rule. No new daemon, no new tunnel — just one config edit, one DNS record, one container restart.
 
-This doc is a recipe — Barry runs the commands himself. The R8 release ships the code; the deploy is a one-time setup once the code is on `main`.
+This is not the standard "install cloudflared from scratch" recipe. If you're shipping FareHound to someone without an existing cloudflared setup, see [Appendix A](#appendix-a-fresh-install) at the bottom.
 
----
+## Existing setup (the one this doc assumes)
 
-## Prerequisites
+```
+Mac LaunchDaemon: cloudflared tunnel run polyfish (tunnel 31c5f703-...)
+  ingress:
+    mirofish.bdl-ha.net    → http://localhost:5001  (Mac-local services)
+    mirofish-ui.bdl-ha.net → http://localhost:3000
 
-- A Cloudflare account (free tier is fine).
-- A domain on Cloudflare. Either:
-  - A real domain you own (e.g. `farehound.barrydeleeuw.com`) with its DNS managed by Cloudflare, OR
-  - A free `*.trycloudflare.com` URL (Quick Tunnels — fine for testing, not stable for daily use because the URL changes on restart).
-
-For ongoing use, **use your own domain**. The bot's `MINIAPP_URL` env var has to point somewhere stable; a rotating Quick Tunnel URL means re-deploying the bot every restart.
-
-## One-time tunnel setup
-
-### 1. Install `cloudflared` on the Pi
-
-The HA host runs Linux. SSH in and install via the official APT repo:
-
-```bash
-ssh barry@homeassistant.local
-# On the Pi:
-curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 \
-  -o /tmp/cloudflared
-sudo install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared
-cloudflared --version
+Pi Docker container "cloudflared" (NetworkMode: host, image cloudflare/cloudflared:latest)
+  config: /mnt/data/supervisor/share/cloudflared/<...>.yml (mounted to /etc/cloudflared/)
+  ingress:
+    ssh.bdl-ha.net → SSH (used by `Host ha-tunnel` in ~/.ssh/config)
+    [we add: farehound.bdl-ha.net → http://localhost:8081]
 ```
 
-### 2. Authenticate to your Cloudflare account
+## Prerequisites — already satisfied
+
+- ✅ `bdl-ha.net` domain on Cloudflare
+- ✅ cloudflared running on the Pi as a Docker container with `NetworkMode: host`
+- ✅ `cert.pem` already issued and bind-mounted into the Pi cloudflared container
+- ✅ HA add-on `ports:` mapping for `8081/tcp` (added in v0.10.2 — the FareHound container's port 8081 is now reachable from the Pi host)
+
+## The 4 steps to flip the Mini Web App on
+
+### 1. Pick a hostname
+
+Suggestion: `farehound.bdl-ha.net` (matches the `mirofish-*.bdl-ha.net` pattern).
+
+### 2. Add an ingress rule to the Pi cloudflared config
+
+SSH into the Pi:
 
 ```bash
-cloudflared tunnel login
+ssh ha-tunnel  # or `ssh barry@homeassistant.local` on LAN
+sudo find /mnt -name '*.yml' -path '*cloudflared*' 2>/dev/null
+# Edit the config file the path above points at — likely /mnt/data/supervisor/share/cloudflared/config.yml
+sudo nano /mnt/data/supervisor/share/cloudflared/config.yml
 ```
 
-Opens a browser-flow auth URL. Pick your domain. A cert is written to `~/.cloudflared/cert.pem`.
-
-### 3. Create the tunnel
-
-```bash
-cloudflared tunnel create farehound
-```
-
-Records a tunnel ID. Files: `~/.cloudflared/<tunnel-id>.json` (credentials).
-
-### 4. Configure ingress
-
-Create `~/.cloudflared/config.yml`:
+Add the new hostname **before** the catch-all:
 
 ```yaml
-tunnel: <tunnel-id>
-credentials-file: /home/barry/.cloudflared/<tunnel-id>.json
-
 ingress:
-  - hostname: farehound.barrydeleeuw.com
+  # ... your existing ssh.bdl-ha.net rule and any others stay above the catch-all
+  - hostname: farehound.bdl-ha.net
     service: http://localhost:8081
   - service: http_status:404
 ```
 
-Replace `farehound.barrydeleeuw.com` with your chosen subdomain.
+`localhost:8081` works because the cloudflared container has `NetworkMode: host`, so it shares the Pi's host network — and the FareHound add-on's port 8081 is mapped to the host (v0.10.2+).
 
-### 5. Route DNS
+### 3. Add the DNS CNAME
 
-```bash
-cloudflared tunnel route dns farehound farehound.barrydeleeuw.com
-```
-
-This creates the proxied DNS CNAME on Cloudflare automatically.
-
-### 6. Test the tunnel manually
+From the Pi (cloudflared container has the cert):
 
 ```bash
-cloudflared tunnel run farehound
+sudo docker exec cloudflared cloudflared tunnel route dns <tunnel-name-or-id> farehound.bdl-ha.net
 ```
 
-In another terminal (or another machine), open `https://farehound.barrydeleeuw.com/` — should hit FareHound's `/routes` page. If the FareHound add-on isn't running, you'll get a 502 — start the add-on first.
+Get the tunnel name from `sudo docker exec cloudflared cloudflared tunnel list` first if you don't remember it.
 
-### 7. Run the tunnel as a systemd service
+Alternatively, do it in the Cloudflare dashboard: DNS → Add a CNAME — `farehound` → `<tunnel-id>.cfargotunnel.com` — Proxied (orange cloud).
 
-Stop the manual run with Ctrl-C, then:
+### 4. Restart the cloudflared container
 
 ```bash
-sudo cloudflared service install
-sudo systemctl enable --now cloudflared
-sudo systemctl status cloudflared
+sudo docker restart cloudflared
+sleep 5
+sudo docker logs --tail 30 cloudflared
 ```
 
-The service auto-restarts on reboot.
+Look for the new ingress rule in the logs (cloudflared logs each on startup). Then test from any machine:
 
----
+```bash
+curl -I https://farehound.bdl-ha.net/routes
+# Expect: HTTP/2 401 — that's correct, no Telegram initData = auth rejected
+```
 
-## Telling FareHound about the URL
+The 401 proves the tunnel reaches the FareHound web app and the auth gate fires.
 
-Once the tunnel is live and reachable:
+## Telling FareHound to use the new URL
 
-1. Open Home Assistant → Settings → Add-ons → FareHound → Configuration.
-2. Set **`miniapp_url`** to your tunnel URL (e.g. `https://farehound.barrydeleeuw.com`). No trailing slash.
-3. Save → Restart the add-on.
-4. Tail the logs:
-   ```bash
-   sudo docker exec hassio_cli ha apps logs 30bba4a3_farehound | tail -20
-   ```
-   You should see:
-   - `Mini Web App listening on port 8081`
-   - The first Telegram alert thereafter uses the thin format with `📊 Open in FareHound` button.
+Settings → Add-ons → FareHound → Configuration → set `miniapp_url: https://farehound.bdl-ha.net` (no trailing slash) → Save → Restart the add-on.
 
-5. Send `/status` to the bot. If the bot starts using thin alerts immediately, the flag is wired correctly.
+In the add-on logs, the next Telegram alert uses the thin format. To revert: clear `miniapp_url`, restart. v0.9.0 rich format comes back.
 
-To revert to the v0.9.0 rich Telegram format: clear the `miniapp_url` field, restart the add-on. No code change needed.
+## Telegram bot configuration (for in-app launches)
 
----
+For the `📊 Open in FareHound` button to launch the Mini Web App **inside** Telegram (rather than the user's external browser), register the URL with @BotFather:
 
-## Telegram bot configuration
-
-For the `web_app` button to launch the Mini Web App **inside Telegram** (rather than punting to the user's browser), the bot must be registered with a Mini Web App URL via @BotFather:
-
-1. Message @BotFather on Telegram.
+1. Message @BotFather.
 2. `/mybots` → pick your bot → **Bot Settings** → **Configure Mini App** → **Edit Web App URL**.
-3. Paste your tunnel URL (e.g. `https://farehound.barrydeleeuw.com`).
-4. Done. New `web_app` buttons in alerts now open in-app.
+3. Paste `https://farehound.bdl-ha.net`.
 
-If you skip this step, the buttons still work but open in the user's browser instead of the Telegram in-app webview. The page is identical either way.
-
----
-
-## Verification checklist
-
-- [ ] `https://<your-tunnel-url>/` loads (you'll get 401 — that's correct, no `initData` outside Telegram).
-- [ ] Tap the `📊 Open in FareHound` button on a Telegram alert → page opens, shows the deal.
-- [ ] `/status` from the bot still works (this is unrelated to the tunnel — sanity check).
-- [ ] After the next deal alert, the message is the thin format (2-line ping, not the v0.9.0 rich body).
-- [ ] HA logs show no `ERROR` lines on FareHound startup.
-
-If the page loads but the data looks empty, check:
-- The Telegram WebApp `initData` is being passed correctly (open browser devtools, look for the `x-telegram-init-data` header on `/api/...` calls).
-- The bot's `TELEGRAM_BOT_TOKEN` env var is exported (HMAC validation needs it).
-
----
-
-## Costs
-
-Cloudflare Tunnel is **free** for personal use up to fairly generous limits (50 tunnels, no bandwidth cap on the free plan as of 2026). Daily traffic for FareHound is well under any limit.
-
-Domain registration is the only ongoing cost (~€10/year for a `.com`). Existing domains work too — just pick a subdomain.
-
----
+Without this, `web_app:` buttons fall back to opening in the user's browser. Page renders identically; it's just a worse mobile experience.
 
 ## Troubleshooting
 
-**`502 Bad Gateway` from the tunnel URL**
-The FareHound add-on isn't listening. Check `sudo docker exec hassio_cli ha apps info 30bba4a3_farehound | grep state` — should be `running`. Check the add-on logs for `Mini Web App listening on port 8081`.
+**`curl https://farehound.bdl-ha.net/routes` returns 502**
+The FareHound add-on isn't running or port 8081 isn't mapped to host. Check `sudo docker exec hassio_cli ha apps info 30bba4a3_farehound | grep -E 'state|version'` — `state` should be `started` and `version` should be `0.10.2` or later (the `ports:` mapping landed in 0.10.2).
 
-**`401 initData invalid` on every request**
-Either `TELEGRAM_BOT_TOKEN` isn't set in the add-on, OR the page is being opened outside Telegram. The 401 is expected when you visit the URL in a regular browser — Telegram is the auth mechanism.
-
-For local testing without Telegram, set `FAREHOUND_WEB_DEV_BYPASS_AUTH=1` in the add-on config (or just on the Pi shell). **Do not leave this on in production** — it disables HMAC validation entirely.
-
-**Tunnel runs but DNS doesn't resolve**
-DNS propagation can take up to 60 seconds the first time. After that it's instant. If still broken, check Cloudflare's dashboard → DNS for the CNAME record.
+**`401 initData invalid` on every request from inside Telegram**
+Either `TELEGRAM_BOT_TOKEN` isn't exported in the FareHound add-on container, OR the bot's Mini App URL hasn't been configured in @BotFather (so Telegram doesn't pass `initData`).
 
 **The bot still sends rich Telegram messages**
-Check that `MINIAPP_URL` is exported in the running container: `sudo docker exec $(sudo docker ps | grep farehound | awk '{print $1}') env | grep MINIAPP_URL`. If empty, the HA option didn't propagate — restart the add-on.
+`miniapp_url` didn't propagate. Check from the Pi:
+```bash
+sudo docker exec $(sudo docker ps | grep farehound | awk '{print $1}') env | grep MINIAPP_URL
+```
+If empty, the HA option didn't land — restart the add-on.
+
+**Tunnel was running but stops working after a Pi reboot**
+The cloudflared container has `RestartPolicy: unless-stopped`, so it should come back automatically. If not, `sudo docker start cloudflared`.
+
+---
+
+## Appendix A — fresh install (only if no existing cloudflared)
+
+If you're shipping this to someone without Barry's setup, the from-scratch path:
+
+1. Install `cloudflared` (binary on the Pi host, OR the [cloudflared HA add-on](https://github.com/brenner-tobias/addon-cloudflared) — the add-on is easier on HAOS).
+2. `cloudflared tunnel login` — opens a browser auth flow against your Cloudflare account.
+3. `cloudflared tunnel create farehound` — creates a tunnel, writes credentials to `~/.cloudflared/<id>.json`.
+4. Create `~/.cloudflared/config.yml`:
+   ```yaml
+   tunnel: <tunnel-id>
+   credentials-file: /root/.cloudflared/<tunnel-id>.json
+   ingress:
+     - hostname: farehound.<your-domain>
+       service: http://localhost:8081
+     - service: http_status:404
+   ```
+5. `cloudflared tunnel route dns farehound farehound.<your-domain>`
+6. Run as a service (`cloudflared service install` for the binary path, or just enable the add-on for HA).
+7. From there, follow steps 4 onward of the main recipe ("Telling FareHound to use the new URL").
