@@ -113,25 +113,108 @@ def _parse_reasoning_json(raw: str | None) -> list[dict] | None:
     return bullets or None
 
 
-def _split_legacy_reasoning(text: str) -> list[dict]:
-    """Convert a pre-R7 single-string reasoning into bullet dicts.
+def _build_deterministic_reasoning(
+    snapshot,
+    last_alerted: float | None,
+    passengers: int,
+    price_history_dict: dict | None,
+    nearby_count: int = 0,
+) -> list[dict]:
+    """Build the 'why this is the best' bullets from snapshot data — deterministic only.
 
-    The legacy scorer returned 2-3 sentences in one string. When the bot
-    rendered that, it prefixed each sentence with `✓ ` for visual structure.
-    Splitting on `✓ ` (or sentence boundaries) recovers the bullet shape.
+    Replaces the LLM-generated reasoning. Each bullet's numbers come from code,
+    not from a free-text Claude response, so they always match the page's other
+    numbers. Returns a list of `{headline, detail}` dicts (max 4).
     """
-    if not text:
-        return []
-    # Try splitting on the unicode check character (legacy scorer + bot prefix).
-    parts = [p.strip() for p in text.split("✓") if p.strip()]
-    if len(parts) >= 2:
-        return [{"headline": p.rstrip(". "), "detail": ""} for p in parts]
-    # Fallback: split on sentence boundaries. Conservative — only if the
-    # text is clearly multiple sentences.
-    sentences = [s.strip() for s in text.replace("? ", "?\n").replace(". ", ".\n").split("\n") if s.strip()]
-    if len(sentences) >= 2:
-        return [{"headline": s.rstrip("."), "detail": ""} for s in sentences]
-    return [{"headline": text.strip(), "detail": ""}]
+    bullets: list[dict] = []
+    pax = max(int(passengers or 1), 1)
+    if not snapshot or snapshot.lowest_price is None:
+        return [{"headline": "No price data yet for this trip.", "detail": ""}]
+
+    current_pp = float(snapshot.lowest_price) / pax if pax > 1 else float(snapshot.lowest_price)
+    typical_low = snapshot.typical_low
+    typical_high = snapshot.typical_high
+
+    # Bullet 1 — position vs. Google's typical range
+    if typical_low is not None and typical_high is not None:
+        low_pp = float(typical_low) / pax if pax > 1 else float(typical_low)
+        high_pp = float(typical_high) / pax if pax > 1 else float(typical_high)
+        range_str = f"€{low_pp:,.0f}–€{high_pp:,.0f}/pp"
+        if current_pp < low_pp:
+            bullets.append({
+                "headline": f"€{low_pp - current_pp:,.0f}/pp below Google's typical low.",
+                "detail": f"Their range for this route: {range_str}.",
+            })
+        elif current_pp > high_pp:
+            bullets.append({
+                "headline": f"€{current_pp - high_pp:,.0f}/pp above Google's typical high.",
+                "detail": f"Their range for this route: {range_str}. Above-range fares often drop — watch this one.",
+            })
+        else:
+            bullets.append({
+                "headline": "Within Google's typical range.",
+                "detail": f"{range_str}. Not unusually cheap or expensive yet.",
+            })
+
+    # Bullet 2 — position in the user's own price history (deduped 90-day series)
+    series = []
+    if isinstance(price_history_dict, dict):
+        raw = price_history_dict.get("series") or []
+        for d, p in raw:
+            try:
+                if p is not None:
+                    series.append(float(p))
+            except (TypeError, ValueError):
+                continue
+    if len(series) >= 2:
+        series_pp = [s / pax if pax > 1 else s for s in series]
+        history_min = min(series_pp)
+        history_max = max(series_pp)
+        if current_pp <= history_min + 0.5:
+            bullets.append({
+                "headline": f"New 90-day low.",
+                "detail": f"Previous low {len(series)} snapshots ago was €{history_min:,.0f}/pp; high €{history_max:,.0f}/pp.",
+            })
+        elif current_pp <= (history_min + history_max) / 2:
+            bullets.append({
+                "headline": f"Below the 90-day midpoint.",
+                "detail": f"Range over {len(series)} snapshots: €{history_min:,.0f}–€{history_max:,.0f}/pp.",
+            })
+        else:
+            bullets.append({
+                "headline": f"Above the 90-day midpoint.",
+                "detail": f"Range over {len(series)} snapshots: €{history_min:,.0f}–€{history_max:,.0f}/pp.",
+            })
+    elif len(series) == 1:
+        bullets.append({
+            "headline": "Only 1 price observed so far for these dates.",
+            "detail": "Limited history — context will improve over the next polling cycles.",
+        })
+
+    # Bullet 3 — change since last alert
+    if last_alerted is not None and last_alerted > 0:
+        alerted_pp = float(last_alerted) / pax if pax > 1 else float(last_alerted)
+        diff_pp = current_pp - alerted_pp
+        if abs(diff_pp) >= 1:
+            if diff_pp < 0:
+                bullets.append({
+                    "headline": f"Dropped €{abs(diff_pp):,.0f}/pp since the last alert.",
+                    "detail": f"Was €{alerted_pp:,.0f}/pp. Now €{current_pp:,.0f}/pp.",
+                })
+            else:
+                bullets.append({
+                    "headline": f"Up €{diff_pp:,.0f}/pp since the last alert.",
+                    "detail": f"Was €{alerted_pp:,.0f}/pp. Now €{current_pp:,.0f}/pp.",
+                })
+
+    # Bullet 4 — nearby airports footprint (informational only when not available)
+    if nearby_count == 0:
+        bullets.append({
+            "headline": "No nearby airports configured for this destination.",
+            "detail": "Add transport details in Preferences to compare door-to-door costs across airports.",
+        })
+
+    return bullets[:4]
 
 
 def _build_breakdown_rows(
@@ -271,30 +354,43 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
         baggage_label=baggage_label,
     )
 
-    # Reasoning — prefer structured 3-field JSON, fall back to splitting the
-    # legacy single string on `✓` markers so each becomes its own bullet.
-    reasoning = _parse_reasoning_json(deal_row.get("reasoning_json"))
-    if reasoning is None and deal_row.get("reasoning"):
-        reasoning = _split_legacy_reasoning(deal_row["reasoning"])
+    # Last-alerted price (party total) — used for both the since-alert delta
+    # AND the deterministic reasoning bullets, so resolved up front.
+    last_alerted = db.get_last_alerted_price(route.route_id, user_id=user_id)
 
-    # Price history (90 days) for the sparkline
-    price_history = {"series_json": "[]", "first_label": "", "last_label": "",
-                     "window_days": 90, "typical_low": None, "typical_high": None}
+    # Price history series — fetched once, used by both the sparkline and the
+    # reasoning bullets that compute 90-day min/max/median position.
+    history_dict = None
     try:
-        ph = db.get_price_history(route.route_id, days=90, user_id=user_id)
-        series = ph.get("series") if isinstance(ph, dict) else None
-        if series:
-            # Ensure shape [iso, price]
-            normalised = [(str(d), float(p)) for d, p in series if p is not None]
-            if normalised:
-                price_history["series_json"] = json.dumps(normalised)
-                price_history["first_label"] = _fmt_date(normalised[0][0])
-                price_history["last_label"] = _fmt_date(normalised[-1][0])
-        if snapshot:
-            price_history["typical_low"] = snapshot.typical_low
-            price_history["typical_high"] = snapshot.typical_high
+        history_dict = db.get_price_history(route.route_id, days=90, user_id=user_id)
     except Exception:
         logger.debug("price history unavailable for %s", route.route_id, exc_info=True)
+
+    # Reasoning — built from snapshot data deterministically. Numbers always
+    # match the rest of the page. (Pre-v0.10.15, this was a free-text string
+    # generated by Claude at scoring time; numbers in the prose drifted from
+    # the live page state and confused users.)
+    reasoning = _build_deterministic_reasoning(
+        snapshot=snapshot,
+        last_alerted=last_alerted,
+        passengers=passengers,
+        price_history_dict=history_dict,
+        nearby_count=0,  # follow-up: pass actual count from orchestrator's nearby cache
+    )
+
+    # Price history for the sparkline (reuses the series fetched above)
+    price_history = {"series_json": "[]", "first_label": "", "last_label": "",
+                     "window_days": 90, "typical_low": None, "typical_high": None}
+    if isinstance(history_dict, dict):
+        series = history_dict.get("series") or []
+        normalised = [(str(d), float(p)) for d, p in series if p is not None]
+        if normalised:
+            price_history["series_json"] = json.dumps(normalised)
+            price_history["first_label"] = _fmt_date(normalised[0][0])
+            price_history["last_label"] = _fmt_date(normalised[-1][0])
+    if snapshot:
+        price_history["typical_low"] = snapshot.typical_low
+        price_history["typical_high"] = snapshot.typical_high
 
     # Alternatives — leave empty for now; R7's nearby comparison cache lives on the
     # Orchestrator, not in the DB. The web app will get a richer list once the
@@ -304,22 +400,30 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
     # Baggage policy items derived from utils/baggage FALLBACK
     baggage_items, airline_label = _baggage_policy_items(snapshot)
 
-    # Last-alerted price for the delta — both alerted and current are party totals,
-    # but we display /pp to match the rest of the page.
-    last_alerted = db.get_last_alerted_price(route.route_id, user_id=user_id)
+    # Since-alert delta. Both alerted and current totals are computed in /pp
+    # for display consistency. Bag/transport/parking are constants, so the
+    # /pp delta of TOTAL equals the /pp delta of FLIGHTS (we display the
+    # flights delta as a stand-in for the user-visible delta).
     delta = None
     delta_abs = ""
-    alerted_pp_display = ""
+    alerted_total_pp_display = ""
     if last_alerted is not None and lowest:
         delta = lowest - float(last_alerted)
         delta_pp = delta / passengers if passengers > 1 else delta
         delta_abs = _fmt_eur(abs(delta_pp))
-        alerted_pp = float(last_alerted) / passengers if passengers > 1 else float(last_alerted)
-        alerted_pp_display = _fmt_eur(alerted_pp)
+        # Recompute the total at alert-time using the same baggage/transport assumption.
+        alerted_total = float(last_alerted) + baggage + p_total_transport + p_park
+        alerted_total_pp = alerted_total / passengers if passengers > 1 else alerted_total
+        alerted_total_pp_display = _fmt_eur(alerted_total_pp)
 
     book_url = deal_row.get("booking_url") or _google_flights_url(route, snapshot)
 
     airline_display = airline_label or (snapshot.best_flight.get("airline") if snapshot and isinstance(getattr(snapshot, "best_flight", None), dict) else None)
+
+    # HERO — total cost per person (incl. baggage + transport + parking).
+    # Pre-v0.10.15 the hero was flights-only; that hid the "real cost" the
+    # mission promises and made the breakdown total feel disconnected.
+    total_pp = breakdown_total / passengers if passengers > 1 else breakdown_total
 
     return {
         "deal_id": deal_row["deal_id"],
@@ -335,22 +439,19 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
         },
         "passengers": passengers,
         "airline": airline_display,
-        "price_pp_display": _fmt_eur(price_pp),
+        # Hero number — total /pp (real cost). Flights-only is shown in the breakdown.
+        "price_pp_display": _fmt_eur(total_pp),
+        "flights_pp_display": _fmt_eur(price_pp),  # available in case the template wants both
         "delta_since_alert": delta,
-        "delta_since_alert_abs": delta_abs,  # already /pp
-        "alerted_pp_display": alerted_pp_display,
+        "delta_since_alert_abs": delta_abs,
+        "alerted_total_pp_display": alerted_total_pp_display,
         "breakdown": {
             "rows": breakdown_rows,
-            # Primary unit is /pp throughout. Party total kept as a smaller annotation.
-            "total_pp_display": _fmt_eur(breakdown_total / passengers if passengers > 1 else breakdown_total),
+            "total_pp_display": _fmt_eur(total_pp),
             "total_party_display": _fmt_eur(breakdown_total),
             "passengers": passengers,
         },
-        "reasoning": reasoning or [],
-        # Reasoning bullets reference the price at alert time, not the current
-        # price. The template should surface this so users don't read the bullets
-        # against the current /pp number.
-        "reasoning_alerted_pp_display": alerted_pp_display,
+        "reasoning": reasoning,  # built deterministically; numbers always match the page
         "price_history": price_history,
         "alternatives": alternatives,
         "baggage_policy": {"airline_label": airline_label, "entries": baggage_items},
