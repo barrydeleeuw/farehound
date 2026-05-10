@@ -95,6 +95,23 @@ def get_airport_meta(airport_code: str) -> dict | None:
     return None
 
 
+def estimate_drive_cost_eur(distance_km: float, per_km_eur: float = 0.25) -> float:
+    """Heuristic: petrol + wear estimate for a private car.
+
+    Default rate is the ANWB ballpark for a midsize EU car. User can override
+    via Settings (changes the stored cost_eur, not this rate).
+    """
+    return round(distance_km * per_km_eur, 2)
+
+
+def estimate_taxi_cost_eur(distance_km: float, per_km_eur: float = 2.50) -> float:
+    """Heuristic: rough EU taxi rate. No public API for fares.
+
+    The user is expected to confirm/override at onboarding.
+    """
+    return round(distance_km * per_km_eur, 2)
+
+
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Great-circle distance between two lat/lng points in kilometres."""
     r = 6371.0

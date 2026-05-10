@@ -739,7 +739,7 @@ def assemble_settings(db: Database, user_id: str, telegram_handle: str = "") -> 
             "digest_time": prefs.get("digest_time"),
             "digest_skip_count_7d": user.get("digest_skip_count_7d") or 0,
             "telegram_label": telegram_handle or user.get("name") or "—",
-            "version": "0.11.0",
+            "version": "0.11.1",
         },
         "baggage_options": _BAGGAGE_OPTIONS,
     }
