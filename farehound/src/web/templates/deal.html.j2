@@ -1,7 +1,7 @@
 {% extends "base.html.j2" %}
 {% block title %}{{ deal.route.origin }} → {{ deal.route.destination }} · FareHound{% endblock %}
 {% block crumb %}Deal{% endblock %}
-{% block body_attrs %}data-back="true" data-deal-id="{{ deal.deal_id }}" data-book-url="{{ deal.book_url }}"{% endblock %}
+{% block body_attrs %}data-back="true" data-deal-id="{{ deal.deal_id }}" data-route-id="{{ deal.route_id or '' }}" data-book-url="{{ deal.book_url }}"{% endblock %}
 
 {% block content %}
   <section class="hero">

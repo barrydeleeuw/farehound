@@ -220,6 +220,22 @@ def _register_api_routes(app: FastAPI) -> None:
         await asyncio.to_thread(db.unsnooze_route, route_id)
         return JSONResponse({"ok": True})
 
+    @app.delete("/api/routes/{route_id}")
+    async def delete_route(
+        route_id: str, tg_user: dict = Depends(require_user)
+    ) -> JSONResponse:
+        """Soft-delete a route — sets active=0, stops polling, keeps history.
+        Same semantic as the bot's /remove command."""
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered")
+        owned = await asyncio.to_thread(_route_belongs_to, db, route_id, user_id)
+        if not owned:
+            raise HTTPException(status_code=404, detail="route not found")
+        await asyncio.to_thread(db.deactivate_route, route_id)
+        return JSONResponse({"removed": True})
+
     @app.post("/api/deals/{deal_id}/feedback")
     async def deal_feedback(
         deal_id: str, body: dict = Body(...), tg_user: dict = Depends(require_user)
