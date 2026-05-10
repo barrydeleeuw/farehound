@@ -224,6 +224,76 @@ def _build_deterministic_reasoning(
     return bullets[:4]
 
 
+def _resolve_baggage_needs(user_row: dict | None) -> str:
+    """Read a user's baggage_needs preference (column or preferences JSON)."""
+    if not isinstance(user_row, dict):
+        return "one_checked"
+    prefs = user_row.get("preferences") or {}
+    if not isinstance(prefs, dict):
+        try:
+            prefs = json.loads(prefs)
+        except Exception:
+            prefs = {}
+    return user_row.get("baggage_needs") or prefs.get("baggage_needs") or "one_checked"
+
+
+def _baggage_total_party(snapshot, baggage_needs: str, passengers: int) -> float:
+    """Sum SerpAPI baggage fees per direction × passengers, honouring the user's
+    baggage_needs preference. Returns 0 when snapshot has no baggage_estimate."""
+    if snapshot is None or not getattr(snapshot, "baggage_estimate", None):
+        return 0.0
+    try:
+        be = snapshot.baggage_estimate if isinstance(snapshot.baggage_estimate, dict) else json.loads(snapshot.baggage_estimate)
+    except Exception:
+        return 0.0
+    if not isinstance(be, dict):
+        return 0.0
+    total = 0.0
+    for leg in (be.get("outbound", {}), be.get("return", {})):
+        if not isinstance(leg, dict):
+            continue
+        carry = float(leg.get("carry_on") or 0)
+        checked = float(leg.get("checked") or 0)
+        if baggage_needs == "carry_on_only":
+            leg_total = carry
+        elif baggage_needs == "two_checked":
+            leg_total = carry + 2 * checked
+        else:  # one_checked
+            leg_total = carry + checked
+        total += leg_total * passengers
+    return total
+
+
+def compute_total_pp(db: Database, route: Route, snapshot, user_id: str | None) -> float | None:
+    """Total cost-per-person for a route — same math as the deal page hero so
+    the trips list and the deal detail show identical numbers (v0.11.4 fix).
+
+    Returns None when no snapshot exists (renderer should show 'checking prices…').
+    """
+    if snapshot is None or snapshot.lowest_price is None:
+        return None
+    passengers = max(int(route.passengers or 1), 1)
+    flights = float(snapshot.lowest_price)
+    user_row = db.get_user(user_id) if user_id else {}
+    baggage_needs = _resolve_baggage_needs(user_row if isinstance(user_row, dict) else {})
+    baggage = _baggage_total_party(snapshot, baggage_needs, passengers)
+
+    trip_days = 0
+    if route.earliest_departure and route.latest_return:
+        trip_days = max((route.latest_return - route.earliest_departure).days, 0)
+    transport = db.get_resolved_transport(
+        route.origin, user_id=user_id,
+        passengers=passengers, trip_days=trip_days,
+    ) or {}
+    p_cost = float(transport.get("transport_cost_eur") or 0)
+    p_mode = transport.get("transport_mode") or ""
+    p_park = float(transport.get("parking_cost_eur") or 0)
+    p_total_transport = transport_total(p_cost, p_mode, passengers)
+
+    total = flights + baggage + p_total_transport + p_park
+    return total / passengers if passengers > 1 else total
+
+
 def _build_breakdown_rows(
     *,
     flights_total: float,
@@ -315,48 +385,15 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
     user_row = db.get_user(user_id) if user_id else {}
     if not isinstance(user_row, dict):
         user_row = {}
-    user_prefs = user_row.get("preferences") or {}
-    if not isinstance(user_prefs, dict):
-        try:
-            user_prefs = json.loads(user_prefs)
-        except Exception:
-            user_prefs = {}
-    baggage_needs = (
-        user_row.get("baggage_needs")
-        or user_prefs.get("baggage_needs")
-        or "one_checked"
-    )
+    baggage_needs = _resolve_baggage_needs(user_row)
     baggage_label = {
         "carry_on_only": "(carry-on only)",
         "one_checked": "(1× checked, both ways)",
         "two_checked": "(2× checked, both ways)",
     }.get(baggage_needs, "")
 
-    # Baggage estimate — sum SerpAPI fees per direction, scaled by user preference.
-    # Pre-v0.10.14 we always summed carry_on + checked regardless of user prefs;
-    # now we honour `baggage_needs`.
-    baggage = 0.0
-    if snapshot and getattr(snapshot, "baggage_estimate", None):
-        try:
-            be = snapshot.baggage_estimate if isinstance(snapshot.baggage_estimate, dict) else json.loads(snapshot.baggage_estimate)
-            outbound = be.get("outbound", {}) if isinstance(be, dict) else {}
-            ret = be.get("return", {}) if isinstance(be, dict) else {}
-            for leg in (outbound, ret):
-                if not isinstance(leg, dict):
-                    continue
-                carry = float(leg.get("carry_on") or 0)
-                checked = float(leg.get("checked") or 0)
-                # Apply user preference. carry_on always counts (it's a fee even
-                # for carry-on-only travellers). `checked` is per-bag.
-                if baggage_needs == "carry_on_only":
-                    leg_total = carry
-                elif baggage_needs == "two_checked":
-                    leg_total = carry + 2 * checked
-                else:  # one_checked (default)
-                    leg_total = carry + checked
-                baggage += leg_total * passengers
-        except Exception:
-            pass
+    # Baggage estimate — same helper used by the trips list so numbers match.
+    baggage = _baggage_total_party(snapshot, baggage_needs, passengers)
 
     breakdown_total = lowest + baggage + p_total_transport + p_park
     breakdown_rows = _build_breakdown_rows(
@@ -545,15 +582,37 @@ def assemble_routes(db: Database, user_id: str) -> dict:
         snapshot = db.get_latest_snapshot(route.route_id, user_id=user_id)
         passengers = int(route.passengers or 2)
         is_pending = snapshot is None
-        current_pp = None
-        if snapshot and snapshot.lowest_price is not None:
-            current_pp = float(snapshot.lowest_price) / passengers if passengers > 1 else float(snapshot.lowest_price)
+        # v0.11.4: trips list now shows the same total-/pp as the deal page
+        # (flights + baggage + transport + parking ÷ pax), not flights-only.
+        current_pp = compute_total_pp(db, route, snapshot, user_id)
 
         last_alerted = db.get_last_alerted_price(route.route_id, user_id=user_id)
         delta_label = None
         is_new_low = False
         if current_pp is not None and last_alerted is not None:
-            diff = current_pp - (float(last_alerted) / passengers if passengers > 1 else float(last_alerted))
+            # last_alerted is the flights-only party total at alert time. Apply the
+            # same baggage/transport overhead so the delta is total-vs-total.
+            user_row = db.get_user(user_id) if user_id else {}
+            if not isinstance(user_row, dict):
+                user_row = {}
+            baggage_needs = _resolve_baggage_needs(user_row)
+            baggage = _baggage_total_party(snapshot, baggage_needs, passengers)
+            trip_days = 0
+            if route.earliest_departure and route.latest_return:
+                trip_days = max((route.latest_return - route.earliest_departure).days, 0)
+            transport = db.get_resolved_transport(
+                route.origin, user_id=user_id,
+                passengers=passengers, trip_days=trip_days,
+            ) or {}
+            p_total_transport = transport_total(
+                float(transport.get("transport_cost_eur") or 0),
+                transport.get("transport_mode") or "",
+                passengers,
+            )
+            p_park = float(transport.get("parking_cost_eur") or 0)
+            alerted_total = float(last_alerted) + baggage + p_total_transport + p_park
+            alerted_pp = alerted_total / passengers if passengers > 1 else alerted_total
+            diff = current_pp - alerted_pp
             if abs(diff) >= 1:
                 arrow = "▼" if diff < 0 else "▲"
                 delta_label = f"{arrow} €{_fmt_eur(abs(diff))}"
@@ -604,7 +663,7 @@ def _route_footnote(route: Route, snapshot: PriceSnapshot | None) -> str:
     return " · ".join(parts) if parts else ""
 
 
-def _latest_deal_id(db: Database, route_id: str, user_id: str | None = None) -> str:
+def _latest_deal_id(db: Database, route_id: str, user_id: str | None = None) -> str | None:
     sql = (
         "SELECT deal_id FROM deals WHERE route_id = ?"
     )
@@ -614,7 +673,9 @@ def _latest_deal_id(db: Database, route_id: str, user_id: str | None = None) -> 
         params.append(user_id)
     sql += " ORDER BY alert_sent_at DESC, created_at DESC LIMIT 1"
     row = db._conn.execute(sql, params).fetchone()
-    return row[0] if row else ""
+    # v0.11.4: return None (not "") when no deal yet so the routes template
+    # can choose to render the route name as plain text instead of a 404 link.
+    return row[0] if row else None
 
 
 def _last_poll_label(db: Database, user_id: str) -> str:
@@ -739,7 +800,7 @@ def assemble_settings(db: Database, user_id: str, telegram_handle: str = "") -> 
             "digest_time": prefs.get("digest_time"),
             "digest_skip_count_7d": user.get("digest_skip_count_7d") or 0,
             "telegram_label": telegram_handle or user.get("name") or "—",
-            "version": "0.11.3",
+            "version": "0.11.4",
         },
         "baggage_options": _BAGGAGE_OPTIONS,
     }

@@ -1513,8 +1513,10 @@ async def test_help_mentions_inline_buttons(bot, user_id):
 
 
 @pytest.mark.asyncio
-async def test_immediate_price_check_sends_typing(bot, db, user_id):
-    """After route add, typing action is sent before price check."""
+async def test_silent_initial_poll_stores_snapshot(bot, db, user_id):
+    """v0.11.4: after route add, the silent initial poll stores a snapshot
+    (so the trips list shows real prices) without sending Telegram messages
+    (the old 'Current prices' eager message was misleading)."""
     import asyncio
     from src.apis.serpapi import FlightSearchResult
 
@@ -1550,37 +1552,34 @@ async def test_immediate_price_check_sends_typing(bot, db, user_id):
         mock_serp_cls.return_value = mock_serp
 
         await bot._handle_update(_make_update("/yes"), client)
-        # Allow background price check task to complete
+        # Allow background silent-poll task to complete.
         pending = [t for t in asyncio.all_tasks() if not t.done() and t is not asyncio.current_task()]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-    # Route should be added
+    # Route should be added.
     routes = db.get_active_routes(user_id=user_id)
     assert len(routes) == 1
 
-    # Should have sent typing action
-    typing_calls = [
-        c for c in client.post.call_args_list
-        if "sendChatAction" in str(c)
-    ]
-    assert len(typing_calls) >= 1
+    # A snapshot should have been stored by the silent poll.
+    snapshot = db.get_latest_snapshot(routes[0].route_id, user_id=user_id)
+    assert snapshot is not None
+    assert float(snapshot.lowest_price) == 800
 
-    # Should have sent price info
-    send_calls = [
-        c for c in client.post.call_args_list
-        if "sendMessage" in str(c)
-    ]
-    # At least "Route added" + price check message
-    assert len(send_calls) >= 2
-    price_payload = send_calls[-1].kwargs.get("json") or send_calls[-1][1]["json"]
-    assert "€" in price_payload["text"]
-    assert "/pp" in price_payload["text"]
+    # No "Current prices" Telegram message should have been sent — only the
+    # bare "Route added" confirmation.
+    send_calls = [c for c in client.post.call_args_list if "sendMessage" in str(c)]
+    payloads = [c.kwargs.get("json") or c[1]["json"] for c in send_calls]
+    assert all("Current prices" not in p["text"] for p in payloads), (
+        "v0.11.4: should not send the eager 'Current prices' message anymore"
+    )
+    assert all("Checking prices now" not in p["text"] for p in payloads)
 
 
 @pytest.mark.asyncio
-async def test_immediate_price_check_graceful_failure(bot, db, user_id):
-    """If SerpAPI fails, route is still added and user gets fallback message."""
+async def test_silent_initial_poll_graceful_failure(bot, db, user_id):
+    """v0.11.4: if SerpAPI fails during the silent poll, route is still added
+    and no error message is sent to the user (silent failure)."""
     import asyncio
 
     bot._serpapi_key = "test-key"
@@ -1609,19 +1608,19 @@ async def test_immediate_price_check_graceful_failure(bot, db, user_id):
         mock_serp_cls.return_value = mock_serp
 
         await bot._handle_update(_make_update("/yes"), client)
-        # Allow background price check task to complete
         pending = [t for t in asyncio.all_tasks() if not t.done() and t is not asyncio.current_task()]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-    # Route should still be added
+    # Route should still be added.
     routes = db.get_active_routes(user_id=user_id)
     assert len(routes) == 1
-
-    # Last message should be the fallback
+    # No snapshot stored.
+    assert db.get_latest_snapshot(routes[0].route_id, user_id=user_id) is None
+    # No error/fallback message — silent failure.
     send_calls = [c for c in client.post.call_args_list if "sendMessage" in str(c)]
-    last_payload = send_calls[-1].kwargs.get("json") or send_calls[-1][1]["json"]
-    assert "poll cycle" in last_payload["text"].lower() or "next" in last_payload["text"].lower()
+    payloads = [c.kwargs.get("json") or c[1]["json"] for c in send_calls]
+    assert all("API" not in p["text"] and "fail" not in p["text"].lower() for p in payloads)
 
 
 @pytest.mark.asyncio

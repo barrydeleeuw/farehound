@@ -27,7 +27,11 @@
     {% for r in routes %}
     <article class="route-card{% if r.is_snoozed %} is-snoozed{% endif %}{% if r.is_pending %} is-pending{% endif %}" data-route-id="{{ r.route_id }}">
       <div class="ordinal">{{ r.ordinal }}{% if r.is_pending %} · NEW{% endif %}</div>
-      <h2 class="name"><a href="/deal/{{ r.latest_deal_id }}">{{ r.origin }} → {{ r.destination }}</a></h2>
+      <h2 class="name">
+        {% if r.latest_deal_id %}<a href="/deal/{{ r.latest_deal_id }}">{{ r.origin }} → {{ r.destination }}</a>
+        {% else %}{{ r.origin }} → {{ r.destination }}
+        {% endif %}
+      </h2>
       <div class="meta-line">{{ r.city }} · {{ r.dates_label }} · {{ r.passengers }} pax</div>
 
       {% if r.is_pending %}

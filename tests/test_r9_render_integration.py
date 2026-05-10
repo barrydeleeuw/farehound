@@ -168,6 +168,60 @@ def test_assemble_deal_total_includes_cheapest_mode_cost(db_with_user):
     assert "30" in transport_rows[0]["amount_display"] or "29" in transport_rows[0]["amount_display"]
 
 
+def test_trips_list_price_matches_deal_page_total(db_with_user):
+    """v0.11.4: trips list current_price_pp_display must equal the deal page
+    hero total /pp (flights + baggage + transport + parking ÷ pax). Pre-fix the
+    trips list was showing fare-only (€129) while the deal page showed total
+    (€200) — confusing the user."""
+    from src.web.data import assemble_routes
+
+    _seed_route_snapshot_deal(
+        db_with_user,
+        transport_options=[
+            {"mode": "train", "cost_eur": 11, "cost_scales_with_pax": True},
+        ],
+    )
+    deal_payload = assemble_deal(db_with_user, deal_id="d1", user_id="u1")
+    routes_payload = assemble_routes(db_with_user, user_id="u1")
+    route_card = next(r for r in routes_payload["routes"] if r["route_id"] == "r1")
+
+    # Both must show the same per-person total.
+    deal_hero_pp = deal_payload["price_pp_display"]
+    trips_pp = route_card["current_price_pp_display"]
+    assert deal_hero_pp == trips_pp, (
+        f"Deal page shows {deal_hero_pp}/pp but trips list shows {trips_pp}/pp"
+    )
+
+
+def test_trips_list_no_deal_yields_no_link(db_with_user):
+    """v0.11.4: when a route has a snapshot but no Deal record (score below
+    alert threshold), latest_deal_id is None and the template skips the <a>."""
+    from src.storage.models import PriceSnapshot, Route
+    from src.web.data import assemble_routes
+
+    route = Route(
+        route_id="r2", origin="AMS", destination="MEX", passengers=2,
+        earliest_departure=date(2026, 12, 28), latest_return=date(2027, 1, 18),
+        user_id="u1",
+    )
+    db_with_user.upsert_route(route)
+    snap = PriceSnapshot(
+        snapshot_id="s2", route_id="r2",
+        observed_at=datetime.now(UTC), source="serpapi", passengers=2,
+        outbound_date=date(2026, 12, 28), return_date=date(2027, 1, 18),
+        lowest_price=1964.0, user_id="u1",
+    )
+    db_with_user.insert_snapshot(snap, user_id="u1")
+    # Note: NO deal saved.
+
+    payload = assemble_routes(db_with_user, user_id="u1")
+    route_card = next(r for r in payload["routes"] if r["route_id"] == "r2")
+    assert route_card["latest_deal_id"] is None
+    assert route_card["is_pending"] is False  # snapshot exists
+    # Price still computed (total /pp).
+    assert route_card["current_price_pp_display"] != "—"
+
+
 def test_assemble_deal_disabled_mode_excluded(db_with_user):
     """Disabling train should switch the chosen mode to next-cheapest."""
     _seed_route_snapshot_deal(
