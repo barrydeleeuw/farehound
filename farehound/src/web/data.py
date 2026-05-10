@@ -119,6 +119,8 @@ def _build_deterministic_reasoning(
     passengers: int,
     price_history_dict: dict | None,
     nearby_count: int = 0,
+    nearby_best_savings: float | None = None,
+    nearby_best_code: str | None = None,
 ) -> list[dict]:
     """Build the 'why this is the best' bullets from snapshot data — deterministic only.
 
@@ -212,7 +214,7 @@ def _build_deterministic_reasoning(
                     "detail": f"Was €{alerted_pp:,.0f}/pp. Now €{current_pp:,.0f}/pp.",
                 })
 
-    # Bullet 4 — nearby airports footprint (informational only when not available).
+    # Bullet 4 — nearby airports footprint.
     # "Nearby" means alternative ORIGINS near the user's home (e.g. EIN, BRU)
     # we polled the same destination from — not nearby destinations.
     if nearby_count == 0:
@@ -220,8 +222,130 @@ def _build_deterministic_reasoning(
             "headline": "Only your home airport is monitored — no alternate origins to compare.",
             "detail": "Add nearby airports (e.g. EIN, RTM, BRU) in Preferences and FareHound will start polling them too, so you can see if a different origin would be cheaper door-to-door.",
         })
+    elif nearby_best_savings and nearby_best_savings > 0 and nearby_best_code:
+        bullets.append({
+            "headline": f"{nearby_best_code} would save €{nearby_best_savings:,.0f} door-to-door.",
+            "detail": f"We polled {nearby_count} nearby airport{'s' if nearby_count != 1 else ''}; {nearby_best_code} is currently the cheapest alternative once transport is included. See the Alternatives table below for the full breakdown.",
+        })
+    else:
+        bullets.append({
+            "headline": f"Your airport is best — checked {nearby_count} alternative{'s' if nearby_count != 1 else ''}.",
+            "detail": "Each nearby origin was priced door-to-door (fare + transport + parking) for your party size and trip duration; none beats your home airport for this trip.",
+        })
 
     return bullets[:4]
+
+
+def _build_nearby_alternatives(
+    db: Database, route: Route, snapshot, user_id: str | None, passengers: int,
+) -> dict:
+    """v0.11.5: assemble the nearby-airport comparison for the deal page.
+
+    Reads secondary-airport snapshots stored by the orchestrator's poll cycle,
+    resolves transport for each via get_resolved_transport (cheapest mode for
+    party + duration), and runs compare_airports. Returns:
+        {
+          count: int,                    # secondaries we've polled (excl. primary)
+          best_savings: float | None,    # €/party savings of cheapest secondary vs primary
+          best_code: str | None,         # IATA of cheapest secondary, e.g. "BRU"
+          table_rows: list[dict],        # rows for the Alternatives section
+        }
+    """
+    if snapshot is None or snapshot.lowest_price is None:
+        return {"count": 0, "best_savings": None, "best_code": None, "table_rows": []}
+
+    secondaries_raw = db.get_nearby_snapshots(route.route_id, route.origin)
+    if not secondaries_raw:
+        return {"count": 0, "best_savings": None, "best_code": None, "table_rows": []}
+
+    trip_days = 0
+    if route.earliest_departure and route.latest_return:
+        trip_days = max((route.latest_return - route.earliest_departure).days, 0)
+
+    primary_resolved = db.get_resolved_transport(
+        route.origin, user_id=user_id, passengers=passengers, trip_days=trip_days,
+    ) or {}
+    primary_result = {
+        "airport_code": route.origin,
+        "fare_pp": float(snapshot.lowest_price) / passengers if passengers > 1 else float(snapshot.lowest_price),
+        "transport_cost": primary_resolved.get("transport_cost_eur") or 0,
+        "parking_cost": primary_resolved.get("parking_cost_eur") or 0,
+        "transport_mode": primary_resolved.get("transport_mode") or "",
+        "transport_time_min": primary_resolved.get("transport_time_min") or 0,
+    }
+
+    secondary_results = []
+    for sec in secondaries_raw:
+        sec_code = sec.get("airport_code")
+        sec_price = sec.get("lowest_price")
+        if not sec_code or sec_price is None:
+            continue
+        sec_resolved = db.get_resolved_transport(
+            sec_code, user_id=user_id, passengers=passengers, trip_days=trip_days,
+        ) or {}
+        secondary_results.append({
+            "airport_code": sec_code,
+            "fare_pp": float(sec_price) / passengers if passengers > 1 else float(sec_price),
+            "transport_cost": sec_resolved.get("transport_cost_eur") or 0,
+            "parking_cost": sec_resolved.get("parking_cost_eur") or 0,
+            "transport_mode": sec_resolved.get("transport_mode") or "",
+            "transport_time_min": sec_resolved.get("transport_time_min") or 0,
+        })
+
+    if not secondary_results:
+        return {"count": 0, "best_savings": None, "best_code": None, "table_rows": []}
+
+    from src.analysis.nearby_airports import calculate_net_cost, compare_airports
+    comparison = compare_airports(primary_result, secondary_results, passengers)
+    evaluated = comparison["evaluated"]
+    competitive = comparison["competitive"]
+
+    primary_total = calculate_net_cost(
+        fare_pp=primary_result["fare_pp"], passengers=passengers,
+        transport_cost=primary_result["transport_cost"],
+        parking_cost=primary_result["parking_cost"],
+        transport_mode=primary_result["transport_mode"],
+    )
+
+    best_savings = competitive[0]["savings"] if competitive else None
+    best_code = competitive[0]["airport_code"] if competitive else None
+
+    # Render rows: primary first (is_current), then secondaries sorted by total cost.
+    rows = [{
+        "code": route.origin,
+        "desc": "your home",
+        "total_display": _fmt_eur(primary_total),
+        "is_current": True,
+        "is_best": False,  # marked below
+    }]
+    sorted_evals = sorted(evaluated, key=lambda x: x["net_cost"])
+    for ev in sorted_evals:
+        mode_label = ev.get("transport_mode") or ""
+        time_min = ev.get("transport_time_min") or 0
+        time_label = _format_time_min(time_min) if time_min else None
+        desc_parts = []
+        if mode_label:
+            desc_parts.append(f"via {mode_label}")
+        if time_label:
+            desc_parts.append(time_label)
+        rows.append({
+            "code": ev["airport_code"],
+            "desc": " · ".join(desc_parts) or "—",
+            "total_display": _fmt_eur(ev["net_cost"]),
+            "is_current": False,
+            "is_best": False,
+        })
+
+    # Mark the cheapest row across all (primary or secondary).
+    cheapest_idx = min(range(len(rows)), key=lambda i: float(rows[i]["total_display"].replace(",", "") or "9999999"))
+    rows[cheapest_idx]["is_best"] = True
+
+    return {
+        "count": len(secondary_results),
+        "best_savings": best_savings,
+        "best_code": best_code,
+        "table_rows": rows,
+    }
 
 
 def _resolve_baggage_needs(user_row: dict | None) -> str:
@@ -422,12 +546,19 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
     # match the rest of the page. (Pre-v0.10.15, this was a free-text string
     # generated by Claude at scoring time; numbers in the prose drifted from
     # the live page state and confused users.)
+    # v0.11.5: read secondary-airport snapshots for this route and run the
+    # door-to-door comparison so the deal page can render the Alternatives
+    # table + the reasoning bullet can say "Polled X nearby airports".
+    nearby_eval = _build_nearby_alternatives(db, route, snapshot, user_id, passengers)
+
     reasoning = _build_deterministic_reasoning(
         snapshot=snapshot,
         last_alerted=last_alerted,
         passengers=passengers,
         price_history_dict=history_dict,
-        nearby_count=0,  # follow-up: pass actual count from orchestrator's nearby cache
+        nearby_count=nearby_eval["count"],
+        nearby_best_savings=nearby_eval["best_savings"],
+        nearby_best_code=nearby_eval["best_code"],
     )
 
     # Price history for the sparkline (reuses the series fetched above)
@@ -444,10 +575,10 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
         price_history["typical_low"] = snapshot.typical_low
         price_history["typical_high"] = snapshot.typical_high
 
-    # Alternatives — leave empty for now; R7's nearby comparison cache lives on the
-    # Orchestrator, not in the DB. The web app will get a richer list once the
-    # nearby-evaluated data is persisted (follow-up).
-    alternatives = {"airports": [], "dates": []}
+    # v0.11.5: Alternatives.airports populated from the same nearby_eval as the
+    # reasoning bullet. Includes the user's primary as `is_current=True` so they
+    # can see relative position. Empty when no secondary snapshots exist yet.
+    alternatives = {"airports": nearby_eval["table_rows"], "dates": []}
 
     # Baggage policy items derived from utils/baggage FALLBACK
     baggage_items, airline_label = _baggage_policy_items(snapshot)
@@ -800,7 +931,7 @@ def assemble_settings(db: Database, user_id: str, telegram_handle: str = "") -> 
             "digest_time": prefs.get("digest_time"),
             "digest_skip_count_7d": user.get("digest_skip_count_7d") or 0,
             "telegram_label": telegram_handle or user.get("name") or "—",
-            "version": "0.11.4",
+            "version": "0.11.5",
         },
         "baggage_options": _BAGGAGE_OPTIONS,
     }
