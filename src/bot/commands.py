@@ -275,6 +275,7 @@ class TripBot:
         anthropic_api_key: str,
         anthropic_model: str,
         serpapi_key: str | None = None,
+        google_maps_api_key: str | None = None,
         reload_callback=None,
     ) -> None:
         self._bot_token = bot_token
@@ -282,6 +283,7 @@ class TripBot:
         self._anthropic_key = anthropic_api_key
         self._anthropic_model = anthropic_model
         self._serpapi_key = serpapi_key
+        self._google_maps_api_key = google_maps_api_key
         self._reload_callback = reload_callback
         self._offset: int = 0
         self._pending: dict[str, dict] = {}  # chat_id -> pending confirmation
@@ -622,13 +624,15 @@ class TripBot:
 
         # R9: surface auto-fill outcome so user knows whether transport costs are populated.
         any_modes_filled = any(v["modes"] for v in autofilled.values())
+        any_gm_skipped = any(v.get("skipped_reason") == "google_maps_key_missing" for v in autofilled.values())
         if any_modes_filled:
             lines.append("I've estimated transport costs (drive / train / taxi + parking). "
                          "Review and adjust the numbers in *Preferences* — most are estimates "
                          "until you confirm them.")
             lines.append("")
-        else:
-            lines.append("_(I couldn't auto-fill transport costs — please add them in Preferences.)_")
+        elif any_gm_skipped:
+            lines.append("_(Google Maps API key not configured — transport costs are blank. "
+                         "Add them in Preferences.)_")
             lines.append("")
 
         if is_first_user:
@@ -658,25 +662,26 @@ class TripBot:
         """R9 ITEM-053: populate airport_transport_option with auto-filled values.
 
         For each airport:
-          - SerpAPI google_maps_directions engine → drive distance/duration + transit duration
+          - Google Maps Distance Matrix → drive distance/duration + transit duration
           - Curated parking dataset → daily parking rate
           - Curated train fares dataset → RT/pp train fare estimate
           - Drive cost via heuristic (€0.25/km) once we have distance
           - Taxi cost via heuristic (€2.50/km) once we have distance
 
-        Reuses the existing SerpAPI plan budget — no separate Google Cloud
-        account / billing setup required. Each onboarded airport burns ~2 calls
-        (drive + transit), one-shot, cached per (origin, dest, mode).
-
-        Graceful skip when SerpAPI directions fails or no SerpAPI key: parking +
-        train fares still seed from curated data; user adjusts the rest in Settings.
+        Graceful skip when GOOGLE_MAPS_API_KEY is unset: parking + train fares
+        are still seeded from curated data, but drive/taxi durations are absent.
+        User adjusts in Settings.
 
         Returns: {airport_code: {modes: [...], skipped_reason: str | None}}
         """
-        from src.apis.serpapi import SerpAPIClient, SerpAPIError
-        from src.utils.airport_data import (
+        from src.apis.google_maps import (
+            GoogleMapsClient,
+            GoogleMapsError,
+            GoogleMapsKeyMissing,
             estimate_drive_cost_eur,
             estimate_taxi_cost_eur,
+        )
+        from src.utils.airport_data import (
             get_airport_meta,
             get_parking_rate,
             get_train_fare,
@@ -685,16 +690,7 @@ class TripBot:
         loop = asyncio.get_running_loop()
         result: dict = {}
 
-        # SerpAPI client — graceful skip if no key (shouldn't happen since SerpAPI
-        # is required for the rest of FareHound, but be defensive).
-        if not self._serpapi_key:
-            for code in airport_codes:
-                # Curated-only seeding still happens below.
-                result[code] = {"modes": [], "skipped_reason": "serpapi_key_missing"}
-            return result
-
-        cache_dir = os.environ.get("SERPAPI_CACHE_DIR")
-        sp_client = SerpAPIClient(api_key=self._serpapi_key, cache_dir=cache_dir)
+        gm_client = GoogleMapsClient(api_key=self._google_maps_api_key)
         try:
             for code in airport_codes:
                 modes_added: list[str] = []
@@ -721,29 +717,35 @@ class TripBot:
                 # 2. Parking rate from curated data (used by drive option below).
                 parking_rate = get_parking_rate(code)
 
-                # 3. Drive + taxi via SerpAPI directions (skip if no airport meta;
-                #    SerpAPI needs a sensible destination string, not a bare IATA).
+                # 3. Drive + taxi via Google Maps (only if we have an API key + airport meta).
                 drive_distance_km: float | None = None
                 drive_duration_min: int | None = None
                 transit_duration_min: int | None = None
-                lookup_skipped = meta is None
-                if not lookup_skipped:
+                gm_skipped = False
+                if not gm_client.is_configured:
+                    gm_skipped = True
+                elif meta is None:
+                    gm_skipped = True
+                else:
                     dest = f"{airport_label} Airport"
                     try:
-                        drive_res = await sp_client.directions(
+                        drive_res = await gm_client.directions(
                             origin=origin_city, destination=dest, mode="drive",
                         )
                         drive_distance_km = drive_res.distance_km
                         drive_duration_min = drive_res.duration_min
-                    except SerpAPIError as e:
-                        logger.warning("SerpAPI drive lookup failed for %s: %s", code, e)
-                    try:
-                        transit_res = await sp_client.directions(
-                            origin=origin_city, destination=dest, mode="transit",
-                        )
-                        transit_duration_min = transit_res.duration_min
-                    except SerpAPIError as e:
-                        logger.debug("SerpAPI transit lookup failed for %s: %s", code, e)
+                    except GoogleMapsKeyMissing:
+                        gm_skipped = True
+                    except GoogleMapsError as e:
+                        logger.warning("Google Maps drive lookup failed for %s: %s", code, e)
+                    if not gm_skipped:
+                        try:
+                            transit_res = await gm_client.directions(
+                                origin=origin_city, destination=dest, mode="transit",
+                            )
+                            transit_duration_min = transit_res.duration_min
+                        except GoogleMapsError as e:
+                            logger.debug("Google Maps transit lookup failed for %s: %s", code, e)
 
                 # 3a. Drive option.
                 if drive_distance_km is not None:
@@ -755,7 +757,7 @@ class TripBot:
                             user_id=user_id, airport_code=c, mode="drive",
                             cost_eur=cost, cost_scales_with_pax=False,
                             time_min=t, parking_cost_per_day_eur=p,
-                            source="serpapi_directions", confidence="medium",
+                            source="google_maps", confidence="medium",
                         ),
                     )
                     modes_added.append("drive")
@@ -769,12 +771,12 @@ class TripBot:
                             user_id=user_id, airport_code=c, mode="taxi",
                             cost_eur=cost, cost_scales_with_pax=False,
                             time_min=t, parking_cost_per_day_eur=None,
-                            source="serpapi_directions", confidence="low",
+                            source="google_maps", confidence="low",
                         ),
                     )
                     modes_added.append("taxi")
 
-                # 3c. Update train option's transit time if SerpAPI gave us one.
+                # 3c. Update train option's transit time if Google gave us one.
                 if transit_duration_min is not None and "train" in modes_added:
                     await loop.run_in_executor(
                         None,
@@ -787,10 +789,11 @@ class TripBot:
 
                 result[code] = {
                     "modes": modes_added,
-                    "skipped_reason": "airport_not_in_dataset" if lookup_skipped and not modes_added else None,
+                    "skipped_reason": "google_maps_key_missing" if gm_skipped and not gm_client.is_configured
+                                      else ("airport_not_in_dataset" if meta is None and not modes_added else None),
                 }
         finally:
-            await sp_client.close()
+            await gm_client.close()
         return result
 
     async def _notify_admin_new_user(
