@@ -1764,7 +1764,23 @@ class TripBot:
             if self._reload_callback:
                 await self._reload_callback()
 
-            await self._send(client, chat_id, f"Route added: {route_name(route.origin, route.destination)}")
+            # On a successful trip add, close the loop with a web_app button to
+            # the routes page so the user can verify the new route landed and
+            # explore it in the Mini App. No-op when MINIAPP_URL is unset.
+            from src.alerts.telegram import _miniapp_url
+            miniapp_routes = _miniapp_url("routes")
+            reply_markup = None
+            if miniapp_routes:
+                reply_markup = {
+                    "inline_keyboard": [[
+                        {"text": "📊 Open in FareHound", "web_app": {"url": miniapp_routes}},
+                    ]]
+                }
+            await self._send(
+                client, chat_id,
+                f"Route added: {route_name(route.origin, route.destination)}",
+                reply_markup=reply_markup,
+            )
 
             # Immediate price check (non-blocking)
             task = asyncio.create_task(self._immediate_price_check(route, uid, chat_id, client))
