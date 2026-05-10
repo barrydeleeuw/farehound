@@ -15,20 +15,14 @@ import asyncio
 import json
 import logging
 import os
-import uuid
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-import anthropic
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from src.bot.commands import _PARSE_PROMPT
 from src.storage.db import Database
-from src.storage.models import Route
 from src.web import data as data_assembler
 from src.web.auth import require_user
 
@@ -184,94 +178,10 @@ def _register_api_routes(app: FastAPI) -> None:
         return JSONResponse(deal)
 
     # ---- Action endpoints (mutations) ----
-
-    @app.post("/api/routes/parse")
-    async def parse_trip(
-        body: dict = Body(...), tg_user: dict = Depends(require_user)
-    ) -> JSONResponse:
-        text = (body.get("text") or "").strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="text is required")
-        if len(text) > 500:
-            # Bound input so a misbehaving client can't burn Anthropic budget on huge prompts.
-            raise HTTPException(status_code=400, detail="text too long (max 500 chars)")
-
-        api_key = app.state.anthropic_key
-        model = app.state.anthropic_model
-        if not api_key:
-            raise HTTPException(status_code=503, detail="parser unavailable (no anthropic key)")
-
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        try:
-            resp = await client.messages.create(
-                model=model,
-                max_tokens=256,
-                messages=[
-                    {"role": "user", "content": _PARSE_PROMPT.format(today=today, user_text=text)}
-                ],
-            )
-        except Exception as e:
-            logger.exception("parse: anthropic call failed")
-            raise HTTPException(status_code=502, detail=f"parser error: {e}") from None
-
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("parse: Claude returned non-JSON for text=%r raw=%r", text, raw[:200])
-            raise HTTPException(status_code=502, detail="parser returned non-JSON") from None
-
-        # Log the parsed result so we can debug ambiguous inputs (Valencia/Sokcho/etc).
-        logger.info(
-            "parse: text=%r → origin=%r dest=%r needs_clarification=%r options=%r",
-            text,
-            parsed.get("origin"),
-            parsed.get("destination"),
-            parsed.get("needs_clarification"),
-            parsed.get("options"),
-        )
-        return JSONResponse(parsed)
-
-    @app.post("/api/routes")
-    async def create_route(
-        body: dict = Body(...), tg_user: dict = Depends(require_user)
-    ) -> JSONResponse:
-        db: Database = app.state.db
-        user_id = _resolve_user_id(db, tg_user)
-        if user_id is None:
-            raise HTTPException(status_code=403, detail="user not registered")
-
-        origin = (body.get("origin") or "").strip().upper()
-        dest = (body.get("destination") or "").strip().upper()
-        if not origin or not dest or len(origin) != 3 or len(dest) != 3:
-            raise HTTPException(status_code=400, detail="origin and destination IATA codes required")
-
-        route = Route(
-            route_id=f"{origin.lower()}_{dest.lower()}_{uuid.uuid4().hex[:6]}",
-            origin=origin,
-            destination=dest,
-            earliest_departure=body.get("earliest_departure"),
-            latest_return=body.get("latest_return"),
-            passengers=int(body.get("passengers") or 2),
-            max_stops=int(body.get("max_stops") or 1),
-            trip_duration_type=body.get("trip_duration_type"),
-            trip_duration_days=body.get("trip_duration_days"),
-            preferred_departure_days=body.get("preferred_departure_days"),
-            preferred_return_days=body.get("preferred_return_days"),
-            notes=body.get("notes"),
-            active=True,
-        )
-        await asyncio.to_thread(db.upsert_route, route, user_id)
-        return JSONResponse({
-            "route_id": route.route_id,
-            "first_poll_eta_seconds": None,  # follow-up: trigger immediate poll
-        })
+    # Note: trip creation is handled exclusively by the bot's /trip flow in
+    # src/bot/commands.py — it has multi-turn disambiguation (clarifying
+    # questions, IATA option pickers) that a one-shot HTTP endpoint can't match.
+    # The Mini Web App's /routes page sends users back to chat for adds.
 
     @app.post("/api/routes/{route_id}/snooze")
     async def snooze_route(
