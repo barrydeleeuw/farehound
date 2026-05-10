@@ -30,9 +30,23 @@ def calculate_net_cost(
     transport_cost: float,
     parking_cost: float | None,
     transport_mode: str = "",
+    baggage: float = 0,
 ) -> float:
-    """Total trip cost: fare x passengers + transport (round-trip, per-person if applicable) + parking."""
-    return (fare_pp * passengers) + transport_total(transport_cost, transport_mode, passengers) + (parking_cost or 0)
+    """Total door-to-door trip cost.
+
+    fare × passengers + baggage (already-party-total) + transport (RT, per-person
+    if mode is per-person) + parking.
+
+    v0.11.7: added `baggage` so the deal-page Alternatives table can produce
+    totals consistent with the breakdown hero (which always includes baggage).
+    Defaults to 0 to keep existing callers (orchestrator alerts) working.
+    """
+    return (
+        (fare_pp * passengers)
+        + (baggage or 0)
+        + transport_total(transport_cost, transport_mode, passengers)
+        + (parking_cost or 0)
+    )
 
 
 def compare_airports(
@@ -60,6 +74,7 @@ def compare_airports(
         transport_cost=primary_result["transport_cost"],
         parking_cost=primary_result.get("parking_cost"),
         transport_mode=primary_result.get("transport_mode", ""),
+        baggage=primary_result.get("baggage") or 0,
     )
     primary_flight_duration = primary_result.get("flight_duration_min")
 
@@ -72,6 +87,7 @@ def compare_airports(
             transport_cost=sec["transport_cost"],
             parking_cost=sec.get("parking_cost"),
             transport_mode=sec.get("transport_mode", ""),
+            baggage=sec.get("baggage") or 0,
         )
         savings = primary_net - sec_net
         entry = {

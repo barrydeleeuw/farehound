@@ -1040,14 +1040,20 @@ class Database:
         return result
 
     def get_nearby_snapshots(self, route_id: str, primary_origin: str) -> list[dict]:
-        """Return latest snapshot per secondary airport for this route (last 7 days)."""
+        """Return latest snapshot per secondary airport for this route (last 7 days).
+
+        v0.11.7: now also returns `baggage_estimate` so the deal page's
+        Alternatives table can compute baggage-inclusive door-to-door totals
+        consistent with the deal hero.
+        """
         cutoff = _to_isoformat(datetime.now(UTC) - timedelta(days=7))
         cursor = self._conn.execute(
             """
             SELECT
                 json_extract(search_params, '$.origin') AS origin,
                 lowest_price,
-                observed_at
+                observed_at,
+                baggage_estimate
             FROM price_snapshots
             WHERE route_id = ?
               AND search_params IS NOT NULL
@@ -1063,7 +1069,11 @@ class Database:
         for row in cursor.fetchall():
             origin = row[0]
             if origin not in seen:
-                seen[origin] = {"airport_code": origin, "lowest_price": row[1]}
+                seen[origin] = {
+                    "airport_code": origin,
+                    "lowest_price": row[1],
+                    "baggage_estimate": row[3],  # raw JSON string; caller parses
+                }
         return list(seen.values())
 
     def get_secondary_airports(self, user_id: str | None = None) -> list[dict]:

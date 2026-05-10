@@ -238,6 +238,7 @@ def _build_deterministic_reasoning(
 
 def _build_nearby_alternatives(
     db: Database, route: Route, snapshot, user_id: str | None, passengers: int,
+    baggage_needs: str = "one_checked",
 ) -> dict:
     """v0.11.5: assemble the nearby-airport comparison for the deal page.
 
@@ -265,6 +266,11 @@ def _build_nearby_alternatives(
     primary_resolved = db.get_resolved_transport(
         route.origin, user_id=user_id, passengers=passengers, trip_days=trip_days,
     ) or {}
+    # v0.11.7: include baggage in net-cost so Alternatives totals match the
+    # deal-page hero (which always includes baggage). Per-airport because
+    # different secondaries return different snapshots → different airlines
+    # → different baggage fees.
+    primary_baggage = _baggage_total_party(snapshot, baggage_needs, passengers)
     primary_result = {
         "airport_code": route.origin,
         "fare_pp": float(snapshot.lowest_price) / passengers if passengers > 1 else float(snapshot.lowest_price),
@@ -272,6 +278,7 @@ def _build_nearby_alternatives(
         "parking_cost": primary_resolved.get("parking_cost_eur") or 0,
         "transport_mode": primary_resolved.get("transport_mode") or "",
         "transport_time_min": primary_resolved.get("transport_time_min") or 0,
+        "baggage": primary_baggage,
     }
 
     secondary_results = []
@@ -283,6 +290,15 @@ def _build_nearby_alternatives(
         sec_resolved = db.get_resolved_transport(
             sec_code, user_id=user_id, passengers=passengers, trip_days=trip_days,
         ) or {}
+        # Parse baggage from each secondary's snapshot (raw JSON or dict).
+        sec_be_raw = sec.get("baggage_estimate")
+        sec_baggage = 0.0
+        if sec_be_raw:
+            class _SyntheticSnap:  # _baggage_total_party reads .baggage_estimate
+                pass
+            stub = _SyntheticSnap()
+            stub.baggage_estimate = sec_be_raw
+            sec_baggage = _baggage_total_party(stub, baggage_needs, passengers)
         secondary_results.append({
             "airport_code": sec_code,
             "fare_pp": float(sec_price) / passengers if passengers > 1 else float(sec_price),
@@ -290,6 +306,7 @@ def _build_nearby_alternatives(
             "parking_cost": sec_resolved.get("parking_cost_eur") or 0,
             "transport_mode": sec_resolved.get("transport_mode") or "",
             "transport_time_min": sec_resolved.get("transport_time_min") or 0,
+            "baggage": sec_baggage,
         })
 
     if not secondary_results:
@@ -305,6 +322,7 @@ def _build_nearby_alternatives(
         transport_cost=primary_result["transport_cost"],
         parking_cost=primary_result["parking_cost"],
         transport_mode=primary_result["transport_mode"],
+        baggage=primary_result["baggage"],
     )
 
     best_savings = competitive[0]["savings"] if competitive else None
@@ -549,7 +567,10 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
     # v0.11.5: read secondary-airport snapshots for this route and run the
     # door-to-door comparison so the deal page can render the Alternatives
     # table + the reasoning bullet can say "Polled X nearby airports".
-    nearby_eval = _build_nearby_alternatives(db, route, snapshot, user_id, passengers)
+    # v0.11.7: pass baggage_needs so Alternatives totals match the deal hero.
+    nearby_eval = _build_nearby_alternatives(
+        db, route, snapshot, user_id, passengers, baggage_needs=baggage_needs,
+    )
 
     reasoning = _build_deterministic_reasoning(
         snapshot=snapshot,
@@ -939,7 +960,7 @@ def assemble_settings(db: Database, user_id: str, telegram_handle: str = "") -> 
             "digest_time": prefs.get("digest_time"),
             "digest_skip_count_7d": user.get("digest_skip_count_7d") or 0,
             "telegram_label": telegram_handle or user.get("name") or "—",
-            "version": "0.11.6",
+            "version": "0.11.7",
         },
         "baggage_options": _BAGGAGE_OPTIONS,
     }
