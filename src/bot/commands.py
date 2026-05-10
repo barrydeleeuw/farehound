@@ -1260,9 +1260,16 @@ class TripBot:
             lines = [f"💰 *{name}*"]
             lines.append(f"*€{price_pp:,.0f}/pp* ({r.passengers} pax)")
 
-            # Cost breakdown with transport
+            # Cost breakdown with transport — R9 picks cheapest mode for this party.
+            r_trip_days = 0
+            if r.earliest_departure and r.latest_return:
+                r_trip_days = max((r.latest_return - r.earliest_departure).days, 0)
             transport = await loop.run_in_executor(
-                None, self._db.get_airport_transport, r.origin, user_id,
+                None,
+                lambda: self._db.get_resolved_transport(
+                    r.origin, user_id,
+                    passengers=r.passengers or 2, trip_days=r_trip_days,
+                ),
             )
             t_cost = transport["transport_cost_eur"] if transport else 0
             p_cost = (transport or {}).get("parking_cost_eur") or 0
@@ -1334,7 +1341,11 @@ class TripBot:
                             lines.append("*Nearby alternatives:*")
                         alt_code = alt["airport_code"].upper()
                         alt_transport = await loop.run_in_executor(
-                            None, self._db.get_airport_transport, alt_code, user_id,
+                            None,
+                            lambda code=alt_code: self._db.get_resolved_transport(
+                                code, user_id,
+                                passengers=r.passengers or 2, trip_days=r_trip_days,
+                            ),
                         )
                         at_cost = alt_transport["transport_cost_eur"] if alt_transport else 0
                         ap_cost = (alt_transport or {}).get("parking_cost_eur") or 0
@@ -1930,9 +1941,15 @@ class TripBot:
                         "No flights found for those dates. I'll keep checking on the next poll cycle.")
                     return
 
-                # Get transport info
+                # Get transport info — R9 picks cheapest mode for this party.
+                _trip_days = max((ret_date - out_date).days, 0) if (out_date and ret_date) else 0
                 primary_transport = await loop.run_in_executor(
-                    None, self._db.get_airport_transport, route.origin, user_id,
+                    None,
+                    lambda: self._db.get_resolved_transport(
+                        route.origin, user_id,
+                        passengers=route.passengers or 2,
+                        trip_days=_trip_days,
+                    ),
                 )
                 p_transport_cost = primary_transport["transport_cost_eur"] if primary_transport else 0
                 p_parking_cost = (primary_transport or {}).get("parking_cost_eur") or 0

@@ -295,10 +295,18 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
     lowest = float(snapshot.lowest_price) if snapshot and snapshot.lowest_price is not None else 0.0
     price_pp = lowest / passengers if passengers > 1 else lowest
 
-    # Transport for primary airport
-    primary = db.get_airport_transport(route.origin, user_id=user_id) or {}
+    # Transport for primary airport — R9 ITEM-053 picks the cheapest enabled
+    # mode for this party + trip duration, honouring any per-airport override.
+    trip_days = 0
+    if route.earliest_departure and route.latest_return:
+        trip_days = max((route.latest_return - route.earliest_departure).days, 0)
+    primary = db.get_resolved_transport(
+        route.origin, user_id=user_id,
+        passengers=passengers, trip_days=trip_days,
+    ) or {}
     p_cost = float(primary.get("transport_cost_eur") or 0)
     p_mode = primary.get("transport_mode") or ""
+    p_mode_label = primary.get("mode_label") or p_mode
     p_park = float(primary.get("parking_cost_eur") or 0)
     p_total_transport = transport_total(p_cost, p_mode, passengers)
 
@@ -356,7 +364,7 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
         baggage=baggage,
         transport=p_total_transport,
         parking=p_park,
-        transport_mode=p_mode,
+        transport_mode=p_mode_label,
         passengers=passengers,
         baggage_label=baggage_label,
     )

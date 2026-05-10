@@ -1,0 +1,49 @@
+{
+  "_meta": {
+    "description": "Allow-list of EU airports with regular long-haul or major-hub service. Used by R9 ITEM-053 to filter out tiny regional / seasonal-only airports during nearby-airport auto-discovery. An airport NOT on this list will not be auto-proposed during onboarding even if geographically close.",
+    "source": "Manual curation, 2026-05",
+    "schema": {
+      "iata": "IATA code",
+      "name": "Display name",
+      "lat / lng": "Decimal degrees, geographic centroid of the airport",
+      "country": "ISO 3166-1 alpha-2"
+    }
+  },
+  "airports": [
+    {"iata": "AMS", "name": "Amsterdam Schiphol",      "lat": 52.3105, "lng": 4.7683,  "country": "NL"},
+    {"iata": "EIN", "name": "Eindhoven",               "lat": 51.4500, "lng": 5.3745,  "country": "NL"},
+    {"iata": "RTM", "name": "Rotterdam The Hague",     "lat": 51.9569, "lng": 4.4374,  "country": "NL"},
+    {"iata": "MST", "name": "Maastricht",              "lat": 50.9117, "lng": 5.7700,  "country": "NL"},
+    {"iata": "GRQ", "name": "Groningen",               "lat": 53.1197, "lng": 6.5797,  "country": "NL"},
+    {"iata": "BRU", "name": "Brussels",                "lat": 50.9014, "lng": 4.4844,  "country": "BE"},
+    {"iata": "CRL", "name": "Brussels Charleroi",      "lat": 50.4592, "lng": 4.4533,  "country": "BE"},
+    {"iata": "ANR", "name": "Antwerp",                 "lat": 51.1894, "lng": 4.4603,  "country": "BE"},
+    {"iata": "DUS", "name": "Düsseldorf",              "lat": 51.2895, "lng": 6.7668,  "country": "DE"},
+    {"iata": "CGN", "name": "Cologne Bonn",            "lat": 50.8659, "lng": 7.1427,  "country": "DE"},
+    {"iata": "FRA", "name": "Frankfurt",               "lat": 50.0379, "lng": 8.5622,  "country": "DE"},
+    {"iata": "MUC", "name": "Munich",                  "lat": 48.3537, "lng": 11.7750, "country": "DE"},
+    {"iata": "BER", "name": "Berlin Brandenburg",      "lat": 52.3667, "lng": 13.5033, "country": "DE"},
+    {"iata": "HAM", "name": "Hamburg",                 "lat": 53.6304, "lng": 9.9882,  "country": "DE"},
+    {"iata": "STR", "name": "Stuttgart",               "lat": 48.6899, "lng": 9.2220,  "country": "DE"},
+    {"iata": "LHR", "name": "London Heathrow",         "lat": 51.4700, "lng": -0.4543, "country": "GB"},
+    {"iata": "LGW", "name": "London Gatwick",          "lat": 51.1537, "lng": -0.1821, "country": "GB"},
+    {"iata": "STN", "name": "London Stansted",         "lat": 51.8860, "lng": 0.2389,  "country": "GB"},
+    {"iata": "LTN", "name": "London Luton",            "lat": 51.8747, "lng": -0.3683, "country": "GB"},
+    {"iata": "CDG", "name": "Paris Charles de Gaulle", "lat": 49.0097, "lng": 2.5479,  "country": "FR"},
+    {"iata": "ORY", "name": "Paris Orly",              "lat": 48.7233, "lng": 2.3794,  "country": "FR"},
+    {"iata": "LYS", "name": "Lyon Saint-Exupéry",      "lat": 45.7256, "lng": 5.0811,  "country": "FR"},
+    {"iata": "MAD", "name": "Madrid Barajas",          "lat": 40.4719, "lng": -3.5626, "country": "ES"},
+    {"iata": "BCN", "name": "Barcelona El Prat",       "lat": 41.2974, "lng": 2.0833,  "country": "ES"},
+    {"iata": "FCO", "name": "Rome Fiumicino",          "lat": 41.8003, "lng": 12.2389, "country": "IT"},
+    {"iata": "MXP", "name": "Milan Malpensa",          "lat": 45.6306, "lng": 8.7281,  "country": "IT"},
+    {"iata": "ZRH", "name": "Zurich",                  "lat": 47.4647, "lng": 8.5492,  "country": "CH"},
+    {"iata": "GVA", "name": "Geneva",                  "lat": 46.2381, "lng": 6.1090,  "country": "CH"},
+    {"iata": "VIE", "name": "Vienna",                  "lat": 48.1103, "lng": 16.5697, "country": "AT"},
+    {"iata": "ARN", "name": "Stockholm Arlanda",       "lat": 59.6519, "lng": 17.9186, "country": "SE"},
+    {"iata": "CPH", "name": "Copenhagen",              "lat": 55.6180, "lng": 12.6560, "country": "DK"},
+    {"iata": "OSL", "name": "Oslo",                    "lat": 60.1976, "lng": 11.1004, "country": "NO"},
+    {"iata": "DUB", "name": "Dublin",                  "lat": 53.4213, "lng": -6.2701, "country": "IE"},
+    {"iata": "LIS", "name": "Lisbon Humberto Delgado", "lat": 38.7813, "lng": -9.1359, "country": "PT"},
+    {"iata": "OPO", "name": "Porto",                   "lat": 41.2421, "lng": -8.6781, "country": "PT"}
+  ]
+}

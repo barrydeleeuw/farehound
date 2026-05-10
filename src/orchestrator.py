@@ -703,7 +703,12 @@ class Orchestrator:
             return
 
         primary_transport = await loop.run_in_executor(
-            None, self.db.get_airport_transport, route.origin, user_id
+            None,
+            lambda: self.db.get_resolved_transport(
+                route.origin, user_id,
+                passengers=route.passengers or 2,
+                trip_days=max((windows[0][1] - windows[0][0]).days, 0) if windows else 0,
+            ),
         )
         if not primary_transport:
             logger.warning("No transport data for primary airport %s", route.origin)
@@ -866,8 +871,16 @@ class Orchestrator:
         if not secondary_airports or snapshot.lowest_price is None:
             return
 
+        snap_trip_days = 0
+        if snapshot.outbound_date and snapshot.return_date:
+            snap_trip_days = max((snapshot.return_date - snapshot.outbound_date).days, 0)
         primary_transport = await loop.run_in_executor(
-            None, self.db.get_airport_transport, route.origin, user_id
+            None,
+            lambda: self.db.get_resolved_transport(
+                route.origin, user_id,
+                passengers=route.passengers or 2,
+                trip_days=snap_trip_days,
+            ),
         )
         if not primary_transport:
             return
@@ -1151,8 +1164,16 @@ class Orchestrator:
         if snapshot.search_params and isinstance(snapshot.search_params, dict):
             gf_url = snapshot.search_params.get("google_flights_url", "")
 
+        deal_trip_days = 0
+        if snapshot.outbound_date and snapshot.return_date:
+            deal_trip_days = max((snapshot.return_date - snapshot.outbound_date).days, 0)
         primary_transport = await loop.run_in_executor(
-            None, self.db.get_airport_transport, route.origin, user_id
+            None,
+            lambda: self.db.get_resolved_transport(
+                route.origin, user_id,
+                passengers=route.passengers or 2,
+                trip_days=deal_trip_days,
+            ),
         )
         primary_t_cost = primary_transport.get("transport_cost_eur", 0) if primary_transport else 0
         primary_parking = primary_transport.get("parking_cost_eur") if primary_transport else None
