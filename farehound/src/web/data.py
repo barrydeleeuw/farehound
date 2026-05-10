@@ -113,6 +113,27 @@ def _parse_reasoning_json(raw: str | None) -> list[dict] | None:
     return bullets or None
 
 
+def _split_legacy_reasoning(text: str) -> list[dict]:
+    """Convert a pre-R7 single-string reasoning into bullet dicts.
+
+    The legacy scorer returned 2-3 sentences in one string. When the bot
+    rendered that, it prefixed each sentence with `✓ ` for visual structure.
+    Splitting on `✓ ` (or sentence boundaries) recovers the bullet shape.
+    """
+    if not text:
+        return []
+    # Try splitting on the unicode check character (legacy scorer + bot prefix).
+    parts = [p.strip() for p in text.split("✓") if p.strip()]
+    if len(parts) >= 2:
+        return [{"headline": p.rstrip(". "), "detail": ""} for p in parts]
+    # Fallback: split on sentence boundaries. Conservative — only if the
+    # text is clearly multiple sentences.
+    sentences = [s.strip() for s in text.replace("? ", "?\n").replace(". ", ".\n").split("\n") if s.strip()]
+    if len(sentences) >= 2:
+        return [{"headline": s.rstrip("."), "detail": ""} for s in sentences]
+    return [{"headline": text.strip(), "detail": ""}]
+
+
 def _build_breakdown_rows(
     *,
     flights_total: float,
@@ -121,35 +142,48 @@ def _build_breakdown_rows(
     parking: float,
     transport_mode: str,
     passengers: int,
+    baggage_label: str = "",
     explanations: dict | None = None,
 ) -> list[dict]:
+    """Build the per-person cost breakdown rows for the deal page.
+
+    All amounts are presented per-person (party-total is shown as a smaller
+    annotation on the total line). Pre-R8 this returned party totals in the
+    rows + a per-pp annotation on total — that mix was confusing.
+    """
     explanations = explanations or {}
+    pax = max(int(passengers or 1), 1)
+
+    def per_pp(amount: float) -> float:
+        return float(amount) / pax if pax > 1 else float(amount)
+
     rows = []
     rows.append({
         "label": "flights",
         "op": "",
-        "amount_display": _fmt_eur(flights_total),
+        "amount_display": _fmt_eur(per_pp(flights_total)),
         "explanation": explanations.get("flights"),
     })
     if baggage:
+        # Annotate which baggage assumption we're using so the user can sanity-check.
         rows.append({
-            "label": "baggage",
+            "label": f"baggage{(' ' + baggage_label) if baggage_label else ''}",
             "op": "+",
-            "amount_display": _fmt_eur(baggage),
+            "amount_display": _fmt_eur(per_pp(baggage)),
             "explanation": explanations.get("baggage"),
         })
     if transport:
         rows.append({
             "label": f"transport ({transport_mode})" if transport_mode else "transport",
             "op": "+",
-            "amount_display": _fmt_eur(transport),
+            "amount_display": _fmt_eur(per_pp(transport)),
             "explanation": explanations.get("transport"),
         })
     if parking:
         rows.append({
             "label": "parking",
             "op": "+",
-            "amount_display": _fmt_eur(parking),
+            "amount_display": _fmt_eur(per_pp(parking)),
             "explanation": explanations.get("parking"),
         })
     return rows
@@ -178,7 +212,31 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
     p_park = float(primary.get("parking_cost_eur") or 0)
     p_total_transport = transport_total(p_cost, p_mode, passengers)
 
-    # Baggage estimate from snapshot (set by R7's parser)
+    # User's baggage preference — drives both the assumption label shown to the
+    # user and (where SerpAPI doesn't have data) the fallback estimate.
+    user_row = db.get_user(user_id) if user_id else {}
+    if not isinstance(user_row, dict):
+        user_row = {}
+    user_prefs = user_row.get("preferences") or {}
+    if not isinstance(user_prefs, dict):
+        try:
+            user_prefs = json.loads(user_prefs)
+        except Exception:
+            user_prefs = {}
+    baggage_needs = (
+        user_row.get("baggage_needs")
+        or user_prefs.get("baggage_needs")
+        or "one_checked"
+    )
+    baggage_label = {
+        "carry_on_only": "(carry-on only)",
+        "one_checked": "(1× checked, both ways)",
+        "two_checked": "(2× checked, both ways)",
+    }.get(baggage_needs, "")
+
+    # Baggage estimate — sum SerpAPI fees per direction, scaled by user preference.
+    # Pre-v0.10.14 we always summed carry_on + checked regardless of user prefs;
+    # now we honour `baggage_needs`.
     baggage = 0.0
     if snapshot and getattr(snapshot, "baggage_estimate", None):
         try:
@@ -186,10 +244,19 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
             outbound = be.get("outbound", {}) if isinstance(be, dict) else {}
             ret = be.get("return", {}) if isinstance(be, dict) else {}
             for leg in (outbound, ret):
-                for k in ("checked", "carry_on"):
-                    v = leg.get(k) if isinstance(leg, dict) else None
-                    if v is not None:
-                        baggage += float(v) * passengers
+                if not isinstance(leg, dict):
+                    continue
+                carry = float(leg.get("carry_on") or 0)
+                checked = float(leg.get("checked") or 0)
+                # Apply user preference. carry_on always counts (it's a fee even
+                # for carry-on-only travellers). `checked` is per-bag.
+                if baggage_needs == "carry_on_only":
+                    leg_total = carry
+                elif baggage_needs == "two_checked":
+                    leg_total = carry + 2 * checked
+                else:  # one_checked (default)
+                    leg_total = carry + checked
+                baggage += leg_total * passengers
         except Exception:
             pass
 
@@ -201,13 +268,14 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
         parking=p_park,
         transport_mode=p_mode,
         passengers=passengers,
+        baggage_label=baggage_label,
     )
 
-    # Reasoning — prefer structured 3-field JSON, fall back to free-text
+    # Reasoning — prefer structured 3-field JSON, fall back to splitting the
+    # legacy single string on `✓` markers so each becomes its own bullet.
     reasoning = _parse_reasoning_json(deal_row.get("reasoning_json"))
     if reasoning is None and deal_row.get("reasoning"):
-        # Convert the legacy single string into one bullet so the template still renders
-        reasoning = [{"headline": deal_row["reasoning"], "detail": ""}]
+        reasoning = _split_legacy_reasoning(deal_row["reasoning"])
 
     # Price history (90 days) for the sparkline
     price_history = {"series_json": "[]", "first_label": "", "last_label": "",
@@ -236,13 +304,18 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
     # Baggage policy items derived from utils/baggage FALLBACK
     baggage_items, airline_label = _baggage_policy_items(snapshot)
 
-    # Last-alerted price for the delta
+    # Last-alerted price for the delta — both alerted and current are party totals,
+    # but we display /pp to match the rest of the page.
     last_alerted = db.get_last_alerted_price(route.route_id, user_id=user_id)
     delta = None
     delta_abs = ""
+    alerted_pp_display = ""
     if last_alerted is not None and lowest:
         delta = lowest - float(last_alerted)
-        delta_abs = _fmt_eur(abs(delta))
+        delta_pp = delta / passengers if passengers > 1 else delta
+        delta_abs = _fmt_eur(abs(delta_pp))
+        alerted_pp = float(last_alerted) / passengers if passengers > 1 else float(last_alerted)
+        alerted_pp_display = _fmt_eur(alerted_pp)
 
     book_url = deal_row.get("booking_url") or _google_flights_url(route, snapshot)
 
@@ -264,13 +337,20 @@ def assemble_deal(db: Database, deal_id: str, user_id: str | None = None) -> dic
         "airline": airline_display,
         "price_pp_display": _fmt_eur(price_pp),
         "delta_since_alert": delta,
-        "delta_since_alert_abs": delta_abs,
+        "delta_since_alert_abs": delta_abs,  # already /pp
+        "alerted_pp_display": alerted_pp_display,
         "breakdown": {
             "rows": breakdown_rows,
-            "total_display": _fmt_eur(breakdown_total),
+            # Primary unit is /pp throughout. Party total kept as a smaller annotation.
             "total_pp_display": _fmt_eur(breakdown_total / passengers if passengers > 1 else breakdown_total),
+            "total_party_display": _fmt_eur(breakdown_total),
+            "passengers": passengers,
         },
         "reasoning": reasoning or [],
+        # Reasoning bullets reference the price at alert time, not the current
+        # price. The template should surface this so users don't read the bullets
+        # against the current /pp number.
+        "reasoning_alerted_pp_display": alerted_pp_display,
         "price_history": price_history,
         "alternatives": alternatives,
         "baggage_policy": {"airline_label": airline_label, "entries": baggage_items},

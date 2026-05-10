@@ -19,8 +19,8 @@
       <span class="unit">/ pp</span>
       {% if deal.delta_since_alert is not none %}
       <span class="delta {% if deal.delta_since_alert < 0 %}delta-positive{% else %}delta-negative{% endif %}">
-        <span>{% if deal.delta_since_alert < 0 %}▼{% else %}▲{% endif %} €{{ deal.delta_since_alert_abs }}</span>
-        <span class="label">since alert</span>
+        <span>{% if deal.delta_since_alert < 0 %}▼{% else %}▲{% endif %} €{{ deal.delta_since_alert_abs }}/pp</span>
+        <span class="label">{% if deal.alerted_pp_display %}was €{{ deal.alerted_pp_display }}/pp{% else %}since alert{% endif %}</span>
       </span>
       {% endif %}
     </div>
@@ -29,7 +29,7 @@
   <section class="section">
     <div class="section-label">
       <span>Cost breakdown</span>
-      <span class="meta">round trip · {{ deal.passengers }} pax</span>
+      <span class="meta">per person · round trip{% if deal.passengers and deal.passengers > 1 %} · {{ deal.passengers }} pax{% endif %}</span>
     </div>
     <table class="ledger">
       <tbody>
@@ -47,19 +47,29 @@
         {% endfor %}
         <tr class="total-row">
           <td class="label-cell">
-            total
-            <span class="annotation">(€{{ deal.breakdown.total_pp_display }} / pp)</span>
+            total / pp
+            {% if deal.breakdown.passengers and deal.breakdown.passengers > 1 %}
+            <span class="annotation">(€{{ deal.breakdown.total_party_display }} for {{ deal.breakdown.passengers }})</span>
+            {% endif %}
           </td>
           <td class="op"></td>
-          <td class="num"><span class="currency">€</span>{{ deal.breakdown.total_display }}</td>
+          <td class="num"><span class="currency">€</span>{{ deal.breakdown.total_pp_display }}</td>
         </tr>
       </tbody>
     </table>
+    <p class="footnote" style="font-family: var(--sans); font-size: 11px; color: var(--text-faint); margin-top: 10px;">
+      Adjust baggage assumption + transport in <a href="/settings">Preferences</a>.
+    </p>
   </section>
 
   {% if deal.reasoning %}
   <section class="section">
-    <div class="section-label"><span>Why this is the best</span></div>
+    <div class="section-label">
+      <span>Why this is the best</span>
+      {% if deal.reasoning_alerted_pp_display %}
+      <span class="meta">at alert · €{{ deal.reasoning_alerted_pp_display }}/pp</span>
+      {% endif %}
+    </div>
     <ul class="reasoning">
       {% for r in deal.reasoning %}
       <li>
@@ -71,6 +81,11 @@
       </li>
       {% endfor %}
     </ul>
+    {% if deal.reasoning_alerted_pp_display %}
+    <p class="footnote" style="font-family: var(--sans); font-size: 11px; color: var(--text-faint); margin-top: 8px;">
+      Reasoning reflects the price at alert time. Current price may differ — see hero above.
+    </p>
+    {% endif %}
   </section>
   {% endif %}
 
