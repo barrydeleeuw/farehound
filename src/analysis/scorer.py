@@ -81,7 +81,11 @@ Respond with JSON only:
 {{
   "score": 0.0-1.0,
   "urgency": "book_now" | "watch" | "skip",
-  "reasoning": "2-3 sentences — specific, factual, phone-friendly",
+  "reasoning": {{
+    "vs_dates": "Compare price across dates polled. Cite the cheapest date if savings > €20/pp; otherwise note the date is the best available. ≤120 chars.",
+    "vs_range": "Compare to Google's typical low-high range OR my 90-day average. Cite the absolute or percentage difference. ≤120 chars.",
+    "vs_nearby": "Compare to nearby alternative airports. If none configured, return \\"No nearby airports configured\\". If primary is best, return \\"Yours is best\\". Otherwise cite the cheapest alternative. ≤120 chars."
+  }},
   "booking_window_hours": estimated hours this fare is likely available
 }}"""
 
@@ -93,11 +97,28 @@ _DEFAULT_TRAVELLER_PREFS = [
 ]
 
 
+_REASONING_FIELDS = ("vs_dates", "vs_range", "vs_nearby")
+
+
+def reasoning_to_bullets(reasoning: dict | str | None) -> str:
+    """Flatten a 3-field reasoning dict to a `\\n`-joined bullet string for legacy `deals.reasoning` reads.
+
+    Accepts a string for back-compat (returns it unchanged) or None (returns "").
+    """
+    if reasoning is None:
+        return ""
+    if isinstance(reasoning, str):
+        return reasoning
+    if isinstance(reasoning, dict):
+        return "\n".join(f"✓ {reasoning[k]}" for k in _REASONING_FIELDS if reasoning.get(k))
+    return ""
+
+
 @dataclass
 class DealScore:
     score: float
     urgency: str
-    reasoning: str
+    reasoning: dict
     booking_window_hours: int
 
 
@@ -339,10 +360,15 @@ class DealScorer:
                     cleaned = cleaned[:-3]
                 cleaned = cleaned.strip()
             data = json.loads(cleaned)
+            urgency = data["urgency"]
+            if urgency not in ("book_now", "watch", "skip"):
+                urgency = "watch"
+            reasoning_raw = data.get("reasoning")
+            reasoning = self._coerce_reasoning(reasoning_raw)
             return DealScore(
                 score=float(data["score"]),
-                urgency=data["urgency"],
-                reasoning=data["reasoning"],
+                urgency=urgency,
+                reasoning=reasoning,
                 booking_window_hours=int(data["booking_window_hours"]),
             )
         except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
@@ -350,6 +376,35 @@ class DealScorer:
             return DealScore(
                 score=0.3,
                 urgency="watch",
-                reasoning=f"Could not parse Claude response: {raw[:200]}",
+                reasoning=self._fallback_reasoning(f"Could not parse Claude response: {raw[:200]}"),
                 booking_window_hours=48,
             )
+
+    @staticmethod
+    def _coerce_reasoning(raw) -> dict:
+        """Validate Claude's `reasoning` field and synthesise missing keys (§6.5).
+
+        Accepts the new dict shape OR a legacy free-text string (older response capture
+        replays). On any malformed input, returns a synthetic 3-field fallback.
+        """
+        if isinstance(raw, dict):
+            return {
+                "vs_dates": str(raw.get("vs_dates") or "Not evaluated this run"),
+                "vs_range": str(raw.get("vs_range") or "Not evaluated this run"),
+                "vs_nearby": str(raw.get("vs_nearby") or "No nearby airports configured"),
+            }
+        if isinstance(raw, str) and raw.strip():
+            return {
+                "vs_dates": raw[:120],
+                "vs_range": "Static fallback — Claude returned legacy string",
+                "vs_nearby": "Not evaluated this run",
+            }
+        return DealScorer._fallback_reasoning("No reasoning returned")
+
+    @staticmethod
+    def _fallback_reasoning(detail: str) -> dict:
+        return {
+            "vs_dates": detail[:120],
+            "vs_range": "Static fallback — Claude unavailable",
+            "vs_nearby": "Not evaluated this run",
+        }

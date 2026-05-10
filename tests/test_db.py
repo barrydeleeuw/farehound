@@ -922,3 +922,168 @@ def test_default_user_migration(tmp_path):
     routes = database.get_active_routes(user_id=users[0]["user_id"])
     assert len(routes) == 1
     database.close()
+
+
+# =============================================================================
+# T16 — R7 (ITEM-051) migration roundtrip
+# =============================================================================
+
+def _column_names(conn, table):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+class TestR7Migrations:
+    """A1–A5 from release_plan.md §5: idempotent ALTER TABLE adds for R7."""
+
+    def test_routes_snoozed_until_column_exists(self, db):
+        cols = _column_names(db._conn, "routes")
+        assert "snoozed_until" in cols
+
+    def test_users_baggage_needs_column_exists(self, db):
+        cols = _column_names(db._conn, "users")
+        assert "baggage_needs" in cols
+
+    def test_users_digest_fingerprint_columns_exist(self, db):
+        cols = _column_names(db._conn, "users")
+        assert "last_digest_fingerprint" in cols
+        assert "last_digest_sent_at" in cols
+        assert "digest_skip_count_7d" in cols
+
+    def test_price_snapshots_baggage_estimate_column_exists(self, db):
+        cols = _column_names(db._conn, "price_snapshots")
+        assert "baggage_estimate" in cols
+
+    def test_deals_reasoning_json_column_exists(self, db):
+        cols = _column_names(db._conn, "deals")
+        assert "reasoning_json" in cols
+
+    def test_init_schema_idempotent_second_call(self, db):
+        """Re-running init_schema must not error and must not duplicate columns."""
+        before = _column_names(db._conn, "routes")
+        db.init_schema()
+        db.init_schema()
+        after = _column_names(db._conn, "routes")
+        assert before == after
+
+    def test_routes_snoozed_until_roundtrip(self, db, sample_route):
+        """Per-route snooze column accepts ISO datetime and reads back unchanged."""
+        db.upsert_route(sample_route)
+        until = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+        db._conn.execute(
+            "UPDATE routes SET snoozed_until = ? WHERE route_id = ?",
+            [until, "ams-nrt"],
+        )
+        db._conn.commit()
+        row = db._conn.execute(
+            "SELECT snoozed_until FROM routes WHERE route_id = 'ams-nrt'"
+        ).fetchone()
+        assert row[0] == until
+
+    def test_users_baggage_needs_default(self, db):
+        """New users get the default baggage_needs preference."""
+        user_id = db.create_user("chat-1", name="Test")
+        row = db._conn.execute(
+            "SELECT baggage_needs FROM users WHERE user_id = ?", [user_id]
+        ).fetchone()
+        assert row[0] == "one_checked"
+
+    def test_users_baggage_needs_roundtrip(self, db):
+        """baggage_needs accepts arbitrary preference strings."""
+        user_id = db.create_user("chat-2", name="Test")
+        db._conn.execute(
+            "UPDATE users SET baggage_needs = ? WHERE user_id = ?",
+            ["two_checked", user_id],
+        )
+        db._conn.commit()
+        row = db._conn.execute(
+            "SELECT baggage_needs FROM users WHERE user_id = ?", [user_id]
+        ).fetchone()
+        assert row[0] == "two_checked"
+
+    def test_users_last_digest_fingerprint_roundtrip(self, db):
+        user_id = db.create_user("chat-3", name="Test")
+        db._conn.execute(
+            "UPDATE users SET last_digest_fingerprint = ? WHERE user_id = ?",
+            ["abc1234567890def", user_id],
+        )
+        db._conn.commit()
+        row = db._conn.execute(
+            "SELECT last_digest_fingerprint FROM users WHERE user_id = ?", [user_id]
+        ).fetchone()
+        assert row[0] == "abc1234567890def"
+
+    def test_users_digest_skip_count_default_zero(self, db):
+        user_id = db.create_user("chat-4", name="Test")
+        row = db._conn.execute(
+            "SELECT digest_skip_count_7d FROM users WHERE user_id = ?", [user_id]
+        ).fetchone()
+        assert row[0] == 0
+
+    def test_price_snapshots_baggage_estimate_json_roundtrip(self, db, sample_route):
+        """baggage_estimate column stores JSON-serialised dict and reads back as TEXT."""
+        import json as _json
+        db.upsert_route(sample_route)
+        snap = PriceSnapshot(
+            snapshot_id="s1", route_id="ams-nrt",
+            observed_at=datetime.now(UTC),
+            source="serpapi_poll", passengers=2,
+            lowest_price=Decimal("485"),
+        )
+        db.insert_snapshot(snap)
+        baggage = {
+            "outbound": {"carry_on": 0, "checked": 40},
+            "return": {"carry_on": 0, "checked": 40},
+            "source": "serpapi",
+            "currency": "EUR",
+        }
+        db._conn.execute(
+            "UPDATE price_snapshots SET baggage_estimate = ? WHERE snapshot_id = 's1'",
+            [_json.dumps(baggage)],
+        )
+        db._conn.commit()
+        row = db._conn.execute(
+            "SELECT baggage_estimate FROM price_snapshots WHERE snapshot_id = 's1'"
+        ).fetchone()
+        assert _json.loads(row[0]) == baggage
+
+    def test_deals_reasoning_json_roundtrip(self, db, sample_route):
+        """reasoning_json column stores 3-field structured object."""
+        import json as _json
+        db.upsert_route(sample_route)
+        snap = PriceSnapshot(
+            snapshot_id="s1", route_id="ams-nrt",
+            observed_at=datetime.now(UTC),
+            source="serpapi_poll", passengers=2,
+            lowest_price=Decimal("485"),
+        )
+        db.insert_snapshot(snap)
+        deal = Deal(
+            deal_id="d1", snapshot_id="s1", route_id="ams-nrt",
+            score=Decimal("0.85"), urgency="book_now",
+            reasoning="bullet1\nbullet2\nbullet3",
+        )
+        db.insert_deal(deal)
+        reasoning_json = {
+            "vs_dates": "Cheapest of 4 dates polled",
+            "vs_range": "€80 below Google's typical low",
+            "vs_nearby": "AMS is best",
+        }
+        db._conn.execute(
+            "UPDATE deals SET reasoning_json = ? WHERE deal_id = 'd1'",
+            [_json.dumps(reasoning_json)],
+        )
+        db._conn.commit()
+        row = db._conn.execute(
+            "SELECT reasoning_json FROM deals WHERE deal_id = 'd1'"
+        ).fetchone()
+        assert _json.loads(row[0]) == reasoning_json
+
+    def test_existing_rows_are_null_tolerated(self, db, sample_route):
+        """Rows inserted before R7 columns existed must read back fine (NULL-tolerated)."""
+        db.upsert_route(sample_route)
+        # New columns default to NULL (or to declared default for baggage_needs)
+        row = db._conn.execute(
+            "SELECT snoozed_until FROM routes WHERE route_id = 'ams-nrt'"
+        ).fetchone()
+        assert row[0] is None
+

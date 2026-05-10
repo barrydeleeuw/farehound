@@ -1,0 +1,67 @@
+{
+  "search_metadata": {
+    "google_flights_url": "https://www.google.com/travel/flights/search?test=1"
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "departure_id": "AMS",
+    "arrival_id": "NRT",
+    "outbound_date": "2026-10-05",
+    "return_date": "2026-10-19",
+    "adults": 2,
+    "currency": "EUR",
+    "type": "1"
+  },
+  "best_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {"name": "Amsterdam Schiphol", "id": "AMS", "time": "2026-10-05 09:30"},
+          "arrival_airport": {"name": "Tokyo Narita", "id": "NRT", "time": "2026-10-06 06:45"},
+          "duration": 700,
+          "airline": "KLM",
+          "airline_logo": "https://example.com/kl.png",
+          "flight_number": "KL 861",
+          "extensions": [
+            "Average legroom (31 in)",
+            "Wi-Fi for a fee",
+            "In-seat power & USB outlets",
+            "Checked baggage: 1st bag 40 €, 2nd bag 80 €",
+            "Carry-on baggage: free"
+          ]
+        }
+      ],
+      "total_duration": 700,
+      "carbon_emissions": {"this_flight": 850000, "typical_for_this_route": 900000},
+      "price": 1940,
+      "type": "Round trip",
+      "airline_logo": "https://example.com/kl.png",
+      "departure_token": "DEP_TOKEN_KL861"
+    }
+  ],
+  "other_flights": [],
+  "price_insights": {
+    "lowest_price": 1940,
+    "price_level": "low",
+    "typical_price_range": [1800, 2400]
+  },
+  "booking_options": [
+    {
+      "together": {
+        "book_with": "klm.com",
+        "airline_logos": ["https://example.com/kl.png"],
+        "marketed_as": ["KL"],
+        "price": 1940,
+        "extensions": [
+          "Checked baggage: 1st bag 40 €",
+          "Carry-on baggage included",
+          "Seat selection: free"
+        ],
+        "booking_request": {
+          "url": "https://www.klm.com/booking",
+          "post_data": ""
+        }
+      }
+    }
+  ]
+}

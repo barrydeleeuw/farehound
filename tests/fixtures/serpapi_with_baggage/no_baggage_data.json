@@ -1,0 +1,45 @@
+{
+  "search_metadata": {
+    "google_flights_url": "https://www.google.com/travel/flights/search?test=3"
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "departure_id": "AMS",
+    "arrival_id": "LIS",
+    "outbound_date": "2026-09-10",
+    "return_date": "2026-09-17",
+    "adults": 2,
+    "currency": "EUR",
+    "type": "1"
+  },
+  "best_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {"name": "Amsterdam Schiphol", "id": "AMS", "time": "2026-09-10 06:30"},
+          "arrival_airport": {"name": "Lisbon Portela", "id": "LIS", "time": "2026-09-10 09:15"},
+          "duration": 165,
+          "airline": "Transavia",
+          "airline_logo": "https://example.com/hv.png",
+          "flight_number": "HV 5301",
+          "extensions": [
+            "Average legroom (30 in)",
+            "Wi-Fi for a fee",
+            "Carbon emissions estimate: 180 kg"
+          ]
+        }
+      ],
+      "total_duration": 165,
+      "price": 220,
+      "type": "Round trip",
+      "airline_logo": "https://example.com/hv.png"
+    }
+  ],
+  "other_flights": [],
+  "price_insights": {
+    "lowest_price": 220,
+    "price_level": "typical",
+    "typical_price_range": [180, 260]
+  },
+  "booking_options": []
+}

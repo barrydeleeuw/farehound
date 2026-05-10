@@ -1,6 +1,6 @@
 # FareHound Roadmap
 
-> Last updated: 2026-04-06
+> Last updated: 2026-05-09 (v0.9.0)
 
 ## Mission
 
@@ -37,32 +37,55 @@ Every feature we build serves this mission: reduce the gap between what people p
   - [ ] Works conversationally (one natural language message, not N separate questions)
   - [ ] Fallback: if user skips, transport costs remain NULL (already handled gracefully)
 
+### [ITEM-049] Telegram Mini Web App
+- **Status:** Ready
+- **Priority:** P1 (High)
+- **Effort:** L
+- **Dependencies:** [ITEM-051] must ship first — its "📊 Details" button is the entry point
+- **Summary:** Rich detail views launched from a button on each Telegram alert. Telegram WebApp `web_app` button hands off signed `initData` (no separate auth). Replaces parts of the parked [ITEM-P02] (Lovelace dashboard) — Telegram WebApp is a better fit than HA Lovelace for a multi-user direction.
+- **Pages:**
+  - `/deal/{id}` — price-history sparkline (90d), full alternatives table including <€75-savings ones, baggage policy by airline, structured why-best, booking deep links
+  - `/routes` — list, snooze toggles, edit dates
+  - `/settings` — baggage preference, transport overrides, notification quiet hours
+- **Stack suggestion:** FastAPI + HTMX deployed alongside the bot on the Pi (or on Railway later when [ARCHITECTURE.md](ARCHITECTURE.md) Phase A migration happens). Matches the codebase's Python skill set, no JS build step.
+- **Why this matters:** [ITEM-051] fixes the message-fits-in-chat parts of the value prop. Anything richer (price charts, side-by-side comparisons, full alternatives view) needs a real surface — and Telegram Mini Apps give us that without giving up Telegram's auth/push benefits.
+- **Acceptance Criteria:**
+  - [ ] WebApp button added to deal alerts pointing to `/deal/{id}` page
+  - [ ] `initData` validation server-side (HMAC against bot token)
+  - [ ] Deal detail page shows: price history chart, full alternatives table, baggage by airline, structured why-best, booking deep link
+  - [ ] Routes page shows snooze toggles wired to existing snooze logic from [ITEM-051]
+  - [ ] Settings page persists preferences to DB
+  - [ ] HTTPS configured (Cloudflare Tunnel or Caddy on the Pi)
+  - [ ] Tests for `initData` validation and route handlers
+
 ## Proposed
 
-### [ITEM-037] Luggage-aware total cost calculation
+### [ITEM-050] Full custom web dashboard
 - **Status:** Proposed
-- **Priority:** P1 (High)
-- **Effort:** M
-- **Dependencies:** None
-- **Summary:** Factor baggage costs into deal scoring and alerts. A €200 fare with €60 return baggage fees isn't really €200 — it's €260. Currently FareHound only considers ticket price. This item adds luggage cost awareness so users see the true cost of flying, directly serving the mission of showing real cost.
-- **Design considerations:**
-  - **SerpAPI data:** Google Flights results via SerpAPI include `carry_on_bag`, `checked_bag` fields in booking options with costs per bag. Extract and use these.
-  - **User preferences:** Users already specify baggage preferences ("values included checked baggage"). Extend this to a structured setting:
-    - `baggage_needs`: `carry_on_only` | `one_checked` | `two_checked` (default: `one_checked`)
-    - Used to calculate total cost: ticket price + applicable baggage fees (outbound + return)
-  - **Airline baggage defaults:** Some airlines include bags (KLM long-haul includes 1 checked), others don't (Transavia, Ryanair). Maintain a simple lookup table for common airlines as fallback when SerpAPI doesn't return bag prices.
-  - **Integration points:**
-    - Scorer: pass total cost (ticket + bags) instead of ticket-only price
-    - Alerts: show breakdown — "€240 ticket + €50 bags = €290 total"
-    - Discovery (ITEM-038): include baggage estimate in anomaly alerts
-    - Nearby airport comparison: compare total costs including bags, not just fares
+- **Priority:** P3 (Low)
+- **Effort:** XL
+- **Dependencies:** [ARCHITECTURE.md](ARCHITECTURE.md) Phase A (cloud migration to Railway+Postgres), validated multi-user demand, [ITEM-049] deployed
+- **Summary:** A proper standalone web app for account management, billing, route management, history, analytics. Telegram becomes notification-only. Revisits the decision in [ARCHITECTURE.md §4](ARCHITECTURE.md) ("Why not a web app") once there's a paying user base.
+- **Why this is on the roadmap (not parked):** Kept visible as the long-term answer for a real product. [ITEM-049] (Telegram Mini Web App) covers ~90% of the rich-detail use cases at <10% the effort, so this stays Proposed/P3 until a paying user base validates the investment.
+- **Review notes:** Premature today. Revisit once: (1) ARCHITECTURE.md Phase A is complete (Railway + Postgres), (2) [ITEM-049] is shipped and we know what users actually use it for, (3) there's evidence of demand for features that don't fit in a Mini Web App (e.g. multi-user team accounts, complex analytics, B2B integrations).
+
+### [ITEM-052] R7 cleanup batch
+- **Status:** Proposed
+- **Priority:** P3 (Low)
+- **Effort:** S
+- **Dependencies:** [ITEM-051] shipped (v0.9.0)
+- **Summary:** Bundle of 6 P3 cleanup items surfaced during R7 build + post-build audit + code review. None are bugs; all are stylistic / debt management items worth doing in one batch ~30 days after R7 settles.
+- **Items:**
+  - **FU-1:** Reset `digest_skip_count_7d` rolling-window (currently monotonic).
+  - **FU-2:** ~~Bound `/snooze` days argument upper limit~~ (already shipped in R7 code-review fix CR-2).
+  - **FU-3:** Reconcile T15 25-cached-response smoke loop (cached fixtures in `data/serpapi_cache/` contain zero baggage data, so the test was substituted with synthetic fixtures — clean up the substitution).
+  - **FU-4:** Drop legacy `deals.reasoning` column after 60 days of structured `reasoning_json` operation.
+  - **FU-5:** Delete the legacy callback-alias if-ladder in `src/bot/commands.py` after the 2026-06-08 alias deadline.
+  - **FU-6:** Strip task-reference comments (`T7 §X`, `A1`–`A5`, `R7`, `Condition C9`, `T12`) from `src/bot/commands.py`, `src/storage/db.py`, `src/alerts/telegram.py`, `src/orchestrator.py`. CLAUDE.md style violation, low impact.
 - **Acceptance Criteria:**
-  - [ ] Baggage cost extracted from SerpAPI response when available
-  - [ ] User baggage preference configurable (`carry_on_only`, `one_checked`, `two_checked`)
-  - [ ] Total cost (ticket + baggage) used in deal scoring instead of ticket-only price
-  - [ ] Alert messages show cost breakdown: fare + baggage = total
-  - [ ] Fallback airline baggage lookup for when SerpAPI doesn't provide bag prices
-  - [ ] Nearby airport comparison uses total cost including baggage
+  - [ ] FU-1 implemented or explicitly de-prioritized with reasoning
+  - [ ] FU-3, FU-4, FU-5 each addressed or formally re-deferred with date
+  - [ ] FU-6: zero `T<N>`, `§<N>`, `Condition C<N>` references remain in source files
 
 ### [ITEM-038] Discovery: broad destination scanning from home airports
 - **Status:** Proposed
@@ -187,6 +210,14 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## Done
 
+### [ITEM-D15] Real Cost Restoration (v0.9.0)
+- **Status:** Done — ITEM-051 shipped 2026-05-09 as one coherent release covering all 4 Telegram message types. Includes: unified `_format_cost_breakdown` helper across deal alert / error fare / follow-up / daily digest, SerpAPI baggage parsing + display via new `src/utils/baggage.py` module (subsumes [ITEM-037]), "we checked X airports/dates" transparency footer (kills silent omission below €75 nearby savings threshold), `Watching 👀` button on alerts and digest, per-route snooze (`routes.snoozed_until`) with auto-snooze on `booked` feedback + `/snooze` `/unsnooze` commands, structured 3-bullet scorer reasoning JSON contract with backward compat, fingerprint-gated daily digest skip with concrete "what moved" header, callback prefix consolidation (`deal:*` / `route:*`) with legacy aliases, `/status` command, and `📊 Details` button placeholder for [ITEM-049] Mini Web App. Suite: 311 → 420 (+109 R7 tests). T19 integration test caught a real ship-blocker (`deal_info["route_id"]` missing) that 416 unit tests had passed. Code-review fixes: clamped `route:snooze` callback `days` to `[1, 365]` (security-relevant; negative values would un-snooze), removed unnecessary defensive shims (`getattr`/`hasattr` for methods defined in same release).
+- **Detail:** [docs/releases/R7/](docs/releases/R7/) — release_plan.md, build_log.md, verification_report.md
+- **5 P3 follow-ups** captured as [ITEM-052].
+
+### [ITEM-037] Luggage-aware total cost calculation
+- **Status:** Done — Subsumed by [ITEM-051] / shipped in v0.9.0. Baggage parsing implemented in `src/utils/baggage.py` with airline fallback table; `baggage_estimate` field on `PriceSnapshot`; `baggage_needs` user preference (`carry_on_only` / `one_checked` / `two_checked`); cost breakdown now shows `€X flights + €Y bags + €Z transport + €W parking = €N total` across all 4 message types. Total cost (incl. bags) used by scorer.
+
 ### [ITEM-D01] Core monitoring loop (v0.1-v0.3)
 - **Status:** Done — SerpAPI polling, SQLite, Claude scoring, smart alerting, RSS feeds.
 
@@ -248,7 +279,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Parked:** No affordable API. Revisit if budget increases.
 
 ### [ITEM-P02] HA Lovelace dashboard
-- **Parked:** Removed from consideration. Telegram is the sole interface. HA is the deployment platform only.
+- **Parked:** Superseded by [ITEM-049] (Telegram Mini Web App). Lovelace was the wrong surface for a multi-user product — Telegram WebApp gives us rich detail views with built-in auth and push, without a second platform to maintain. HA remains the deployment platform only.
 
 ### [ITEM-P03] 1Password / passport checks
 - **Parked:** Over-engineered for current stage.

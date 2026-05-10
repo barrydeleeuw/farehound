@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import signal
@@ -12,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts.telegram import TelegramNotifier
 from src.analysis.nearby_airports import compare_airports
-from src.analysis.scorer import DealScorer
+from src.analysis.scorer import DealScorer, reasoning_to_bullets
 from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows
 from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
@@ -119,7 +121,7 @@ class Orchestrator:
         self._first_run = True
         self._last_full_rescan: datetime | None = None
         self._secondary_poll_counter: int = 0
-        self._latest_nearby_comparison: dict[str, list[dict]] = {}
+        self._latest_nearby_comparison: dict[str, dict] = {}
         self._pending_alerts: dict[str, dict] = {}
         self._cycle_best_prices: dict[str, float] = {}
 
@@ -544,6 +546,8 @@ class Orchestrator:
         typical_range = insights.get("typical_price_range", [])
         best_flight = result.best_flights[0] if result.best_flights else None
 
+        baggage_estimate = self._compute_baggage_for_result(result, best_flight, user)
+
         snapshot = PriceSnapshot(
             snapshot_id=uuid4().hex,
             route_id=route.route_id,
@@ -564,6 +568,7 @@ class Orchestrator:
                 **(result.search_params or {}),
                 "google_flights_url": result.raw_response.get("search_metadata", {}).get("google_flights_url", ""),
             },
+            baggage_estimate=baggage_estimate,
         )
 
         await loop.run_in_executor(None, self.db.insert_snapshot, snapshot, user_id)
@@ -795,19 +800,22 @@ class Orchestrator:
                         exc_info=True,
                     )
 
-            # Store comparison for use in alerts (attached to route context)
+            # Store comparison for use in alerts (attached to route context).
+            # Always preserve the entry when secondaries were polled, even if none competitive
+            # (transparency: "we checked X, your airport is best").
             if secondary_results:
                 comparison = compare_airports(primary_result, secondary_results, route.passengers)
-                if comparison:
-                    self._latest_nearby_comparison[route.route_id] = comparison
+                self._latest_nearby_comparison[route.route_id] = comparison
+                competitive = comparison["competitive"]
+                if competitive:
                     logger.info(
                         "Route %s: best nearby saving €%.0f via %s",
                         route.route_id,
-                        comparison[0]["savings"],
-                        comparison[0]["airport_name"],
+                        competitive[0]["savings"],
+                        competitive[0]["airport_name"],
                     )
                     today = datetime.now(UTC).strftime("%Y-%m-%d")
-                    for alt in comparison:
+                    for alt in competitive:
                         try:
                             await loop.run_in_executor(
                                 None, self.db.log_saving,
@@ -880,6 +888,7 @@ class Orchestrator:
                 now = datetime.now(UTC)
                 best_flight = result.best_flights[0] if result.best_flights else None
                 typical_range = result.price_insights.get("typical_price_range", [])
+                sec_baggage = self._compute_baggage_for_result(result, best_flight, user)
                 sec_snapshot = PriceSnapshot(
                     snapshot_id=uuid4().hex,
                     route_id=route.route_id,
@@ -897,6 +906,7 @@ class Orchestrator:
                     typical_high=Decimal(str(typical_range[1])) if len(typical_range) > 1 else None,
                     price_history=result.price_insights.get("price_history"),
                     search_params={**(result.search_params or {}), "origin": airport["airport_code"]},
+                    baggage_estimate=sec_baggage,
                 )
                 await loop.run_in_executor(None, self.db.insert_snapshot, sec_snapshot, user_id)
 
@@ -908,6 +918,7 @@ class Orchestrator:
                     "transport_mode": airport.get("transport_mode", ""),
                     "transport_time_min": airport.get("transport_time_min", 0),
                     "flight_duration_min": sec_duration,
+                    "baggage_estimate": sec_baggage,
                 })
             except SerpAPIError as e:
                 logger.error("SerpAPI error for secondary %s→%s: %s", airport["airport_code"], route.destination, e)
@@ -916,11 +927,14 @@ class Orchestrator:
 
         if secondary_results:
             comparison = compare_airports(primary_result, secondary_results, route.passengers)
-            if comparison:
-                self._latest_nearby_comparison[route.route_id] = comparison
+            # Always store the comparison, even when no airport is competitive — the renderer needs
+            # `evaluated` to show "we checked X airports, yours is best".
+            self._latest_nearby_comparison[route.route_id] = comparison
+            competitive = comparison["competitive"]
+            if competitive:
                 user_id = user["user_id"]
                 today = datetime.now(UTC).strftime("%Y-%m-%d")
-                for alt in comparison:
+                for alt in competitive:
                     try:
                         await loop.run_in_executor(
                             None, self.db.log_saving,
@@ -930,9 +944,8 @@ class Orchestrator:
                         )
                     except Exception:
                         logger.debug("Failed to log saving for %s", alt["airport_code"])
-            else:
-                self._latest_nearby_comparison.pop(route.route_id, None)
         else:
+            # No secondary airports queried at all — drop the entry so the renderer skips the footer.
             self._latest_nearby_comparison.pop(route.route_id, None)
 
     async def _check_alerts(
@@ -983,25 +996,28 @@ class Orchestrator:
                 home_airport=user.get("home_airport") or self.config.traveller.home_airport,
                 traveller_preferences=user.get("preferences") or self.config.traveller.preferences or None,
                 past_feedback=feedback or None,
-                nearby_comparison=self._latest_nearby_comparison.get(route.route_id),
+                nearby_comparison=(self._latest_nearby_comparison.get(route.route_id) or {}).get("competitive"),
             )
             logger.info(
-                "Route %s scored: %.2f (%s) — %s",
-                route.route_id, score_result.score, score_result.urgency, score_result.reasoning,
+                "Route %s scored: %.2f (%s)",
+                route.route_id, score_result.score, score_result.urgency,
             )
         except Exception:
             logger.exception("Claude scoring failed for route %s, falling back to static threshold", route.route_id)
             score_result = self._static_fallback(price, avg_price)
 
-        # Store deal record
+        # Store deal record. T12: write structured `reasoning_json` AND a flattened
+        # bullet-string in `reasoning` so legacy reads (follow-up renderer) keep working.
         now = datetime.now(UTC)
+        reasoning_dict = score_result.reasoning if isinstance(score_result.reasoning, dict) else None
         deal = Deal(
             deal_id=uuid4().hex,
             snapshot_id=snapshot.snapshot_id,
             route_id=route.route_id,
             score=Decimal(str(round(score_result.score, 2))),
             urgency=score_result.urgency,
-            reasoning=score_result.reasoning,
+            reasoning=reasoning_to_bullets(score_result.reasoning),
+            reasoning_json=reasoning_dict,
         )
 
         # Smart dedup: decide whether this alert is meaningful
@@ -1119,6 +1135,7 @@ class Orchestrator:
 
         deal_info = {
             "deal_id": deal.deal_id,
+            "route_id": route.route_id,
             "origin": route.origin,
             "destination": route.destination,
             "price": price,
@@ -1132,12 +1149,17 @@ class Orchestrator:
             "passengers": route.passengers,
             "score": score_result.score,
             "urgency": score_result.urgency,
-            "reasoning": inflection_msg or score_result.reasoning,
-            "nearby_comparison": self._latest_nearby_comparison.get(route.route_id, []),
+            "reasoning": inflection_msg or reasoning_to_bullets(score_result.reasoning),
+            "reasoning_json": (
+                score_result.reasoning if isinstance(score_result.reasoning, dict) else None
+            ),
+            "nearby_comparison": (self._latest_nearby_comparison.get(route.route_id) or {}).get("competitive", []),
+            "nearby_evaluated": (self._latest_nearby_comparison.get(route.route_id) or {}).get("evaluated", []),
             "google_flights_url": gf_url,
             "primary_transport_cost": primary_t_cost,
             "primary_parking_cost": primary_parking or 0,
             "primary_transport_mode": primary_mode,
+            "baggage_estimate": snapshot.baggage_estimate,
             "price_level": snapshot.price_level,
             "typical_low": snapshot.typical_low,
             "typical_high": snapshot.typical_high,
@@ -1186,6 +1208,9 @@ class Orchestrator:
 
             since = datetime.now(UTC) - timedelta(days=1)
             summaries: list[dict] = []
+            # Per-route deltas for the concrete header (§11.4). Populated alongside `summaries`.
+            route_deltas: list[dict] = []
+            new_deal_count = 0
 
             for route in routes:
                 latest = await loop.run_in_executor(
@@ -1217,6 +1242,16 @@ class Orchestrator:
                     None, self.db.get_deals_since, route.route_id, since, user_id
                 )
                 watch_deals = [d for d in recent_deals if d.urgency == "watch"]
+                # Deals whose alert fired since the user's last digest — feeds the skip predicate.
+                # We use `alert_sent_at`, not `created_at`, so a deal that was inserted earlier
+                # but only just had its alert sent counts as "new" for digest purposes.
+                last_digest_dt = self._parse_iso_dt(user.get("last_digest_sent_at"))
+                deals_alerted_since_last_digest: list = []
+                if last_digest_dt is not None:
+                    for d in recent_deals:
+                        sent_at = self._parse_iso_dt(d.alert_sent_at)
+                        if sent_at is not None and sent_at > last_digest_dt:
+                            deals_alerted_since_last_digest.append(d)
 
                 # Use cheapest recent snapshot for dates
                 cheapest = await loop.run_in_executor(
@@ -1252,26 +1287,143 @@ class Orchestrator:
                     "price_history": best.price_history if best else None,
                     "earliest_departure": str(route.earliest_departure) if route.earliest_departure else "",
                     "latest_return": str(route.latest_return) if route.latest_return else "",
+                    "baggage_estimate": best.baggage_estimate if best else None,
                 }
 
                 if watch_deals:
                     summary["watch_deals"] = len(watch_deals)
 
-                # Add nearby airport comparison for digest
-                nearby = self._latest_nearby_comparison.get(route.route_id)
-                if nearby:
-                    summary["nearby_prices"] = nearby
+                # Add nearby airport comparison for digest. Pass both lists so the
+                # renderer can show competitive alts AND a "we checked X" transparency footer.
+                nearby = self._latest_nearby_comparison.get(route.route_id) or {}
+                competitive = nearby.get("competitive") or []
+                evaluated = nearby.get("evaluated") or []
+                if competitive:
+                    summary["nearby_prices"] = competitive
+                if evaluated:
+                    summary["nearby_evaluated"] = evaluated
+
+                # Per-route delta for the concrete header (§11.4).
+                recent = await loop.run_in_executor(
+                    None, self.db.get_recent_snapshots, route.route_id, 2
+                )
+                prev_price = None
+                if len(recent) >= 2 and recent[1].lowest_price is not None:
+                    prev_price = float(recent[1].lowest_price)
+                delta = None
+                if prev_price is not None and history_now is not None:
+                    delta = history_now - prev_price
+                # New-deal flag = an alert fired for this route since the previous digest.
+                is_new = bool(deals_alerted_since_last_digest)
+                if is_new:
+                    new_deal_count += 1
+                route_deltas.append({
+                    "route_id": route.route_id,
+                    "origin": route.origin,
+                    "destination": route.destination,
+                    "lowest_price": history_now,
+                    "delta": delta,
+                    "is_new_deal": is_new,
+                })
 
                 summaries.append(summary)
 
             if not summaries:
                 continue
 
+            # Skip predicate (§11.2): all 4 conditions must hold for skip.
+            new_fingerprint = self._compute_digest_fingerprint(summaries)
+            last_fp = user.get("last_digest_fingerprint")
+            last_sent = self._parse_iso_dt(user.get("last_digest_sent_at"))
+            now_dt = datetime.now(UTC)
+            days_since = (now_dt - last_sent).total_seconds() / 86400 if last_sent else None
+            biggest_move = max(
+                (abs(d["delta"]) for d in route_deltas if d["delta"] is not None),
+                default=0.0,
+            )
+            should_skip = (
+                last_fp == new_fingerprint
+                and new_deal_count == 0
+                and biggest_move <= 10.0
+                and days_since is not None
+                and days_since < 3
+            )
+
+            if should_skip:
+                logger.info(
+                    "Digest skipped for user %s — fingerprint unchanged, last digest %.1fd ago",
+                    user_id, days_since,
+                )
+                # Bump skip counter; do NOT update last_digest_sent_at.
+                new_count = (user.get("digest_skip_count_7d") or 0) + 1
+                await loop.run_in_executor(
+                    None,
+                    lambda: self.db.update_user(user_id, digest_skip_count_7d=new_count),
+                )
+                continue
+
+            # Build concrete header replacing the generic "you haven't decided" text (§11.4).
+            moved_count = sum(1 for d in route_deltas if d["delta"] is not None and abs(d["delta"]) >= 10)
+            header = self._format_digest_header(route_deltas, moved_count)
+            if summaries:
+                summaries[0]["digest_header_override"] = header
+
             try:
                 if self.telegram_notifier:
                     await self.telegram_notifier.send_daily_digest(summaries, chat_id=chat_id)
+                # Persist fingerprint + sent_at; reset skip counter (or keep — simple counter, no rollover).
+                await loop.run_in_executor(
+                    None,
+                    lambda: self.db.update_user(
+                        user_id,
+                        last_digest_fingerprint=new_fingerprint,
+                        last_digest_sent_at=now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
             except Exception:
                 logger.exception("Failed to send daily digest to user %s", user_id)
+
+    @staticmethod
+    def _compute_digest_fingerprint(summaries: list[dict]) -> str:
+        """SHA256 of sorted {route_id: rounded_price} pairs, truncated to 16 chars (§11.1)."""
+        pairs = sorted(
+            ((s.get("route_id") or "", round(float(s.get("lowest_price") or 0))) for s in summaries),
+            key=lambda kv: kv[0],
+        )
+        payload = json.dumps(pairs, sort_keys=True).encode()
+        return hashlib.sha256(payload).hexdigest()[:16]
+
+    @staticmethod
+    def _parse_iso_dt(val) -> datetime | None:
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val if val.tzinfo else val.replace(tzinfo=UTC)
+        try:
+            dt = datetime.fromisoformat(str(val).replace(" ", "T"))
+        except (TypeError, ValueError):
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+    @staticmethod
+    def _format_digest_header(route_deltas: list[dict], moved_count: int) -> str:
+        """Render the concrete header per §11.4. Each route gets one line."""
+        from src.utils.airports import route_name as _rn
+        n = len(route_deltas)
+        lines = [f"📊 *FareHound Daily* — {n} route{'s' if n != 1 else ''}, {moved_count} price{'s' if moved_count != 1 else ''} moved"]
+        for d in route_deltas:
+            name = _rn(d.get("origin") or "?", d.get("destination") or "?")
+            price = d.get("lowest_price")
+            if d.get("is_new_deal") and price is not None:
+                lines.append(f"• {name} new low (€{price:,.0f}/pp)")
+            elif d.get("delta") is not None and abs(d["delta"]) >= 10 and price is not None:
+                if d["delta"] < 0:
+                    lines.append(f"• {name} dropped €{abs(d['delta']):,.0f} (€{price:,.0f}/pp)")
+                else:
+                    lines.append(f"• {name} rose €{abs(d['delta']):,.0f} (€{price:,.0f}/pp)")
+            else:
+                lines.append(f"• {name} unchanged")
+        return "\n".join(lines)
 
     async def on_community_deal(self, deal_info: dict) -> None:
         """Handle a deal detected from community channels (Layer 2).
@@ -1464,8 +1616,8 @@ class Orchestrator:
                 past_feedback=community_feedback or None,
             )
             logger.info(
-                "Community deal scored: %.2f (%s) — %s",
-                score_result.score, score_result.urgency, score_result.reasoning,
+                "Community deal scored: %.2f (%s)",
+                score_result.score, score_result.urgency,
             )
         except Exception:
             logger.exception("Claude scoring failed for community deal, sending price-only alert")
@@ -1480,6 +1632,7 @@ class Orchestrator:
             fb_best_legs = fb_best.get("flights", [])
             fallback_info = {
                 "deal_id": fallback_deal_id,
+                "route_id": route.route_id,
                 "origin": route.origin,
                 "destination": route.destination,
                 "price": actual_price,
@@ -1514,13 +1667,15 @@ class Orchestrator:
 
         # Store deal record
         booking_url = verification.booking_url
+        reasoning_dict = score_result.reasoning if isinstance(score_result.reasoning, dict) else None
         deal = Deal(
             deal_id=uuid4().hex,
             snapshot_id=snapshot.snapshot_id,
             route_id=route.route_id,
             score=Decimal(str(round(score_result.score, 2))),
             urgency=score_result.urgency,
-            reasoning=score_result.reasoning,
+            reasoning=reasoning_to_bullets(score_result.reasoning),
+            reasoning_json=reasoning_dict,
             booking_url=booking_url,
         )
 
@@ -1544,6 +1699,7 @@ class Orchestrator:
             comm_best_legs = comm_best.get("flights", [])
             alert_info = {
                 "deal_id": deal.deal_id,
+                "route_id": route.route_id,
                 "origin": route.origin,
                 "destination": route.destination,
                 "price": actual_price,
@@ -1557,7 +1713,8 @@ class Orchestrator:
                 "passengers": route.passengers,
                 "score": score_result.score,
                 "urgency": score_result.urgency,
-                "reasoning": score_result.reasoning,
+                "reasoning": reasoning_to_bullets(score_result.reasoning),
+                "reasoning_json": reasoning_dict,
                 "booking_url": booking_url,
             }
 
@@ -1574,9 +1731,45 @@ class Orchestrator:
 
         await loop.run_in_executor(None, self.db.insert_deal, deal, user_id)
 
+    def _compute_baggage_for_result(
+        self,
+        result,
+        best_flight: dict | None,
+        user: dict,
+    ) -> dict | None:
+        """Extract baggage estimate from a SerpAPI result, falling back to airline policy.
+
+        Always returns a dict (never None) so the snapshot has a consistent shape.
+        Defensive — never raises on missing fields.
+        """
+        try:
+            airline_code = ""
+            distance_km = None
+            if best_flight and isinstance(best_flight, dict):
+                legs = best_flight.get("flights") or []
+                if legs:
+                    airline_code = (legs[0].get("airline") or "").upper().strip()
+                # Crude distance proxy: avg cruise speed ~800 km/h.
+                duration = best_flight.get("total_duration")
+                if duration:
+                    try:
+                        distance_km = float(duration) / 60.0 * 800.0
+                    except (TypeError, ValueError):
+                        distance_km = None
+            baggage_needs = (user.get("baggage_needs") or "one_checked")
+            return result.parse_baggage(
+                airline_code=airline_code or None,
+                leg_distance_km=distance_km,
+                baggage_needs=baggage_needs,
+                currency=self.config.serpapi.currency,
+            )
+        except Exception:
+            logger.exception("Baggage estimate computation failed; storing None")
+            return None
+
     @staticmethod
     def _static_fallback(price: float, avg_price: Decimal | None):
-        """Fallback scoring when Claude API is unavailable."""
+        """Fallback scoring when Claude API is unavailable. Produces structured 3-field reasoning."""
         from src.analysis.scorer import DealScore
 
         if avg_price is not None and float(avg_price) > 0:
@@ -1585,13 +1778,21 @@ class Orchestrator:
                 return DealScore(
                     score=0.80,
                     urgency="book_now",
-                    reasoning=f"Static fallback: price is {drop_pct:.0%} below 90-day average (Claude unavailable)",
+                    reasoning={
+                        "vs_dates": "Date comparison unavailable",
+                        "vs_range": f"Price is {drop_pct:.0%} below 90-day average",
+                        "vs_nearby": "Static fallback — Claude unavailable",
+                    },
                     booking_window_hours=48,
                 )
         return DealScore(
             score=0.40,
             urgency="watch",
-            reasoning="Static fallback: price below average but not exceptional (Claude unavailable)",
+            reasoning={
+                "vs_dates": "Date comparison unavailable",
+                "vs_range": "Below average but not exceptional",
+                "vs_nearby": "Static fallback — Claude unavailable",
+            },
             booking_window_hours=72,
         )
 

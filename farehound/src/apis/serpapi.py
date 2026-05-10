@@ -43,6 +43,84 @@ class FlightSearchResult:
     search_params: dict = field(default_factory=dict)
     raw_response: dict = field(default_factory=dict)
 
+    def parse_baggage(
+        self,
+        airline_code: str | None,
+        leg_distance_km: float | None,
+        baggage_needs: str | None,
+        currency: str = "EUR",
+    ) -> dict:
+        """Extract baggage cost per direction from this response, falling back to the airline table.
+
+        Returns a dict with shape `{outbound, return, source, currency}` per release plan §8.1.
+        - `source = "serpapi"` when at least one extension was successfully parsed.
+        - `source = "fallback_table"` when SerpAPI was silent and the airline lookup produced fees.
+        - `source = "unknown"` when both paths returned zero — renderer suppresses the line.
+        """
+        from src.utils.baggage import parse_baggage_extensions, estimate
+
+        outbound = None
+        ret = None
+        source = "fallback_table"
+
+        try:
+            # 1. Primary: booking_options[].together.extensions
+            for opt in self.booking_options or []:
+                if not isinstance(opt, dict):
+                    continue
+                together = opt.get("together") or {}
+                exts = together.get("extensions") if isinstance(together, dict) else None
+                parsed = parse_baggage_extensions(exts)
+                if parsed:
+                    outbound = parsed
+                    ret = parsed
+                    source = "serpapi"
+                    break
+
+            # 2. Secondary: scan flight-leg extensions for outbound vs return separately.
+            if outbound is None:
+                all_flights = (self.best_flights or []) + (self.other_flights or [])
+                for f in all_flights:
+                    if not isinstance(f, dict):
+                        continue
+                    legs = f.get("flights") or []
+                    if not legs:
+                        continue
+                    # First leg is outbound; last leg is return for round-trips.
+                    out_parsed = parse_baggage_extensions(legs[0].get("extensions"))
+                    ret_parsed = (
+                        parse_baggage_extensions(legs[-1].get("extensions"))
+                        if len(legs) > 1 else out_parsed
+                    )
+                    if out_parsed or ret_parsed:
+                        outbound = out_parsed
+                        ret = ret_parsed or out_parsed
+                        source = "serpapi"
+                        break
+        except Exception:
+            logger.exception("Baggage parsing crashed; falling back to airline table")
+
+        if outbound is None:
+            outbound = estimate(airline_code, leg_distance_km, baggage_needs)
+            ret = estimate(airline_code, leg_distance_km, baggage_needs)
+            source = "fallback_table"
+
+        # If both directions are zero AND we used the fallback table, mark as unknown so the
+        # renderer suppresses the "+ €0 bags" line per Condition C5.
+        total = (
+            (outbound.get("carry_on", 0) or 0) + (outbound.get("checked", 0) or 0)
+            + (ret.get("carry_on", 0) or 0) + (ret.get("checked", 0) or 0)
+        )
+        if total == 0 and source == "fallback_table":
+            source = "unknown"
+
+        return {
+            "outbound": outbound,
+            "return": ret,
+            "source": source,
+            "currency": currency,
+        }
+
 
 def extract_lowest_price(
     result: FlightSearchResult,

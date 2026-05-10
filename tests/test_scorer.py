@@ -429,3 +429,229 @@ async def test_score_deal_with_past_feedback():
     call_args = mock_client.messages.create.call_args
     prompt_sent = call_args.kwargs["messages"][0]["content"]
     assert "PAST DECISIONS" in prompt_sent
+
+
+# =============================================================================
+# T18 — R7 (ITEM-051): structured 3-field reasoning contract (§6.1, §6.5)
+# =============================================================================
+
+from src.analysis.scorer import reasoning_to_bullets
+
+
+# --- _parse_response with structured reasoning ---
+
+def test_parse_response_returns_3_field_dict():
+    """Valid 3-field reasoning → parsed dict on DealScore."""
+    scorer = DealScorer.__new__(DealScorer)
+    raw = json.dumps({
+        "score": 0.78,
+        "urgency": "watch",
+        "reasoning": {
+            "vs_dates": "Cheapest of 4 dates polled — Mar 12 saves €60/pp",
+            "vs_range": "€80 below Google's typical low (€620–€780)",
+            "vs_nearby": "AMS is best — €40 cheaper than EIN",
+        },
+        "booking_window_hours": 48,
+    })
+    result = scorer._parse_response(raw)
+    assert isinstance(result.reasoning, dict)
+    assert result.reasoning["vs_dates"] == "Cheapest of 4 dates polled — Mar 12 saves €60/pp"
+    assert result.reasoning["vs_range"] == "€80 below Google's typical low (€620–€780)"
+    assert result.reasoning["vs_nearby"] == "AMS is best — €40 cheaper than EIN"
+    assert result.score == 0.78
+    assert result.urgency == "watch"
+
+
+def test_parse_response_malformed_falls_back_to_3_field_dict():
+    """Malformed JSON → fallback synthetic 3-field reasoning (§6.5)."""
+    scorer = DealScorer.__new__(DealScorer)
+    result = scorer._parse_response("not json at all")
+    assert isinstance(result.reasoning, dict)
+    assert set(result.reasoning.keys()) == {"vs_dates", "vs_range", "vs_nearby"}
+    assert "Static fallback" in result.reasoning["vs_range"]
+
+
+def test_parse_response_missing_vs_nearby_field_synthesises_default():
+    """Per §6.5, missing reasoning sub-field is replaced with a documented placeholder."""
+    scorer = DealScorer.__new__(DealScorer)
+    raw = json.dumps({
+        "score": 0.7,
+        "urgency": "watch",
+        "reasoning": {
+            "vs_dates": "Cheapest of 4",
+            "vs_range": "€80 below typical",
+            # vs_nearby intentionally absent
+        },
+        "booking_window_hours": 48,
+    })
+    result = scorer._parse_response(raw)
+    assert isinstance(result.reasoning, dict)
+    assert "vs_nearby" in result.reasoning
+    # Documented placeholder for missing nearby data
+    assert result.reasoning["vs_nearby"] == "No nearby airports configured"
+    # Other two fields still pass through unchanged
+    assert result.reasoning["vs_dates"] == "Cheapest of 4"
+    assert result.reasoning["vs_range"] == "€80 below typical"
+
+
+def test_parse_response_legacy_string_reasoning_back_compat():
+    """A scorer response with legacy free-text reasoning (string) is gracefully coerced.
+
+    Older response captures might still have string reasoning — _coerce_reasoning maps
+    them to a 3-field dict so renderers don't break.
+    """
+    scorer = DealScorer.__new__(DealScorer)
+    raw = json.dumps({
+        "score": 0.85,
+        "urgency": "book_now",
+        "reasoning": "Price is 30% below 90-day average — solid book.",
+        "booking_window_hours": 24,
+    })
+    result = scorer._parse_response(raw)
+    assert isinstance(result.reasoning, dict)
+    assert set(result.reasoning.keys()) == {"vs_dates", "vs_range", "vs_nearby"}
+    # Legacy string lands in vs_dates per coercion contract
+    assert result.reasoning["vs_dates"].startswith("Price is 30%")
+
+
+def test_parse_response_invalid_urgency_falls_back_to_watch():
+    """Per Builder's hardening: unknown urgency value coerces to 'watch'."""
+    scorer = DealScorer.__new__(DealScorer)
+    raw = json.dumps({
+        "score": 0.7,
+        "urgency": "definitely_buy",  # not in the enum
+        "reasoning": {
+            "vs_dates": "a", "vs_range": "b", "vs_nearby": "c",
+        },
+        "booking_window_hours": 24,
+    })
+    result = scorer._parse_response(raw)
+    assert result.urgency == "watch"
+
+
+# --- reasoning_to_bullets renderer (§6.4 back-compat for deals.reasoning legacy column) ---
+
+def test_reasoning_to_bullets_three_lines():
+    """Flattens 3-field dict to 3-line bullet string for legacy `deals.reasoning` reads."""
+    reasoning = {
+        "vs_dates": "Cheapest of 4 dates polled",
+        "vs_range": "€80 below Google's typical low",
+        "vs_nearby": "AMS is best",
+    }
+    flat = reasoning_to_bullets(reasoning)
+    lines = flat.split("\n")
+    assert len(lines) == 3
+    for line in lines:
+        assert line.startswith("✓ ")
+    assert "Cheapest of 4 dates polled" in lines[0]
+    assert "€80 below" in lines[1]
+    assert "AMS is best" in lines[2]
+
+
+def test_reasoning_to_bullets_string_passthrough():
+    """A legacy string passes through unchanged for fully back-compat reads."""
+    assert reasoning_to_bullets("Old free-text reasoning") == "Old free-text reasoning"
+
+
+def test_reasoning_to_bullets_none_returns_empty():
+    assert reasoning_to_bullets(None) == ""
+
+
+def test_reasoning_to_bullets_skips_empty_fields():
+    """Empty sub-fields are skipped (don't render `✓ ` empty bullets)."""
+    reasoning = {
+        "vs_dates": "Has data",
+        "vs_range": "",  # falsy
+        "vs_nearby": "Also has data",
+    }
+    flat = reasoning_to_bullets(reasoning)
+    lines = flat.split("\n")
+    assert len(lines) == 2
+    assert "Has data" in flat
+    assert "Also has data" in flat
+
+
+# --- score_deal end-to-end with structured reasoning ---
+
+@pytest.mark.asyncio
+async def test_score_deal_returns_structured_reasoning():
+    """Full score_deal flow: Claude returns 3-field dict → DealScore.reasoning is dict."""
+    scorer = DealScorer.__new__(DealScorer)
+    scorer._model = "claude-sonnet-4-20250514"
+
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(text=json.dumps({
+        "score": 0.85,
+        "urgency": "book_now",
+        "reasoning": {
+            "vs_dates": "Cheapest of 4 dates polled",
+            "vs_range": "€80 below Google's typical low",
+            "vs_nearby": "AMS is best — €40 cheaper than EIN",
+        },
+        "booking_window_hours": 24,
+    }))]
+    mock_response.usage = MagicMock(input_tokens=200, output_tokens=80)
+
+    mock_client = AsyncMock()
+    mock_client.messages.create = AsyncMock(return_value=mock_response)
+    scorer._client = mock_client
+
+    snapshot = PriceSnapshot(
+        snapshot_id="s1", route_id="r1",
+        observed_at=datetime(2026, 1, 1),
+        source="serpapi_poll", passengers=2,
+        lowest_price=Decimal("485"),
+    )
+    route = MagicMock()
+    route.origin = "AMS"
+    route.destination = "NRT"
+    route.trip_type = "round_trip"
+    route.date_flex_days = 3
+    route.passengers = 2
+    route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
+
+    result = await scorer.score_deal(
+        snapshot=snapshot, route=route, price_history={"count": 0},
+    )
+    assert isinstance(result.reasoning, dict)
+    assert "AMS is best" in result.reasoning["vs_nearby"]
+
+
+@pytest.mark.asyncio
+async def test_score_deal_malformed_response_yields_dict_fallback():
+    """When Claude returns malformed JSON, returned reasoning is still a 3-field dict."""
+    scorer = DealScorer.__new__(DealScorer)
+    scorer._model = "claude-sonnet-4-20250514"
+
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(text="this isn't json at all")]
+    mock_response.usage = MagicMock(input_tokens=50, output_tokens=10)
+
+    mock_client = AsyncMock()
+    mock_client.messages.create = AsyncMock(return_value=mock_response)
+    scorer._client = mock_client
+
+    snapshot = PriceSnapshot(
+        snapshot_id="s1", route_id="r1",
+        observed_at=datetime(2026, 1, 1),
+        source="serpapi_poll", passengers=2,
+        lowest_price=Decimal("485"),
+    )
+    route = MagicMock()
+    route.origin = "AMS"
+    route.destination = "NRT"
+    route.trip_type = "round_trip"
+    route.date_flex_days = 3
+    route.passengers = 2
+    route.preferred_airlines = []
+    route.earliest_departure = date(2026, 7, 1)
+
+    result = await scorer.score_deal(
+        snapshot=snapshot, route=route, price_history={"count": 0},
+    )
+    assert isinstance(result.reasoning, dict)
+    assert set(result.reasoning.keys()) == {"vs_dates", "vs_range", "vs_nearby"}
+    # Score and urgency are conservative defaults
+    assert result.score == 0.3
+    assert result.urgency == "watch"
