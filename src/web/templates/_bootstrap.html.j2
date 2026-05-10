@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>FareHound</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<main class="app" style="text-align:center; padding-top: 80px;">
+  <p class="metadata" id="bootstrap-msg">Loading…</p>
+</main>
+<script>
+  // Telegram passes initData via the URL hash (#tgWebAppData=...), which the
+  // server can't see. JS reads it on load and reloads the page with the
+  // initData as a `?tg=` query param so the server can authenticate.
+  (function () {
+    const tg = window.Telegram && window.Telegram.WebApp;
+    const target = {{ target | tojson }};
+    if (tg) {
+      try { tg.ready(); tg.expand(); } catch (_) {}
+    }
+    if (tg && tg.initData) {
+      const sep = target.indexOf("?") >= 0 ? "&" : "?";
+      window.location.replace(target + sep + "tg=" + encodeURIComponent(tg.initData));
+    } else {
+      document.getElementById("bootstrap-msg").textContent =
+        "Open this from Telegram. (No Telegram WebApp context found.)";
+    }
+  })();
+</script>
+</body>
+</html>

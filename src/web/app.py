@@ -68,41 +68,93 @@ def _resolve_user_id(db: Database, tg_user: dict) -> str | None:
     return user.get("user_id")
 
 
+def _bootstrap_response(request: Request, target: str) -> HTMLResponse:
+    """Return the tiny bootstrap page that re-loads `target` with initData attached."""
+    return _TEMPLATES.TemplateResponse(request, "_bootstrap.html.j2", {"target": target})
+
+
+def _html_user_for_request(db: Database, request: Request) -> tuple[dict | None, str | None]:
+    """Resolve (tg_user_dict, user_id) for an HTML route. Returns (None, None) when:
+    - no initData supplied (caller should bootstrap)
+    - initData invalid (caller should 401)
+    - user not registered (caller should 401)
+
+    Honours the `FAREHOUND_WEB_DEV_BYPASS_AUTH=1` env var for local testing.
+    """
+    # Dev bypass — short-circuits initData validation entirely.
+    if os.environ.get("FAREHOUND_WEB_DEV_BYPASS_AUTH") == "1":
+        chat_id = os.environ.get("FAREHOUND_WEB_DEV_USER_ID", "0")
+        stub_user = {"id": int(chat_id) if chat_id.lstrip("-").isdigit() else 0,
+                     "first_name": "DevUser"}
+        user = db.get_user_by_chat_id(chat_id)
+        return (stub_user, user.get("user_id") if user else None)
+
+    init_data = request.query_params.get("tg") or ""
+    if not init_data:
+        return (None, None)
+    try:
+        from src.web.auth import validate_init_data
+        tg_user = validate_init_data(init_data)
+    except Exception:
+        return ({}, None)  # initData was supplied but invalid → 401
+    user = db.get_user_by_chat_id(str(tg_user.get("id")))
+    return (tg_user, user.get("user_id") if user else None)
+
+
+def _needs_bootstrap(request: Request) -> bool:
+    """True when the caller hit an HTML route without initData (and no dev bypass).
+    Used to decide between rendering the bootstrap page vs a 401."""
+    if os.environ.get("FAREHOUND_WEB_DEV_BYPASS_AUTH") == "1":
+        return False
+    return not request.query_params.get("tg")
+
+
 def _register_html_routes(app: FastAPI) -> None:
+    # HTML pages: Telegram passes initData via the URL hash (#tgWebAppData=...),
+    # which the server can't see. On the first GET we return a tiny bootstrap
+    # page that reads `Telegram.WebApp.initData` and reloads with `?tg=...`.
+    # On the second GET (with `?tg=` set), we validate, render with real data.
+    # Same pattern for /, /deal/{id}, /routes, /settings.
+
     @app.get("/", response_class=HTMLResponse)
-    async def root(request: Request, tg_user: dict = Depends(require_user)) -> HTMLResponse:
-        # Default landing → routes
-        return await routes(request, tg_user)
+    async def root(request: Request) -> HTMLResponse:
+        if _needs_bootstrap(request):
+            return _bootstrap_response(request, "/routes")
+        return await routes(request)
 
     @app.get("/deal/{deal_id}", response_class=HTMLResponse)
-    async def deal_page(
-        request: Request, deal_id: str, tg_user: dict = Depends(require_user)
-    ) -> HTMLResponse:
+    async def deal_page(request: Request, deal_id: str) -> HTMLResponse:
+        if _needs_bootstrap(request):
+            return _bootstrap_response(request, f"/deal/{deal_id}")
         db: Database = app.state.db
-        user_id = _resolve_user_id(db, tg_user)
+        _, user_id = _html_user_for_request(db, request)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="initData invalid or user not registered")
         deal = await asyncio.to_thread(data_assembler.assemble_deal, db, deal_id, user_id)
         if deal is None:
             raise HTTPException(status_code=404, detail="deal not found")
         return _TEMPLATES.TemplateResponse(request, "deal.html.j2", {"deal": deal})
 
     @app.get("/routes", response_class=HTMLResponse)
-    async def routes(request: Request, tg_user: dict = Depends(require_user)) -> HTMLResponse:
+    async def routes(request: Request) -> HTMLResponse:
+        if _needs_bootstrap(request):
+            return _bootstrap_response(request, "/routes")
         db: Database = app.state.db
-        user_id = _resolve_user_id(db, tg_user)
+        _, user_id = _html_user_for_request(db, request)
         if user_id is None:
-            raise HTTPException(status_code=403, detail="user not registered — open the bot first")
+            raise HTTPException(status_code=401, detail="initData invalid or user not registered")
         ctx = await asyncio.to_thread(data_assembler.assemble_routes, db, user_id)
         return _TEMPLATES.TemplateResponse(request, "routes.html.j2", ctx)
 
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(
-        request: Request, tg_user: dict = Depends(require_user)
-    ) -> HTMLResponse:
+    async def settings_page(request: Request) -> HTMLResponse:
+        if _needs_bootstrap(request):
+            return _bootstrap_response(request, "/settings")
         db: Database = app.state.db
-        user_id = _resolve_user_id(db, tg_user)
+        tg_user, user_id = _html_user_for_request(db, request)
         if user_id is None:
-            raise HTTPException(status_code=403, detail="user not registered — open the bot first")
-        handle = "@" + str(tg_user.get("username") or tg_user.get("first_name") or "")
+            raise HTTPException(status_code=401, detail="initData invalid or user not registered")
+        handle = "@" + str((tg_user or {}).get("username") or (tg_user or {}).get("first_name") or "")
         ctx = await asyncio.to_thread(data_assembler.assemble_settings, db, user_id, handle)
         return _TEMPLATES.TemplateResponse(request, "settings.html.j2", ctx)
 
@@ -111,6 +163,28 @@ def _register_html_routes(app: FastAPI) -> None:
 
 
 def _register_api_routes(app: FastAPI) -> None:
+    # ---- GET endpoints used by the HTML page JS to populate shells ----
+
+    @app.get("/api/routes")
+    async def get_routes(tg_user: dict = Depends(require_user)) -> JSONResponse:
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="user not registered — open the bot first")
+        ctx = await asyncio.to_thread(data_assembler.assemble_routes, db, user_id)
+        return JSONResponse(ctx)
+
+    @app.get("/api/deals/{deal_id}")
+    async def get_deal(deal_id: str, tg_user: dict = Depends(require_user)) -> JSONResponse:
+        db: Database = app.state.db
+        user_id = _resolve_user_id(db, tg_user)
+        deal = await asyncio.to_thread(data_assembler.assemble_deal, db, deal_id, user_id)
+        if deal is None:
+            raise HTTPException(status_code=404, detail="deal not found")
+        return JSONResponse(deal)
+
+    # ---- Action endpoints (mutations) ----
+
     @app.post("/api/routes/parse")
     async def parse_trip(
         body: dict = Body(...), tg_user: dict = Depends(require_user)

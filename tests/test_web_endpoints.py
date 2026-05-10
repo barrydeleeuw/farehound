@@ -281,9 +281,33 @@ class TestParseEndpoint:
 
 
 class TestAuthGate:
-    def test_html_routes_require_auth_when_bypass_off(self, db, seeded, monkeypatch):
+    def test_html_routes_serve_bootstrap_when_no_initdata(self, db, seeded, monkeypatch):
+        # Without `?tg=<initData>` and without dev bypass, HTML routes return the
+        # bootstrap page (200). Bootstrap JS reads `Telegram.WebApp.initData` on
+        # load and reloads with `?tg=` set so the second GET can authenticate.
         monkeypatch.delenv("FAREHOUND_WEB_DEV_BYPASS_AUTH", raising=False)
         app = create_app(db=db, anthropic_key=None, anthropic_model="test-model")
         c = TestClient(app)
         resp = c.get("/routes")
+        assert resp.status_code == 200
+        assert "tg.initData" in resp.text  # the bootstrap script reference
+        assert "/routes" in resp.text       # target path baked in
+
+    def test_html_routes_401_with_invalid_initdata(self, db, seeded, monkeypatch):
+        # When `?tg=` IS supplied but invalid, the server can't bootstrap any further
+        # (the redirect already happened) and must return 401.
+        monkeypatch.delenv("FAREHOUND_WEB_DEV_BYPASS_AUTH", raising=False)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test:token")
+        app = create_app(db=db, anthropic_key=None, anthropic_model="test-model")
+        c = TestClient(app)
+        resp = c.get("/routes?tg=garbage")
+        assert resp.status_code == 401
+
+    def test_api_routes_strict_401_when_no_header(self, db, seeded, monkeypatch):
+        # /api/* endpoints stay strict — they require the x-telegram-init-data
+        # header (set by client JS), no bootstrap fallback.
+        monkeypatch.delenv("FAREHOUND_WEB_DEV_BYPASS_AUTH", raising=False)
+        app = create_app(db=db, anthropic_key=None, anthropic_model="test-model")
+        c = TestClient(app)
+        resp = c.get("/api/routes")
         assert resp.status_code == 401
