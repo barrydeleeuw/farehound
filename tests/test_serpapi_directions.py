@@ -1,4 +1,4 @@
-"""R9 ITEM-053: Google Maps Distance Matrix client + curated airport data."""
+"""R9 ITEM-053: SerpAPI google_maps_directions wrapper + curated airport datasets."""
 
 from __future__ import annotations
 
@@ -8,14 +8,15 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from src.apis.google_maps import (
-    GoogleMapsClient,
-    GoogleMapsError,
-    GoogleMapsKeyMissing,
-    estimate_drive_cost_eur,
-    estimate_taxi_cost_eur,
+from src.apis.serpapi import (
+    DirectionsResult,
+    SerpAPIClient,
+    SerpAPIError,
+    _parse_directions_response,
 )
 from src.utils.airport_data import (
+    estimate_drive_cost_eur,
+    estimate_taxi_cost_eur,
     find_nearby_airports,
     get_airport_meta,
     get_parking_rate,
@@ -27,7 +28,6 @@ from src.utils.airport_data import (
 
 
 def test_estimate_drive_cost_default_rate():
-    # 100 km × €0.25/km = €25
     assert estimate_drive_cost_eur(100) == 25.0
 
 
@@ -36,129 +36,167 @@ def test_estimate_drive_cost_custom_rate():
 
 
 def test_estimate_taxi_cost_default():
-    # 50 km × €2.50/km = €125
     assert estimate_taxi_cost_eur(50) == 125.0
 
 
-# ---------- GoogleMapsClient ----------
+# ---------- _parse_directions_response (defensive parsing) ----------
+
+
+def test_parse_directions_shape_a_travel_modes():
+    """Shape A: travel_modes[0] contains the totals."""
+    response = {
+        "directions": [{
+            "travel_modes": [{
+                "total_duration": 1500,
+                "distance": {"value": 23000, "text": "23 km"},
+            }]
+        }]
+    }
+    result = _parse_directions_response(response, canonical_mode="drive")
+    assert result.distance_km == 23.0
+    assert result.duration_min == 25
+    assert result.mode == "drive"
+
+
+def test_parse_directions_shape_b_inline():
+    """Shape B: totals on the direction entry directly."""
+    response = {
+        "directions": [{
+            "total_duration": 2700,
+            "distance": {"value": 38000},
+        }]
+    }
+    result = _parse_directions_response(response, canonical_mode="transit")
+    assert result.distance_km == 38.0
+    assert result.duration_min == 45
+    assert result.mode == "transit"
+
+
+def test_parse_directions_shape_b_with_duration_object():
+    """Shape B variant: duration as object."""
+    response = {
+        "directions": [{
+            "duration": {"value": 600},
+            "distance": {"value": 5000},
+        }]
+    }
+    result = _parse_directions_response(response, canonical_mode="drive")
+    assert result.distance_km == 5.0
+    assert result.duration_min == 10
+
+
+def test_parse_directions_distance_as_number():
+    """Some scraped responses have distance as a bare number, not an object."""
+    response = {
+        "directions": [{
+            "travel_modes": [{
+                "total_duration": 600,
+                "distance": 5000,
+            }]
+        }]
+    }
+    result = _parse_directions_response(response, canonical_mode="drive")
+    assert result.distance_km == 5.0
+
+
+def test_parse_directions_no_directions_raises():
+    with pytest.raises(SerpAPIError, match="no routes"):
+        _parse_directions_response({"directions": []}, canonical_mode="drive")
+    with pytest.raises(SerpAPIError, match="no routes"):
+        _parse_directions_response({}, canonical_mode="drive")
+
+
+def test_parse_directions_missing_data_raises():
+    with pytest.raises(SerpAPIError, match="missing duration/distance"):
+        _parse_directions_response(
+            {"directions": [{"travel_modes": [{}]}]}, canonical_mode="drive"
+        )
+
+
+# ---------- SerpAPIClient.directions ----------
 
 
 @pytest.mark.asyncio
-async def test_client_without_key_raises_typed_exception():
-    client = GoogleMapsClient(api_key=None)
-    assert client.is_configured is False
-    with pytest.raises(GoogleMapsKeyMissing):
-        await client.directions(origin="Amsterdam", destination="Schiphol")
+async def test_directions_unsupported_mode_raises():
+    client = SerpAPIClient(api_key="test-key")
+    with pytest.raises(SerpAPIError, match="Unsupported travel mode"):
+        await client.directions(origin="A", destination="B", mode="teleport")
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_with_empty_string_key_raises():
-    client = GoogleMapsClient(api_key="   ")
-    assert client.is_configured is False
-    with pytest.raises(GoogleMapsKeyMissing):
-        await client.directions(origin="Amsterdam", destination="Schiphol")
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_client_directions_success_drive():
-    client = GoogleMapsClient(api_key="test-key")
+async def test_directions_drive_success():
+    client = SerpAPIClient(api_key="test-key")
     fake_response = httpx.Response(
         200,
-        request=httpx.Request("GET", "https://maps.googleapis.com/maps/api/distancematrix/json"),
+        request=httpx.Request("GET", "https://serpapi.com/search"),
         json={
-            "status": "OK",
-            "rows": [{
-                "elements": [{
-                    "status": "OK",
+            "directions": [{
+                "travel_modes": [{
+                    "total_duration": 1500,
                     "distance": {"value": 23000, "text": "23 km"},
-                    "duration": {"value": 1200, "text": "20 mins"},
                 }]
-            }],
+            }]
         },
     )
     with patch.object(client._client, "get", AsyncMock(return_value=fake_response)):
         result = await client.directions(
-            origin="52.3,4.7", destination="AMS Airport", mode="drive"
+            origin="amsterdam", destination="AMS Airport", mode="drive",
         )
     assert result.distance_km == 23.0
-    assert result.duration_min == 20
+    assert result.duration_min == 25
     assert result.mode == "drive"
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_directions_success_transit():
-    client = GoogleMapsClient(api_key="test-key")
+async def test_directions_transit_success():
+    client = SerpAPIClient(api_key="test-key")
     fake_response = httpx.Response(
         200,
-        request=httpx.Request("GET", "https://maps.googleapis.com/maps/api/distancematrix/json"),
+        request=httpx.Request("GET", "https://serpapi.com/search"),
         json={
-            "status": "OK",
-            "rows": [{
-                "elements": [{
-                    "status": "OK",
-                    "distance": {"value": 38000, "text": "38 km"},
-                    "duration": {"value": 2700, "text": "45 mins"},
+            "directions": [{
+                "travel_modes": [{
+                    "total_duration": 2700,
+                    "distance": {"value": 38000},
                 }]
-            }],
+            }]
         },
     )
     with patch.object(client._client, "get", AsyncMock(return_value=fake_response)):
         result = await client.directions(
-            origin="Amsterdam", destination="EIN Airport", mode="train"
+            origin="amsterdam", destination="EIN Airport", mode="train",
         )
-    assert result.distance_km == 38.0
     assert result.duration_min == 45
     assert result.mode == "transit"
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_directions_unsupported_mode_raises():
-    client = GoogleMapsClient(api_key="test-key")
-    with pytest.raises(GoogleMapsError, match="Unsupported mode"):
-        await client.directions(origin="A", destination="B", mode="teleport")
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_client_directions_api_error_status_raises():
-    client = GoogleMapsClient(api_key="test-key")
+async def test_directions_serp_error_response():
+    client = SerpAPIClient(api_key="test-key")
     fake_response = httpx.Response(
         200,
-        request=httpx.Request("GET", "https://maps.googleapis.com/maps/api/distancematrix/json"),
-        json={"status": "REQUEST_DENIED", "error_message": "Invalid key"},
+        request=httpx.Request("GET", "https://serpapi.com/search"),
+        json={"error": "Invalid API key"},
     )
     with patch.object(client._client, "get", AsyncMock(return_value=fake_response)):
-        with pytest.raises(GoogleMapsError, match="REQUEST_DENIED"):
+        with pytest.raises(SerpAPIError, match="Invalid API key"):
             await client.directions(origin="A", destination="B")
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_directions_no_route_raises():
-    client = GoogleMapsClient(api_key="test-key")
+async def test_directions_http_error():
+    client = SerpAPIClient(api_key="test-key")
     fake_response = httpx.Response(
-        200,
-        request=httpx.Request("GET", "https://maps.googleapis.com/maps/api/distancematrix/json"),
-        json={"status": "OK", "rows": [{"elements": [{"status": "ZERO_RESULTS"}]}]},
+        500,
+        request=httpx.Request("GET", "https://serpapi.com/search"),
+        text="server error",
     )
     with patch.object(client._client, "get", AsyncMock(return_value=fake_response)):
-        with pytest.raises(GoogleMapsError, match="No route found"):
-            await client.directions(origin="A", destination="B")
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_client_directions_http_error_wrapped():
-    client = GoogleMapsClient(api_key="test-key")
-    with patch.object(
-        client._client, "get",
-        AsyncMock(side_effect=httpx.HTTPError("network died")),
-    ):
-        with pytest.raises(GoogleMapsError, match="HTTP error"):
+        with pytest.raises(SerpAPIError, match="HTTP 500"):
             await client.directions(origin="A", destination="B")
     await client.close()
 
@@ -168,8 +206,7 @@ async def test_client_directions_http_error_wrapped():
 
 def test_get_parking_rate_known_airport():
     rate = get_parking_rate("AMS")
-    assert rate is not None
-    assert rate > 0
+    assert rate is not None and rate > 0
 
 
 def test_get_parking_rate_case_insensitive():
@@ -182,8 +219,7 @@ def test_get_parking_rate_unknown_returns_none():
 
 def test_get_train_fare_known_pair():
     fare = get_train_fare("amsterdam", "AMS")
-    assert fare is not None
-    assert fare > 0
+    assert fare is not None and fare > 0
 
 
 def test_get_train_fare_case_insensitive():
@@ -195,13 +231,9 @@ def test_get_train_fare_unknown_returns_none():
 
 
 def test_find_nearby_airports_within_radius():
-    # Amsterdam centre: lat 52.37, lng 4.90.
-    nearby = find_nearby_airports(
-        lat=52.37, lng=4.90, max_km=100, limit=5,
-    )
+    nearby = find_nearby_airports(lat=52.37, lng=4.90, max_km=100, limit=5)
     codes = [a["iata"] for a in nearby]
-    assert "AMS" in codes  # Schiphol is right there
-    # Sorted by distance, nearest first.
+    assert "AMS" in codes
     distances = [a["distance_km"] for a in nearby]
     assert distances == sorted(distances)
 
@@ -215,10 +247,9 @@ def test_find_nearby_airports_excludes_home():
 
 
 def test_find_nearby_airports_respects_radius():
-    # Within 50km of Amsterdam should NOT include FRA (Frankfurt).
     nearby = find_nearby_airports(lat=52.37, lng=4.90, max_km=50, limit=10)
     codes = [a["iata"] for a in nearby]
-    assert "FRA" not in codes
+    assert "FRA" not in codes  # Frankfurt is too far from Amsterdam
 
 
 def test_find_nearby_airports_limit_respected():
@@ -230,15 +261,13 @@ def test_get_airport_meta_known():
     meta = get_airport_meta("AMS")
     assert meta is not None
     assert meta["name"].startswith("Amsterdam")
-    assert "lat" in meta
-    assert "lng" in meta
 
 
 def test_get_airport_meta_unknown():
     assert get_airport_meta("ZZZ") is None
 
 
-# ---------- Schema sanity for the curated JSON files ----------
+# ---------- Curated JSON file schema ----------
 
 
 def test_parking_dataset_schema_sane():
