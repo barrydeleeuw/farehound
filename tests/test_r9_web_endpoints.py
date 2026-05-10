@@ -95,11 +95,17 @@ def test_put_nonexistent_option_404(client):
 
 
 def test_delete_option(client):
-    client.post("/api/airports/AMS/options", json={"mode": "uber", "cost_eur": 40})
-    r = client.delete("/api/airports/AMS/options/uber")
+    client.post("/api/airports/AMS/options", json={"mode": "bus", "cost_eur": 8})
+    r = client.delete("/api/airports/AMS/options/bus")
     assert r.status_code == 200
     body = client.get("/api/airports/AMS/options").json()
-    assert all(o["mode"] != "uber" for o in body["options"])
+    assert all(o["mode"] != "bus" for o in body["options"])
+
+
+def test_post_uber_mode_rejected(client):
+    """v0.11.2: uber removed from allowed modes (redundant with taxi)."""
+    r = client.post("/api/airports/AMS/options", json={"mode": "uber", "cost_eur": 40})
+    assert r.status_code == 400
 
 
 def test_delete_nonexistent_404(client):

@@ -1347,3 +1347,12 @@ body.in-telegram .main-button {
   color: var(--bg);
   border-color: var(--text);
 }
+
+.field-hint {
+  display: block;
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-top: 4px;
+  line-height: 1.4;
+}
