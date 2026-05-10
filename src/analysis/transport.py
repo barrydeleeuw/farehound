@@ -24,6 +24,14 @@ def is_per_person_mode(mode: str | None) -> bool:
     return mode.lower().strip() in _PER_PERSON_MODES
 
 
+# Fallback assumption when the caller doesn't know trip duration. Used only
+# for cheapest-mode COMPARISON (so parking gets fairly considered) — NOT for
+# the displayed parking number, which the renderer computes from the actual
+# trip_days. R9 review #1: a trip_days=0 fallback would make drive look free
+# even when parking would dominate the real cost.
+DEFAULT_TRIP_DAYS_FOR_COMPARISON = 7
+
+
 def compute_mode_total(opt: dict, passengers: int, trip_days: int = 0) -> float:
     """Total round-trip cost for the party using this transport option.
 
@@ -40,10 +48,11 @@ def compute_mode_total(opt: dict, passengers: int, trip_days: int = 0) -> float:
     For per-vehicle modes (drive/taxi): cost_eur × 2.
     Plus parking (only meaningful for drive): parking_cost_per_day_eur × trip_days.
 
-    A trip_days of 0 means "we don't know the duration" — parking contributes 0.
-    The renderer should resolve trip_days from the route's depart/return dates
-    before calling this; the math layer does not assume any default.
+    When trip_days == 0 we substitute DEFAULT_TRIP_DAYS_FOR_COMPARISON for the
+    parking term — otherwise drive options without an explicit trip duration
+    would beat train by ignoring the dominant cost.
     """
+    effective_days = trip_days if trip_days > 0 else DEFAULT_TRIP_DAYS_FOR_COMPARISON
     cost = float(opt.get("cost_eur") or 0.0)
     scales = bool(opt.get("cost_scales_with_pax"))
     if scales:
@@ -51,7 +60,7 @@ def compute_mode_total(opt: dict, passengers: int, trip_days: int = 0) -> float:
     else:
         round_trip = cost * 2
     parking_per_day = float(opt.get("parking_cost_per_day_eur") or 0.0)
-    parking = parking_per_day * max(trip_days, 0)
+    parking = parking_per_day * effective_days
     return round_trip + parking
 
 

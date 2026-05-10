@@ -703,7 +703,9 @@ class TripBot:
                         None,
                         lambda c=code, f=train_fare: self._db.add_transport_option(
                             user_id=user_id, airport_code=c, mode="train",
-                            cost_eur=f / 2,  # store one-way; multiplied by 2 at render
+                            # Curated value is RT/pp; store as one-way (÷2). Renderer
+                            # applies × 2 (RT) × passengers (cost_scales_with_pax=True).
+                            cost_eur=f / 2,
                             cost_scales_with_pax=True,
                             time_min=None, parking_cost_per_day_eur=None,
                             source="curated", confidence="medium",
@@ -786,7 +788,7 @@ class TripBot:
 
                 result[code] = {
                     "modes": modes_added,
-                    "skipped_reason": "google_maps_key_missing" if gm_skipped and gm_client._api_key is None
+                    "skipped_reason": "google_maps_key_missing" if gm_skipped and not gm_client.is_configured
                                       else ("airport_not_in_dataset" if meta is None and not modes_added else None),
                 }
         finally:

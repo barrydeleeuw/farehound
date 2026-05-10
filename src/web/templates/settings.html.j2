@@ -43,7 +43,8 @@
              data-parking="{{ m.parking_cost_per_day_eur or '' }}"
              data-enabled="{{ '1' if m.enabled else '0' }}"
              data-source="{{ m.source or '' }}"
-             data-confidence="{{ m.confidence or '' }}">
+             data-confidence="{{ m.confidence or '' }}"
+             data-label="{{ m.label or '' }}">
           <span class="mode-name">{{ m.label or m.mode }}</span>
           <span class="mode-cost">{% if m.cost_eur is not none %}<span class="currency">€</span>{{ '%.0f' | format(m.cost_eur) }}{% if m.cost_scales_with_pax %}/pp{% endif %}{% else %}—{% endif %}</span>
           <span class="mode-time">{{ m.time_label or '—' }}</span>
@@ -62,7 +63,7 @@
           <label>Always use:
             <select data-action="set-override" data-airport="{{ ap.code }}">
               <option value="">cheapest (auto)</option>
-              {% for m in ap.modes %}
+              {% for m in ap.modes if m.enabled %}
               <option value="{{ m.mode }}"{% if m.mode == ap.override_mode %} selected{% endif %}>{{ m.label or m.mode }}</option>
               {% endfor %}
             </select>
@@ -241,7 +242,7 @@
       document.getElementById("edit-enabled").checked = true;
       document.getElementById("edit-delete").style.display = "none";
     }
-    document.getElementById("edit-label").value = modeRow?.querySelector(".mode-name")?.textContent?.trim() || "";
+    document.getElementById("edit-label").value = modeRow?.dataset?.label || "";
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   }

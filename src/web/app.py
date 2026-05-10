@@ -359,7 +359,8 @@ def _register_api_routes(app: FastAPI) -> None:
         airport = _validate_airport_code(code)
         mode = _validate_mode(body.get("mode", ""))
         try:
-            cost_eur = float(body["cost_eur"]) if body.get("cost_eur") is not None else None
+            # Clamp to non-negative (review #7: PUT clamps; POST should too).
+            cost_eur = max(0.0, float(body["cost_eur"])) if body.get("cost_eur") is not None else None
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="cost_eur must be a number") from None
         time_min = body.get("time_min")
@@ -467,6 +468,18 @@ def _register_api_routes(app: FastAPI) -> None:
             mode_val = None
         else:
             mode_val = _validate_mode(str(raw_mode))
+            # R9 review #3: refuse to set an override pointing at a mode that
+            # doesn't exist (or is disabled) for this airport. The renderer
+            # would silently fall through to cheapest, which surprises the user.
+            existing = await asyncio.to_thread(
+                db.get_transport_options, airport, user_id, include_disabled=False,
+            )
+            modes_available = {(o.get("mode") or "").lower() for o in existing}
+            if mode_val.lower() not in modes_available:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Mode '{mode_val}' is not an enabled option for {airport}",
+                )
         await asyncio.to_thread(
             db.set_airport_override_mode,
             user_id=user_id, airport_code=airport, mode=mode_val,

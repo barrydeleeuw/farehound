@@ -35,8 +35,9 @@ def test_compute_mode_total_drive_with_parking():
     }
     # 1-way 30 → RT 60; parking 25*7 = 175; total 235.
     assert compute_mode_total(drive, passengers=2, trip_days=7) == 235.0
-    # No parking when trip_days=0.
-    assert compute_mode_total(drive, passengers=2, trip_days=0) == 60.0
+    # When trip_days=0 we substitute a 7-day fallback for fair COMPARISON
+    # (otherwise drive looks free vs train when duration is unknown — review #1).
+    assert compute_mode_total(drive, passengers=2, trip_days=0) == 235.0
 
 
 def test_compute_mode_total_train_scales_with_pax():
@@ -134,6 +135,17 @@ def test_pick_cheapest_returns_none_when_all_disabled(options_set):
     for o in options_set:
         o["enabled"] = False
     assert pick_cheapest_mode(options_set, passengers=2, trip_days=7) is None
+
+
+def test_pick_cheapest_with_unknown_trip_days_uses_default_for_comparison(options_set):
+    """Review #1: when trip_days=0, parking still factors into cheapest comparison
+    via DEFAULT_TRIP_DAYS_FOR_COMPARISON. Otherwise drive looks free."""
+    # 2 pax, trip_days=0 (unknown):
+    #   With 7-day fallback: drive=235, train=60, taxi=100 → train.
+    chosen = pick_cheapest_mode(options_set, passengers=2, trip_days=0)
+    assert chosen["mode"] == "train"
+    # Pre-fix this would have been drive (60 vs train 60, ties go to first).
+    # Post-fix train wins because parking is properly considered.
 
 
 # ---------- resolve_breakdown_inputs ----------

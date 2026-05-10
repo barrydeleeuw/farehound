@@ -126,6 +126,33 @@ def test_set_override_with_invalid_mode_rejected(client):
     assert r.status_code == 400
 
 
+def test_set_override_for_nonexistent_mode_rejected(client):
+    """Review #3: cannot set override='drive' if airport has no enabled drive option."""
+    client.post("/api/airports/AMS/options", json={"mode": "train", "cost_eur": 15})
+    r = client.put("/api/airports/AMS/override", json={"mode": "drive"})
+    assert r.status_code == 400
+    body = r.json()
+    assert "not an enabled option" in body["detail"]
+
+
+def test_set_override_for_disabled_mode_rejected(client):
+    """A disabled mode cannot become the override (would silently fall through to cheapest)."""
+    client.post("/api/airports/AMS/options", json={"mode": "train", "cost_eur": 15})
+    client.post("/api/airports/AMS/options", json={"mode": "drive", "cost_eur": 30})
+    client.put("/api/airports/AMS/options/drive", json={"enabled": False})
+    r = client.put("/api/airports/AMS/override", json={"mode": "drive"})
+    assert r.status_code == 400
+
+
+def test_post_negative_cost_clamped(client):
+    """Review #7: POST cost_eur is clamped to 0 (was previously asymmetric with PUT)."""
+    r = client.post("/api/airports/AMS/options", json={"mode": "drive", "cost_eur": -100})
+    assert r.status_code == 200
+    body = client.get("/api/airports/AMS/options").json()
+    drive = next(o for o in body["options"] if o["mode"] == "drive")
+    assert drive["cost_eur"] == 0.0
+
+
 def test_options_per_airport_isolated(client):
     client.post("/api/airports/AMS/options", json={"mode": "drive", "cost_eur": 30})
     client.post("/api/airports/EIN/options", json={"mode": "train", "cost_eur": 10})
