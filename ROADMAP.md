@@ -1,6 +1,6 @@
 # FareHound Roadmap
 
-> Last updated: 2026-05-09 (v0.9.0)
+> Last updated: 2026-05-10 (v0.10.0)
 
 ## Mission
 
@@ -14,47 +14,7 @@ Every feature we build serves this mission: reduce the gap between what people p
 
 ## In Progress
 
-### [ITEM-049] Telegram Mini Web App
-- **Status:** In Progress *(frontend pass complete; backend remaining)*
-- **Priority:** P1 (High)
-- **Effort:** L *(of which ~40% shipped — frontend; ~60% remaining — backend + deploy)*
-- **Dependencies:** [ITEM-051] shipped as v0.9.0 — its "📊 Details" button is the entry point
-- **Summary:** Rich detail views launched from a button on each Telegram alert. Telegram WebApp `web_app` button hands off signed `initData` (no separate auth). Replaces parts of the parked [ITEM-P02] (Lovelace dashboard) — Telegram WebApp is a better fit than HA Lovelace for a multi-user direction.
-
-- **Frontend pass (DONE — 2026-05-10, uncommitted in worktree at `frontend/`):**
-  - 3 pages built: `deal.html`, `routes.html`, `settings.html` + `index.html` preview
-  - Plain HTML + CSS + ~250 lines vanilla JS (rejected the original FastAPI+HTMX suggestion for the design pass — see `frontend/DESIGN.md` and `frontend/README.md` for rationale; HTML structure is portable to Jinja for the backend pass)
-  - "Editorial ledger" aesthetic: Fraunces / Hanken Grotesk / JetBrains Mono, no rounded corners, hairline rules, tabular numerals
-  - Telegram WebApp SDK wired (BackButton, MainButton, theme params, haptics, showAlert/showConfirm) — no-ops gracefully outside Telegram
-  - Add-trip flow: input → submit → parse-confirm card → prepend placeholder route card
-  - Mock data inline; documented backend contract for 7 endpoints in `frontend/README.md`
-
-- **Backend pass (REMAINING — what /release R8 plans):**
-  - FastAPI app under `src/web/` serving the 3 pages via Jinja (port the static HTML to Jinja templates) + JSON action endpoints
-  - 7 endpoints per `frontend/README.md`: `GET /api/deals/:id`, `GET /api/routes`, `POST /api/routes/parse`, `POST /api/routes`, `POST /api/routes/:id/snooze`, `POST /api/deals/:id/feedback`, `GET/PATCH /api/settings`
-  - `initData` HMAC validation middleware (against bot token from env var `TELEGRAM_BOT_TOKEN`)
-  - Wire to existing services: `db.py`, `scorer.py` for `/parse`, orchestrator for immediate poll on route create
-  - Submit-only Claude parse (decision locked 2026-05-10 — no live-as-you-type to keep cost discipline)
-  - HTTPS deploy: Cloudflare Tunnel from the Pi (preferred over Caddy — no port forwarding, no static IP needed). Documentation only; Barry runs the deploy commands himself with his Cloudflare account.
-
-- **Telegram surface change (locked 2026-05-10 — Option B):** Web app becomes the primary UX. Telegram alerts thin to ping format. Decision rationale in this session's history; in short: user found the v0.9.0 rich-Telegram format crappy and wants to consume rich data in the web app, not in chat.
-  - `send_deal_alert`, `send_error_fare_alert`: replace rich body with 2-line ping (`💰 AMS→NRT — €1,820/pp · new low. Tap to open.`). Replace `Book Now` URL button with `📊 Open in FareHound` deep-link button to `/deal/{deal_id}`. **Keep inline action buttons** (`Watching 👀`, `Skip route 🔕`) — they're one-tap and more convenient than opening the web app for binary actions.
-  - `send_follow_up`: keep "Did you book?" question. Replace book URL with `📊 Open in FareHound`. Keep inline `Booked ✅` and `Watching 👀` buttons.
-  - `send_daily_digest`: replace per-route rich messages with a single summary ping (`📊 FareHound Daily — N routes, M moved. Tap to open.`) → single button to `/routes`.
-  - **Feature-flagged on `MINIAPP_URL`**: when env var is empty/unset, falls back to v0.9.0 rich format. Lets us ship backend first, flip Telegram format with a config change.
-
-- **Acceptance Criteria:**
-  - [x] 3 frontend pages render with mock data
-  - [x] Frontend documented + portable to Jinja
-  - [ ] FastAPI app boots and serves all 7 endpoints
-  - [ ] `initData` HMAC validation rejects forged requests; integration tests cover happy and forged paths
-  - [ ] When `MINIAPP_URL` is set: deal alert / error fare / follow-up / daily digest use thin-ping format with `📊 Open in FareHound` button; inline action buttons preserved where applicable
-  - [ ] When `MINIAPP_URL` is unset: v0.9.0 rich format still renders (fallback verified by tests)
-  - [ ] Routes page snooze toggle calls `/api/routes/:id/snooze` (wired to existing `db.snooze_route`)
-  - [ ] Settings page PATCH persists `users.preferences` and `airport_transport` rows
-  - [ ] Cloudflare Tunnel setup documented (script + instructions) — Barry runs the deploy
-  - [ ] Tests pass; suite stays green
-  - [ ] R7 verification cases MV-5/6/7/8 (rich-Telegram cases) marked superseded by web app verification in `docs/releases/R7/verification_report.md`
+<!-- No items currently in progress -->
 
 ## Ready
 
@@ -228,6 +188,12 @@ Every feature we build serves this mission: reduce the gap between what people p
 - **Summary:** Telethon-based integration tests that connect as a test user and walk through bot flows (onboarding, trip creation, deal alerts, booking follow-up). Verifies message content and conversation state against expectations. Requires a test Telegram account and running bot instance.
 
 ## Done
+
+### [ITEM-D16] Mini Web App + thin Telegram (v0.10.0)
+- **Status:** Done — [ITEM-049] shipped 2026-05-10. Frontend pass at commit `e4dc24a` (3 Jinja-portable HTML pages with editorial-ledger aesthetic — Fraunces/Hanken Grotesk/JetBrains Mono, no rounded corners). Backend at `d2da895`: FastAPI app under `src/web/` boots alongside the bot via `asyncio.gather` from Orchestrator.start; 12 endpoints (4 HTML, 8 JSON); `initData` HMAC validation rejects forged/expired/tampered/future requests; static + templates inside `src/web/`. Telegram surface flipped to **Option B**: alerts thin to 2-line pings with single `📊 Open in FareHound` button; inline binary actions (Watching / Skip / Booked) preserved; daily digest collapses to one summary message; v0.9.0 rich format remains as fallback when `MINIAPP_URL` is unset. HTTPS via Cloudflare Tunnel — recipe at `docs/deployment/cloudflare-tunnel.md`, Barry runs the deploy. Code-review fixes folded in at `a91edb8`: critical cross-user feedback bug fixed (ownership check on `/api/deals/:id/feedback`), `/api/routes/parse` capped at 500 chars to prevent Anthropic-budget abuse, over-defensive `_update_user_safe` wrapper removed, task-reference comments stripped. Suite: 420 → **465** (+45 R8 tests; +4 since R8 commit for code-review regressions).
+- **Detail:** [docs/releases/R8/release_plan.md](docs/releases/R8/release_plan.md), [docs/deployment/cloudflare-tunnel.md](docs/deployment/cloudflare-tunnel.md)
+- **Built solo** (not a team) — single new module + 4 additive template thin-outs didn't justify 3-agent coordination overhead. `/code-review` ran at the end as the independent perspective. Decision documented in release plan.
+- **3 deferred follow-ups** captured for next release: (1) immediate poll on `POST /api/routes` (currently waits for next cron tick), (2) persist nearby-airport "evaluated" list to DB so `/deal/{id}` alternatives table renders, (3) update R7 verification report MV-5/6/7/8 to "superseded by web app".
 
 ### [ITEM-D15] Real Cost Restoration (v0.9.0)
 - **Status:** Done — ITEM-051 shipped 2026-05-09 as one coherent release covering all 4 Telegram message types. Includes: unified `_format_cost_breakdown` helper across deal alert / error fare / follow-up / daily digest, SerpAPI baggage parsing + display via new `src/utils/baggage.py` module (subsumes [ITEM-037]), "we checked X airports/dates" transparency footer (kills silent omission below €75 nearby savings threshold), `Watching 👀` button on alerts and digest, per-route snooze (`routes.snoozed_until`) with auto-snooze on `booked` feedback + `/snooze` `/unsnooze` commands, structured 3-bullet scorer reasoning JSON contract with backward compat, fingerprint-gated daily digest skip with concrete "what moved" header, callback prefix consolidation (`deal:*` / `route:*`) with legacy aliases, `/status` command, and `📊 Details` button placeholder for [ITEM-049] Mini Web App. Suite: 311 → 420 (+109 R7 tests). T19 integration test caught a real ship-blocker (`deal_info["route_id"]` missing) that 416 unit tests had passed. Code-review fixes: clamped `route:snooze` callback `days` to `[1, 365]` (security-relevant; negative values would un-snooze), removed unnecessary defensive shims (`getattr`/`hasattr` for methods defined in same release).

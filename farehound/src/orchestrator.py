@@ -138,6 +138,10 @@ class Orchestrator:
                 reload_callback=self.reload_routes,
             )
 
+        # Mini Web App (FastAPI) — runs alongside the bot in the same event loop.
+        # Disabled when FAREHOUND_WEB_PORT="0".
+        self._web_task: asyncio.Task | None = None
+
     async def reload_routes(self) -> None:
         """Re-sync routes from DB so polling picks up bot-added/removed routes."""
         logger.info("Reloading routes from database")
@@ -257,6 +261,13 @@ class Orchestrator:
             self._trip_bot_task.add_done_callback(self._on_task_done)
             logger.info("TripBot command handler started")
 
+        # Start Mini Web App (FastAPI) — same event loop, shared DB connection.
+        web_port = int(os.environ.get("FAREHOUND_WEB_PORT", "8081") or "0")
+        if web_port > 0:
+            self._web_task = asyncio.create_task(self._run_web(web_port))
+            self._web_task.add_done_callback(self._on_task_done)
+            logger.info("Mini Web App listening on port %d", web_port)
+
         self.scheduler.start()
         logger.info("Orchestrator started")
 
@@ -276,6 +287,23 @@ class Orchestrator:
         exc = task.exception()
         if exc:
             logger.error("Background task crashed: %s", exc, exc_info=exc)
+
+    async def _run_web(self, port: int) -> None:
+        """Run the FastAPI Mini Web App via uvicorn in the current event loop."""
+        try:
+            import uvicorn  # imported lazily so unit tests don't require it
+            from src.web.app import create_app
+        except ImportError as e:
+            logger.warning("Mini Web App disabled — missing deps: %s", e)
+            return
+        app = create_app(
+            db=self.db,
+            anthropic_key=self.config.anthropic.api_key,
+            anthropic_model=self.config.anthropic.model,
+        )
+        uconfig = uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None, lifespan="on")
+        server = uvicorn.Server(uconfig)
+        await server.serve()
 
     async def _check_pending_feedback(self) -> None:
         """Send follow-up messages for deals alerted 3+ days ago with no feedback."""
