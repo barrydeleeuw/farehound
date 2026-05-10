@@ -231,50 +231,9 @@ class TestSettingsEndpoint:
         assert resp.status_code == 400
 
 
-class TestCreateRoute:
-    def test_create_route(self, client, db, seeded):
-        resp = client.post(
-            "/api/routes",
-            json={
-                "origin": "AMS",
-                "destination": "ICN",
-                "earliest_departure": "2026-10-01",
-                "latest_return": "2026-10-15",
-                "passengers": 2,
-            },
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert "route_id" in body
-        # And it shows up in the list
-        list_resp = client.get("/routes")
-        assert "AMS → ICN" in list_resp.text
-
-    def test_create_rejects_short_iata(self, client):
-        resp = client.post(
-            "/api/routes",
-            json={"origin": "AM", "destination": "NRT"},  # AM is invalid
-        )
-        assert resp.status_code == 400
-
-
-class TestParseEndpoint:
-    def test_parse_returns_400_on_empty_text(self, client):
-        resp = client.post("/api/routes/parse", json={"text": ""})
-        assert resp.status_code == 400
-
-    def test_parse_503_when_no_anthropic_key(self, client):
-        # Fixture sets anthropic_key=None; should return 503
-        resp = client.post("/api/routes/parse", json={"text": "Tokyo for 2 weeks"})
-        assert resp.status_code == 503
-
-    def test_parse_rejects_oversized_text(self, client):
-        # CR-2 regression: cap input at 500 chars to prevent abuse via valid
-        # initData (which is good for 24h).
-        long_text = "Tokyo " * 200  # ~1200 chars
-        resp = client.post("/api/routes/parse", json={"text": long_text})
-        assert resp.status_code == 400
-        assert "too long" in resp.json()["detail"].lower()
+# Trip creation is bot-only (multi-turn /trip flow). The Mini Web App's
+# /routes page sends users back to chat for adds — it has no /api/routes (POST)
+# or /api/routes/parse endpoint. See routes.html.j2's "Back to chat" CTA.
 
 
 # ---------- Auth gate (verify the bypass actually works in this test setup) ----------

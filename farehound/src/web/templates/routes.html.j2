@@ -10,39 +10,17 @@
     {% if summary.last_poll_label %} · last poll {{ summary.last_poll_label }}{% endif %}
   </p>
 
-  <form class="add-route-form" id="add-trip-form" autocomplete="off">
-    <input
-      class="add-route"
-      type="text"
-      id="add-trip-input"
-      placeholder="Add a trip — e.g. Seoul for 2 weeks in October"
-      aria-label="Add a trip in plain language"
-      required
-    />
-    <button type="submit" class="add-route-submit" aria-label="Parse trip">Add</button>
-  </form>
-
-  <section class="parse-confirm" id="parse-confirm" hidden>
-    <div class="parse-confirm-status" id="pc-status">Parsed</div>
-    <h3 class="parse-confirm-name" id="pc-name">—</h3>
-    <p class="parse-confirm-meta" id="pc-meta">—</p>
-
-    <!-- Clarification UI: shown when Claude returned needs_clarification=true,
-         e.g. "Japan" → "did you mean NRT, KIX, or NGO?" -->
-    <div id="pc-clarify" hidden style="margin-top: 14px;">
-      <p class="parse-confirm-note" id="pc-clarify-question" style="font-style:normal; color: var(--warning);"></p>
-      <div id="pc-clarify-options" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;"></div>
-    </div>
-
-    <p class="parse-confirm-note">
-      Claude turned your text into this trip. <a href="#" id="pc-show-original">view original</a>
+  <!-- Add-a-trip CTA — closes the Mini App and sends the user back to chat,
+       where the bot's multi-turn /trip flow handles disambiguation properly. -->
+  <section class="add-trip-cta">
+    <p class="add-trip-cta-lede">
+      To add a trip, message the bot in chat. Try:
     </p>
-    <p class="parse-confirm-original" id="pc-original" hidden></p>
-    <div class="parse-confirm-actions">
-      <button class="action" id="pc-confirm">Confirm &amp; monitor</button>
-      <button class="action" id="pc-edit">Edit text</button>
-      <button class="action danger" id="pc-cancel">Cancel</button>
-    </div>
+    <p class="add-trip-cta-example">"Tokyo for 2 weeks in October"</p>
+    <p class="add-trip-cta-lede" style="margin-top: 6px;">
+      I'll ask any clarifying questions and confirm before saving.
+    </p>
+    <button class="action" id="add-trip-back-to-chat" type="button">← Back to chat</button>
   </section>
 
   <div id="routes-list">
@@ -98,164 +76,14 @@
 
 {% block scripts %}
 <script>
-  (function () {
-    const form = document.getElementById("add-trip-form");
-    const input = document.getElementById("add-trip-input");
-    const card = document.getElementById("parse-confirm");
-    const pcName = document.getElementById("pc-name");
-    const pcMeta = document.getElementById("pc-meta");
-    const pcOriginal = document.getElementById("pc-original");
-    const pcShowOriginal = document.getElementById("pc-show-original");
-    const list = document.getElementById("routes-list");
-    let lastInput = "";
-    let lastParsed = null;
-
-    function el(tag, className, text) {
-      const node = document.createElement(tag);
-      if (className) node.className = className;
-      if (text != null) node.textContent = text;
-      return node;
+  // The "Back to chat" CTA closes the Mini App so the user lands in chat,
+  // where the bot's /trip flow handles disambiguation properly.
+  document.getElementById("add-trip-back-to-chat")?.addEventListener("click", () => {
+    if (window.Telegram?.WebApp?.close) {
+      window.Telegram.WebApp.close();
+    } else {
+      alert("Open the Telegram chat with FareHound to add a trip.");
     }
-
-    async function callApi(path, body) {
-      const headers = { "content-type": "application/json" };
-      const initData = window.Telegram?.WebApp?.initData;
-      if (initData) headers["x-telegram-init-data"] = initData;
-      const resp = await fetch(path, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body || {}),
-      });
-      if (!resp.ok) {
-        let msg = `HTTP ${resp.status}`;
-        try { const j = await resp.json(); if (j.detail) msg = j.detail; } catch (_) {}
-        throw new Error(msg);
-      }
-      return resp.json();
-    }
-
-    function renderParsed(parsed, originalText) {
-      pcName.textContent = `${parsed.origin || "?"} → ${parsed.destination || "?"}`;
-      const dur = parsed.trip_duration_days ? `${parsed.trip_duration_days} days` : "dates flexible";
-      const dates = parsed.earliest_departure ? `${parsed.earliest_departure} → ${parsed.latest_return}` : dur;
-      pcMeta.textContent = `${parsed.city || parsed.destination || "—"} · ${dates} · ${parsed.passengers || 2} pax`;
-      pcOriginal.textContent = `"${originalText}"`;
-      pcOriginal.hidden = true;
-      pcShowOriginal.textContent = "view original";
-
-      // Clarification path: Claude needs disambiguation before we can save.
-      const clarifyBlock = document.getElementById("pc-clarify");
-      const clarifyQ = document.getElementById("pc-clarify-question");
-      const clarifyOpts = document.getElementById("pc-clarify-options");
-      const status = document.getElementById("pc-status");
-      const confirmBtn = document.getElementById("pc-confirm");
-
-      const needsClarify = parsed.needs_clarification === true || !parsed.destination;
-
-      clarifyOpts.replaceChildren();
-      if (needsClarify) {
-        status.textContent = "Needs clarification";
-        status.style.color = "var(--warning)";
-        confirmBtn.disabled = true;
-        confirmBtn.style.opacity = "0.4";
-        confirmBtn.title = "Pick a destination first";
-
-        clarifyQ.textContent = parsed.clarification_question
-          || (parsed.destination
-              ? "Confirm the destination."
-              : "Couldn't pin down the destination — try again with a clearer phrase like \"flight to Valencia in June\".");
-
-        const opts = Array.isArray(parsed.options) ? parsed.options : [];
-        opts.forEach((opt) => {
-          const btn = document.createElement("button");
-          btn.className = "action";
-          btn.type = "button";
-          btn.style.borderBottomColor = "var(--warning)";
-          btn.textContent = opt;
-          btn.addEventListener("click", () => {
-            // Try to extract IATA from the option string, e.g. "Tenerife South (TFS)" → "TFS"
-            const iataMatch = String(opt).match(/\(([A-Z]{3})\)/);
-            const iata = iataMatch ? iataMatch[1] : String(opt).trim().toUpperCase().slice(0, 3);
-            parsed.destination = iata;
-            parsed.needs_clarification = false;
-            parsed.options = null;
-            renderParsed(parsed, originalText);
-          });
-          clarifyOpts.appendChild(btn);
-        });
-        clarifyBlock.hidden = false;
-      } else {
-        status.textContent = "Parsed";
-        status.style.color = "var(--positive)";
-        confirmBtn.disabled = false;
-        confirmBtn.style.opacity = "";
-        confirmBtn.title = "";
-        clarifyBlock.hidden = true;
-      }
-    }
-
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const text = input.value.trim();
-      if (!text) return;
-      lastInput = text;
-      try {
-        const parsed = await callApi("/api/routes/parse", { text });
-        lastParsed = parsed;
-        renderParsed(parsed, text);
-        card.hidden = false;
-        card.scrollIntoView({ behavior: "smooth", block: "center" });
-      } catch (err) {
-        if (window.Telegram?.WebApp?.showAlert) window.Telegram.WebApp.showAlert(`Parse failed: ${err.message}`);
-        else alert(`Parse failed: ${err.message}`);
-      }
-    });
-
-    pcShowOriginal.addEventListener("click", (e) => {
-      e.preventDefault();
-      const open = !pcOriginal.hidden;
-      pcOriginal.hidden = open;
-      pcShowOriginal.textContent = open ? "view original" : "hide original";
-    });
-
-    document.getElementById("pc-cancel").addEventListener("click", () => { card.hidden = true; });
-    document.getElementById("pc-edit").addEventListener("click", () => {
-      card.hidden = true; input.focus(); input.select();
-    });
-
-    document.getElementById("pc-confirm").addEventListener("click", async () => {
-      if (!lastParsed) return;
-      if (!lastParsed.destination) {
-        const msg = "Pick a destination above first — Claude couldn't pin it down on its own.";
-        if (window.Telegram?.WebApp?.showAlert) window.Telegram.WebApp.showAlert(msg);
-        else alert(msg);
-        return;
-      }
-      try {
-        const result = await callApi("/api/routes", lastParsed);
-        const ordinal = String(list.querySelectorAll(".route-card").length + 1).padStart(2, "0");
-        const article = el("article", "route-card is-pending");
-        article.dataset.routeId = result.route_id;
-        article.appendChild(el("div", "ordinal", `${ordinal} · NEW`));
-        article.appendChild(el("h2", "name", `${lastParsed.origin || "?"} → ${lastParsed.destination || "?"}`));
-        const meta = lastParsed.city || lastParsed.destination || "";
-        const dur = lastParsed.trip_duration_days ? `${lastParsed.trip_duration_days} days` : "dates flexible";
-        article.appendChild(el("div", "meta-line", `${meta} · ${dur} · ${lastParsed.passengers || 2} pax`));
-        const priceRow = el("div", "price-row");
-        priceRow.appendChild(el("span", "price pending", "checking prices…"));
-        article.appendChild(priceRow);
-        article.appendChild(el("div", "footnote", "first poll runs on the next cycle"));
-        list.prepend(article);
-        card.hidden = true;
-        input.value = "";
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-          window.Telegram.WebApp.HapticFeedback.notificationOccurred("success");
-        }
-      } catch (err) {
-        if (window.Telegram?.WebApp?.showAlert) window.Telegram.WebApp.showAlert(`Add failed: ${err.message}`);
-        else alert(`Add failed: ${err.message}`);
-      }
-    });
-  })();
+  });
 </script>
 {% endblock %}

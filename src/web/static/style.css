@@ -644,6 +644,33 @@ body.in-telegram .main-button {
   letter-spacing: 0.02em;
 }
 
+/* Add-trip CTA — points user back to chat. Replaces the inline parse form. */
+.add-trip-cta {
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+  padding: 22px 0;
+  margin-bottom: 36px;
+  text-align: center;
+}
+
+.add-trip-cta-lede {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.add-trip-cta-example {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--text);
+  margin: 8px 0 0;
+}
+
+.add-trip-cta button {
+  margin-top: 14px;
+}
+
 .add-route-form {
   display: flex;
   align-items: stretch;
