@@ -288,6 +288,68 @@ def test_deal_page_wires_nearby_alternatives_when_secondaries_polled(db_with_use
     assert len(best) == 1
 
 
+def test_alternatives_primary_total_matches_hero(db_with_user):
+    """v0.11.7: AMS row in Alternatives table must include baggage so its
+    total matches the deal-page hero (€400 party / €200 pp). Pre-fix the
+    Alternatives row was €280 (flights+transport only — bagagge missing)."""
+    from src.storage.models import PriceSnapshot, Route, Deal
+    from src.web.data import assemble_deal
+
+    # Custom seed so we control baggage_estimate too.
+    route = Route(
+        route_id="r1", origin="AMS", destination="VLC", passengers=2,
+        earliest_departure=date(2026, 6, 8), latest_return=date(2026, 6, 22),
+        user_id="u1",
+    )
+    db_with_user.upsert_route(route)
+    snapshot = PriceSnapshot(
+        snapshot_id="s1", route_id="r1",
+        observed_at=datetime.now(UTC), source="serpapi", passengers=2,
+        outbound_date=date(2026, 6, 8), return_date=date(2026, 6, 22),
+        lowest_price=258.0,  # €129/pp × 2
+        baggage_estimate={
+            "outbound": {"carry_on": 0, "checked": 30},
+            "return": {"carry_on": 0, "checked": 30},
+        },  # one_checked → 30 + 30 = 60/pp × 2 = 120 party
+        user_id="u1",
+    )
+    db_with_user.insert_snapshot(snapshot, user_id="u1")
+    deal = Deal(
+        deal_id="d1", snapshot_id="s1", route_id="r1",
+        score=0.9, urgency="high", reasoning="x",
+        user_id="u1", alert_sent_at=datetime.now(UTC),
+    )
+    db_with_user.insert_deal(deal, user_id="u1")
+    # Train at AMS — €5.50 one-way per pp → €11/pp RT × 2 = €22 party.
+    db_with_user.add_transport_option(
+        user_id="u1", airport_code="AMS", mode="train",
+        cost_eur=5.5, cost_scales_with_pax=True,
+    )
+    # Seed a secondary BRU snapshot so the alternatives section actually renders.
+    db_with_user.insert_snapshot(
+        PriceSnapshot(
+            snapshot_id="s2", route_id="r1",
+            observed_at=datetime.now(UTC), source="serpapi", passengers=2,
+            outbound_date=date(2026, 6, 8), return_date=date(2026, 6, 22),
+            lowest_price=400.0,
+            search_params={"origin": "BRU"},
+            user_id="u1",
+        ),
+        user_id="u1",
+    )
+
+    payload = assemble_deal(db_with_user, deal_id="d1", user_id="u1")
+    # Hero / breakdown total: 258 + 120 + 22 = 400 party → 200 /pp.
+    assert payload["breakdown"]["total_party_display"] == "400"
+    assert payload["price_pp_display"] == "200"
+
+    # AMS row in Alternatives must equal 400 (party total) — same math.
+    ams_row = next(r for r in payload["alternatives"]["airports"] if r["code"] == "AMS")
+    assert ams_row["total_display"] == "400", (
+        f"Pre-v0.11.7 this was 280 (missing baggage). Got {ams_row['total_display']}."
+    )
+
+
 def test_deal_page_says_yours_is_best_when_no_savings(db_with_user):
     """v0.11.5: secondaries exist but none are cheaper → bullet should say
     'your airport is best, checked X alternatives' not 'no alternate origins'."""
