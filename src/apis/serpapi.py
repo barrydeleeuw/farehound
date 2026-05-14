@@ -584,6 +584,65 @@ def generate_date_windows(
     return windows
 
 
+def generate_date_windows_with_duration_flex(
+    earliest_departure: date,
+    latest_return: date,
+    trip_duration_days: int,
+    trip_duration_flex_days: int = 0,
+    max_windows: int = 6,
+) -> list[tuple[date, date]]:
+    """Generate (outbound, return) windows across two axes: departure date
+    AND trip length.
+
+    Why this exists: a user who says "2 weeks departing Jun 8" often gets
+    cheaper fares by returning a couple days earlier (12-day trip) —
+    Saturday returns are typically cheaper than Monday returns. The
+    fixed-duration `generate_date_windows` only ever samples trips of
+    *exactly* `trip_duration_days`, so it misses those entirely and
+    surfaces a higher "best" price than the user can find by hand on
+    Google Flights with the same flexibility.
+
+    Trip-length sampling is one-sided — we sample at the requested length
+    and (when flex > 0) at length − flex (clamped to ≥1 day), but never
+    LONGER than requested. Most users who say "2 weeks" mean "up to 2
+    weeks" (work, kids, pets); a shorter Saturday return is often cheaper
+    than the matching Monday return, so we want to catch those without
+    inflating the trip itself.
+
+    Default split with `max_windows=6` and `flex>0`: 3 departure dates ×
+    2 trip lengths = 6 distinct (outbound, return) pairs. With
+    `flex=0` this collapses to `generate_date_windows` at the configured
+    length.
+    """
+    durations: list[int] = [trip_duration_days]
+    if trip_duration_flex_days > 0:
+        shorter = max(1, trip_duration_days - trip_duration_flex_days)
+        if shorter != trip_duration_days:
+            durations.append(shorter)
+
+    per_duration = max(1, max_windows // len(durations))
+
+    candidates: list[tuple[date, date]] = []
+    seen: set[tuple[date, date]] = set()
+    for dur in durations:
+        try:
+            sub = generate_date_windows(
+                earliest_departure, latest_return, dur,
+                max_windows=per_duration,
+            )
+        except ValueError:
+            # This trip length doesn't fit the user's date range; skip
+            # silently rather than dropping the whole route.
+            continue
+        for w in sub:
+            if w not in seen:
+                seen.add(w)
+                candidates.append(w)
+
+    candidates.sort(key=lambda w: (w[0], w[1]))
+    return candidates
+
+
 def build_google_flights_url(
     origin: str,
     destination: str,

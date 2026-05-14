@@ -15,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.alerts.telegram import TelegramNotifier
 from src.analysis.nearby_airports import compare_airports
 from src.analysis.scorer import DealScorer, reasoning_to_bullets
-from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows, pick_representative_flight
+from src.apis.serpapi import SerpAPIBudgetExhausted, SerpAPIClient, SerpAPIError, VerificationResult, extract_lowest_price, extract_min_duration, generate_date_windows, generate_date_windows_with_duration_flex, pick_representative_flight
 from src.bot.commands import TripBot
 from src.config import AppConfig, Route as ConfigRoute, load_config
 from src.storage.db import Database
@@ -28,8 +28,12 @@ logger = logging.getLogger("farehound.orchestrator")
 DEFAULT_TRIP_DURATION_DAYS = 14
 # How often to do a full rescan of all windows (days)
 FULL_RESCAN_INTERVAL_DAYS = 7
-# Max windows per route for initial scan
-DEFAULT_MAX_WINDOWS = 2
+# Max windows per route for initial scan. With trip-duration flex enabled
+# (route.date_flex_days > 0) this is split across 2 trip lengths — 6 → 3
+# departure dates × 2 trip lengths. Subsequent polls focus on the cheapest
+# window via _select_windows, so steady-state API cost is unchanged; only
+# first scans and weekly rescans pay the higher cost.
+DEFAULT_MAX_WINDOWS = 6
 # Percentage drop below average that triggers an alert (used as pre-filter and static fallback)
 DROP_PERCENT_THRESHOLD = 0.15
 # Minimum snapshots before we have enough history to skip Claude scoring
@@ -386,10 +390,15 @@ class Orchestrator:
                     max_windows=DEFAULT_MAX_WINDOWS,
                 )
             else:
-                return generate_date_windows(
+                # Pass date_flex_days so we also sample shorter/longer trips —
+                # catches the case where a 12-day return is dramatically cheaper
+                # than a 14-day return (Saturday vs Monday return), which the
+                # fixed-duration path would otherwise miss.
+                return generate_date_windows_with_duration_flex(
                     earliest_departure=route.earliest_departure,
                     latest_return=route.latest_return,
                     trip_duration_days=trip_duration,
+                    trip_duration_flex_days=route.date_flex_days or 0,
                     max_windows=DEFAULT_MAX_WINDOWS,
                 )
         except ValueError as e:
