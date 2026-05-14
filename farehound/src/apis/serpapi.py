@@ -584,6 +584,63 @@ def generate_date_windows(
     return windows
 
 
+def generate_date_windows_with_duration_flex(
+    earliest_departure: date,
+    latest_return: date,
+    trip_duration_days: int,
+    trip_duration_flex_days: int = 0,
+    max_windows: int = 4,
+) -> list[tuple[date, date]]:
+    """Generate (outbound, return) windows that also vary the trip length.
+
+    Why this exists: a user who says "2 weeks departing Jun 8" often gets
+    cheaper fares by returning a couple days earlier (12-day trip) — Saturday
+    returns are typically cheaper than Monday returns. The fixed-duration
+    `generate_date_windows` only ever samples trips of *exactly*
+    `trip_duration_days`, so it misses those combinations entirely and
+    surfaces a higher "best" price than the user can find by hand on Google
+    Flights with the same flexibility.
+
+    When `trip_duration_flex_days > 0`, this also samples 1 window each at
+    `trip_duration_days ± flex` (clamped to fit), in addition to the
+    `max_windows` windows at the requested duration. Windows are deduped and
+    sorted by outbound date.
+
+    When `trip_duration_flex_days == 0` this is equivalent to
+    `generate_date_windows`.
+    """
+    candidates: list[tuple[date, date]] = []
+    seen: set[tuple[date, date]] = set()
+
+    def _add(windows: list[tuple[date, date]]) -> None:
+        for w in windows:
+            if w not in seen:
+                seen.add(w)
+                candidates.append(w)
+
+    _add(generate_date_windows(
+        earliest_departure, latest_return, trip_duration_days,
+        max_windows=max_windows,
+    ))
+
+    if trip_duration_flex_days > 0:
+        for delta in (trip_duration_flex_days, -trip_duration_flex_days):
+            alt_duration = trip_duration_days + delta
+            if alt_duration < 1:
+                continue
+            try:
+                _add(generate_date_windows(
+                    earliest_departure, latest_return, alt_duration,
+                    max_windows=1,
+                ))
+            except ValueError:
+                # Alt duration doesn't fit the date range; skip silently.
+                continue
+
+    candidates.sort(key=lambda w: (w[0], w[1]))
+    return candidates
+
+
 def build_google_flights_url(
     origin: str,
     destination: str,

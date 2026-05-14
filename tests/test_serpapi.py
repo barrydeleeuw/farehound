@@ -11,6 +11,7 @@ from src.apis.serpapi import (
     FlightSearchResult,
     VerificationResult,
     generate_date_windows,
+    generate_date_windows_with_duration_flex,
     build_google_flights_url,
 )
 
@@ -72,6 +73,75 @@ def test_generate_date_windows_exact_fit():
     )
     assert len(windows) == 1
     assert windows[0] == (date(2026, 10, 1), date(2026, 10, 15))
+
+
+# --- generate_date_windows_with_duration_flex ---
+
+def test_duration_flex_zero_matches_baseline():
+    """flex=0 should behave identically to generate_date_windows."""
+    baseline = generate_date_windows(
+        earliest_departure=date(2026, 6, 6),
+        latest_return=date(2026, 6, 24),
+        trip_duration_days=14,
+        max_windows=2,
+    )
+    flexed = generate_date_windows_with_duration_flex(
+        earliest_departure=date(2026, 6, 6),
+        latest_return=date(2026, 6, 24),
+        trip_duration_days=14,
+        trip_duration_flex_days=0,
+        max_windows=2,
+    )
+    assert sorted(flexed) == sorted(baseline)
+
+
+def test_duration_flex_adds_shorter_and_longer_trips():
+    """The AMS→VLC bug scenario: 'two weeks departing Jun 8' with ±3 flex
+    should also poll 11-day and 17-day options, so the Sat-return combo
+    (Jun 8 → Jun 20, 12 days) is reachable in the candidate set."""
+    windows = generate_date_windows_with_duration_flex(
+        earliest_departure=date(2026, 6, 6),
+        latest_return=date(2026, 6, 24),
+        trip_duration_days=14,
+        trip_duration_flex_days=3,
+        max_windows=2,
+    )
+    durations = {(r - o).days for o, r in windows}
+    assert 14 in durations
+    # Shorter and longer variants both sampled when they fit in the range.
+    assert 11 in durations or 17 in durations
+    # No duplicates.
+    assert len(windows) == len(set(windows))
+    # Sorted by outbound.
+    assert windows == sorted(windows, key=lambda w: (w[0], w[1]))
+
+
+def test_duration_flex_skips_durations_that_dont_fit():
+    """If a flexed duration is longer than the available range, it's skipped
+    instead of raising — the configured duration still gets sampled."""
+    windows = generate_date_windows_with_duration_flex(
+        earliest_departure=date(2026, 6, 6),
+        latest_return=date(2026, 6, 20),
+        trip_duration_days=14,
+        trip_duration_flex_days=7,
+        max_windows=1,
+    )
+    # 21-day variant doesn't fit (only 14 days of range); 7-day does.
+    durations = {(r - o).days for o, r in windows}
+    assert 14 in durations
+    assert 21 not in durations
+
+
+def test_duration_flex_clamps_to_minimum_one_day():
+    """Don't produce zero- or negative-length trips when flex exceeds duration."""
+    windows = generate_date_windows_with_duration_flex(
+        earliest_departure=date(2026, 6, 1),
+        latest_return=date(2026, 6, 30),
+        trip_duration_days=2,
+        trip_duration_flex_days=5,
+        max_windows=1,
+    )
+    assert all((r - o).days >= 1 for o, r in windows)
 
 
 # --- build_google_flights_url ---
