@@ -28,8 +28,12 @@ logger = logging.getLogger("farehound.orchestrator")
 DEFAULT_TRIP_DURATION_DAYS = 14
 # How often to do a full rescan of all windows (days)
 FULL_RESCAN_INTERVAL_DAYS = 7
-# Max windows per route for initial scan
-DEFAULT_MAX_WINDOWS = 2
+# Max windows per route for initial scan. With trip-duration flex enabled
+# (route.date_flex_days > 0) this is split across 2 trip lengths — 6 → 3
+# departure dates × 2 trip lengths. Subsequent polls focus on the cheapest
+# window via _select_windows, so steady-state API cost is unchanged; only
+# first scans and weekly rescans pay the higher cost.
+DEFAULT_MAX_WINDOWS = 6
 # Percentage drop below average that triggers an alert (used as pre-filter and static fallback)
 DROP_PERCENT_THRESHOLD = 0.15
 # Minimum snapshots before we have enough history to skip Claude scoring

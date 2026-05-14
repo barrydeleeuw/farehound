@@ -95,41 +95,60 @@ def test_duration_flex_zero_matches_baseline():
     assert sorted(flexed) == sorted(baseline)
 
 
-def test_duration_flex_adds_shorter_and_longer_trips():
+def test_duration_flex_adds_shorter_trips_but_never_longer():
     """The AMS→VLC bug scenario: 'two weeks departing Jun 8' with ±3 flex
-    should also poll 11-day and 17-day options, so the Sat-return combo
-    (Jun 8 → Jun 20, 12 days) is reachable in the candidate set."""
+    should also poll 11-day options, so the Sat-return combo (Jun 8 →
+    Jun 20, 12 days) is reachable in the candidate set. We never sample
+    trips LONGER than the configured duration — most users who say
+    '2 weeks' mean 'up to 2 weeks', not 'fine with 3 weeks'."""
     windows = generate_date_windows_with_duration_flex(
         earliest_departure=date(2026, 6, 6),
         latest_return=date(2026, 6, 24),
         trip_duration_days=14,
         trip_duration_flex_days=3,
-        max_windows=2,
+        max_windows=6,
     )
     durations = {(r - o).days for o, r in windows}
     assert 14 in durations
-    # Shorter and longer variants both sampled when they fit in the range.
-    assert 11 in durations or 17 in durations
+    assert 11 in durations
+    # Never sample longer than the configured trip length.
+    assert max(durations) <= 14
     # No duplicates.
     assert len(windows) == len(set(windows))
     # Sorted by outbound.
     assert windows == sorted(windows, key=lambda w: (w[0], w[1]))
 
 
+def test_duration_flex_six_windows_default():
+    """Default split: 3 departure dates × 2 trip lengths = 6 distinct combos
+    when the date range comfortably fits both lengths."""
+    windows = generate_date_windows_with_duration_flex(
+        earliest_departure=date(2026, 6, 1),
+        latest_return=date(2026, 7, 1),
+        trip_duration_days=14,
+        trip_duration_flex_days=3,
+        max_windows=6,
+    )
+    assert len(windows) == 6
+    durations = {(r - o).days for o, r in windows}
+    assert durations == {14, 11}
+
+
 def test_duration_flex_skips_durations_that_dont_fit():
-    """If a flexed duration is longer than the available range, it's skipped
-    instead of raising — the configured duration still gets sampled."""
+    """If the configured duration fits but the flexed one doesn't (or vice
+    versa), the helper skips silently rather than raising."""
+    # Configured 14 days fits in a 14-day range exactly; shorter 7 days
+    # also fits — both should be sampled.
     windows = generate_date_windows_with_duration_flex(
         earliest_departure=date(2026, 6, 6),
         latest_return=date(2026, 6, 20),
         trip_duration_days=14,
         trip_duration_flex_days=7,
-        max_windows=1,
+        max_windows=6,
     )
-    # 21-day variant doesn't fit (only 14 days of range); 7-day does.
     durations = {(r - o).days for o, r in windows}
     assert 14 in durations
-    assert 21 not in durations
+    assert 7 in durations
 
 
 def test_duration_flex_clamps_to_minimum_one_day():
@@ -139,7 +158,7 @@ def test_duration_flex_clamps_to_minimum_one_day():
         latest_return=date(2026, 6, 30),
         trip_duration_days=2,
         trip_duration_flex_days=5,
-        max_windows=1,
+        max_windows=6,
     )
     assert all((r - o).days >= 1 for o, r in windows)
 
